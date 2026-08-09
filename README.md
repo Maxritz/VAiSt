@@ -95,14 +95,36 @@ vkblas_sgemm(ctx, cmd, VKBLAS_OP_N, VKBLAS_OP_N,
              &beta, bufC, ldc, bufD, ldd);
 ```
 
+### VKMath (implemented)
+
+Elementwise activations, binary ops, and dimension-wise reductions as Vulkan
+compute dispatches. Mirrors the VKBLAS context/pipeline-caching pattern.
+
+| Function | Description |
+|----------|-------------|
+| `vkmath_relu_f32/f16` | ReLU activation |
+| `vkmath_silu_f32/f16` | SiLU (Swish) activation |
+| `vkmath_gelu_f32/f16` | GELU (tanh approx) activation |
+| `vkmath_tanh_f32/f16` | Hyperbolic tangent |
+| `vkmath_sigmoid_f32/f16` | Sigmoid |
+| `vkmath_add_f32/f16`, `vkmath_mul_f32/f16` | Elementwise binary ops |
+| `vkmath_add_mul_f32/f16` | Fused `(a+b)*alpha` |
+| `vkmath_scale_f32/f16` | `alpha * in` |
+| `vkmath_max_reduce_dim_f32`, `vkmath_sum_reduce_dim_f32` | Row reductions |
+
+All work records into a caller-supplied `VkCommandBuffer`; pipelines are
+created lazily and cached. Descriptor binding uses push descriptors when
+available, otherwise a context-owned descriptor pool.
+
 ### In Progress
 
 The following components are scaffolded but not yet implemented:
 
 - **VKFFT** — Plan-based FFT for multiple precisions
 - **VKRAND** — PRNG generators (Philox, ThreeFry) and distribution sampling
-- **VKMath** — Elementwise ops (add, silu, soft_max, gelu, etc.)
 - **VKQuant** — Q4_K, Q6_K, Q8_0, IQ4_XS dequantization shaders
+- **VKBLAS non-f32 GEMMs** — f16/bf16/f64/int8 GEMM shaders (public API
+  stubs return `VK_ERROR_FEATURE_NOT_PRESENT` until the shaders land)
 - **LLM engine integration** — Transformer layer pipeline, KV caching,
   token sampling
 

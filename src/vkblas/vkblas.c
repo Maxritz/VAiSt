@@ -13,6 +13,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 /* ── Specialization constant values ──────────────────────────────────────── */
 
@@ -58,6 +59,7 @@ static const uint32_t* vkblas_select_spirv(VkBLASContext* ctx,
                                            VkBLASTier_t tier,
                                            size_t* out_size)
 {
+    (void)ctx;
     if (data_type != VKBLAS_DTYPE_F32) {
         /* Only f32 is implemented in this iteration */
         return NULL;
@@ -82,6 +84,7 @@ static const uint32_t* vkblas_select_spirv(VkBLASContext* ctx,
 
 static void vkblas_fill_sc_data(uint32_t* data, VkBLASTier_t tier)
 {
+    (void)tier;
     data[0] = VKBLAS_TILE_M;   /* constant_id 0 */
     data[1] = VKBLAS_TILE_N;   /* constant_id 1 */
     data[2] = VKBLAS_TILE_K;   /* constant_id 2 */
@@ -108,7 +111,7 @@ VkResult vkblas_load_shader_module(VkDevice device,
         .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
         .pNext    = NULL,
         .flags    = 0,
-        .codeSize = spirv_words * sizeof(uint32_t),
+        .codeSize = spirv_words,
         .pCode    = spirv,
     };
     return vkCreateShaderModule(device, &smci, NULL, out_module);
@@ -440,16 +443,16 @@ VkResult vkblas_init_capabilities(VkBLASContext* ctx, VkPhysicalDevice pd)
         VkPhysicalDeviceSubgroupProperties subgroup_props = {
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
         };
-        VkPhysicalDeviceProperties props2 = {
+        VkPhysicalDeviceProperties2 props2 = {
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
             .pNext = &subgroup_props,
         };
         vkGetPhysicalDeviceProperties2(pd, &props2);
         ctx->max_subgroup_size = subgroup_props.subgroupSize;
         ctx->has_subgroup = (subgroup_props.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) ? VK_TRUE : VK_FALSE;
-        ctx->max_compute_workgroup_size[0] = props2.properties.limits.maxComputeWorkgroupSize[0];
-        ctx->max_compute_workgroup_size[1] = props2.properties.limits.maxComputeWorkgroupSize[1];
-        ctx->max_compute_workgroup_size[2] = props2.properties.limits.maxComputeWorkgroupSize[2];
+        ctx->max_compute_workgroup_size[0] = props2.properties.limits.maxComputeWorkGroupSize[0];
+        ctx->max_compute_workgroup_size[1] = props2.properties.limits.maxComputeWorkGroupSize[1];
+        ctx->max_compute_workgroup_size[2] = props2.properties.limits.maxComputeWorkGroupSize[2];
     }
 
     /* Check for cooperative matrix support */
@@ -700,14 +703,115 @@ VkResult vkblas_sgemm_batched(VkBLASContext*    context,
     return VK_SUCCESS;
 }
 
-/* ── Stub implementations for non-f32 variants (filled later) ────────────── */
+/* ── Non-f32 GEMM variants ────────────────────────────────────────────────── *
+ * Only the f32 (sgemm) shader tier exists so far. The remaining public GEMM
+ * family members are defined here so the public API surface links, but they
+ * return VK_ERROR_FEATURE_NOT_PRESENT until their shaders are written.
+ * ─────────────────────────────────────────────────────────────────────────── */
 
-#define VKBLAS_STUB_NOT_IMPL(fn, dt_name) \
-    fn { \
-        (void)context; (void)cmd; \
-        return VK_ERROR_FEATURE_NOT_PRESENT; \
-    }
+VkResult vkblas_dgemm(VkBLASContext* context, VkCommandBuffer cmd,
+                      VkBLASOperation_t transA, VkBLASOperation_t transB,
+                      int32_t m, int32_t n, int32_t k, const double* alpha,
+                      VkBuffer A, int32_t lda, VkBuffer B, int32_t ldb,
+                      const double* beta, VkBuffer C, int32_t ldc,
+                      VkBuffer D, int32_t ldd) {
+    (void)context; (void)cmd; (void)transA; (void)transB; (void)m; (void)n;
+    (void)k; (void)alpha; (void)A; (void)lda; (void)B; (void)ldb;
+    (void)beta; (void)C; (void)ldc; (void)D; (void)ldd;
+    return VK_ERROR_FEATURE_NOT_PRESENT;
+}
 
-/* Note: dgemm, hgemm, bgemm, gemm_ex variants are stubbed here and
-   will be implemented when the corresponding shaders are written.
-   They return VK_ERROR_FEATURE_NOT_PRESENT until then. */
+VkResult vkblas_dgemm_strided_batched(VkBLASContext* context, VkCommandBuffer cmd,
+                                      VkBLASOperation_t transA, VkBLASOperation_t transB,
+                                      int32_t m, int32_t n, int32_t k, const double* alpha,
+                                      VkBuffer A, int32_t lda, int64_t strideA,
+                                      VkBuffer B, int32_t ldb, int64_t strideB,
+                                      const double* beta, VkBuffer C, int32_t ldc, int64_t strideC,
+                                      VkBuffer D, int32_t ldd, int64_t strideD, int32_t batchCount) {
+    (void)context; (void)cmd; (void)transA; (void)transB; (void)m; (void)n; (void)k;
+    (void)alpha; (void)A; (void)lda; (void)strideA; (void)B; (void)ldb; (void)strideB;
+    (void)beta; (void)C; (void)ldc; (void)strideC; (void)D; (void)ldd; (void)strideD; (void)batchCount;
+    return VK_ERROR_FEATURE_NOT_PRESENT;
+}
+
+VkResult vkblas_hgemm(VkBLASContext* context, VkCommandBuffer cmd,
+                      VkBLASOperation_t transA, VkBLASOperation_t transB,
+                      int32_t m, int32_t n, int32_t k, const uint16_t* alpha,
+                      VkBuffer A, int32_t lda, VkBuffer B, int32_t ldb,
+                      const uint16_t* beta, VkBuffer C, int32_t ldc,
+                      VkBuffer D, int32_t ldd) {
+    (void)context; (void)cmd; (void)transA; (void)transB; (void)m; (void)n;
+    (void)k; (void)alpha; (void)A; (void)lda; (void)B; (void)ldb;
+    (void)beta; (void)C; (void)ldc; (void)D; (void)ldd;
+    return VK_ERROR_FEATURE_NOT_PRESENT;
+}
+
+VkResult vkblas_hgemm_strided_batched(VkBLASContext* context, VkCommandBuffer cmd,
+                                      VkBLASOperation_t transA, VkBLASOperation_t transB,
+                                      int32_t m, int32_t n, int32_t k, const uint16_t* alpha,
+                                      VkBuffer A, int32_t lda, int64_t strideA,
+                                      VkBuffer B, int32_t ldb, int64_t strideB,
+                                      const uint16_t* beta, VkBuffer C, int32_t ldc, int64_t strideC,
+                                      VkBuffer D, int32_t ldd, int64_t strideD, int32_t batchCount) {
+    (void)context; (void)cmd; (void)transA; (void)transB; (void)m; (void)n; (void)k;
+    (void)alpha; (void)A; (void)lda; (void)strideA; (void)B; (void)ldb; (void)strideB;
+    (void)beta; (void)C; (void)ldc; (void)strideC; (void)D; (void)ldd; (void)strideD; (void)batchCount;
+    return VK_ERROR_FEATURE_NOT_PRESENT;
+}
+
+VkResult vkblas_bgemm(VkBLASContext* context, VkCommandBuffer cmd,
+                      VkBLASOperation_t transA, VkBLASOperation_t transB,
+                      int32_t m, int32_t n, int32_t k, const uint16_t* alpha,
+                      VkBuffer A, int32_t lda, VkBuffer B, int32_t ldb,
+                      const uint16_t* beta, VkBuffer C, int32_t ldc,
+                      VkBuffer D, int32_t ldd) {
+    (void)context; (void)cmd; (void)transA; (void)transB; (void)m; (void)n;
+    (void)k; (void)alpha; (void)A; (void)lda; (void)B; (void)ldb;
+    (void)beta; (void)C; (void)ldc; (void)D; (void)ldd;
+    return VK_ERROR_FEATURE_NOT_PRESENT;
+}
+
+VkResult vkblas_bgemm_strided_batched(VkBLASContext* context, VkCommandBuffer cmd,
+                                      VkBLASOperation_t transA, VkBLASOperation_t transB,
+                                      int32_t m, int32_t n, int32_t k, const uint16_t* alpha,
+                                      VkBuffer A, int32_t lda, int64_t strideA,
+                                      VkBuffer B, int32_t ldb, int64_t strideB,
+                                      const uint16_t* beta, VkBuffer C, int32_t ldc, int64_t strideC,
+                                      VkBuffer D, int32_t ldd, int64_t strideD, int32_t batchCount) {
+    (void)context; (void)cmd; (void)transA; (void)transB; (void)m; (void)n; (void)k;
+    (void)alpha; (void)A; (void)lda; (void)strideA; (void)B; (void)ldb; (void)strideB;
+    (void)beta; (void)C; (void)ldc; (void)strideC; (void)D; (void)ldd; (void)strideD; (void)batchCount;
+    return VK_ERROR_FEATURE_NOT_PRESENT;
+}
+
+VkResult vkblas_gemm_ex(VkBLASContext* context, VkCommandBuffer cmd,
+                        VkBLASOperation_t transA, VkBLASOperation_t transB,
+                        int32_t m, int32_t n, int32_t k, const void* alpha,
+                        VkBuffer A, int32_t lda, size_t strideA_element,
+                        VkBuffer B, int32_t ldb, size_t strideB_element,
+                        const void* beta, VkBuffer C, int32_t ldc, size_t strideC_element,
+                        VkBuffer D, int32_t ldd, size_t strideD_element,
+                        VkBLASComputeType_t computeType, VkBLASGemmFlags_t flags) {
+    (void)context; (void)cmd; (void)transA; (void)transB; (void)m; (void)n; (void)k;
+    (void)alpha; (void)A; (void)lda; (void)strideA_element; (void)B; (void)ldb; (void)strideB_element;
+    (void)beta; (void)C; (void)ldc; (void)strideC_element; (void)D; (void)ldd; (void)strideD_element;
+    (void)computeType; (void)flags;
+    return VK_ERROR_FEATURE_NOT_PRESENT;
+}
+
+VkResult vkblas_gemm_ex_strided_batched(VkBLASContext* context, VkCommandBuffer cmd,
+                                        VkBLASOperation_t transA, VkBLASOperation_t transB,
+                                        int32_t m, int32_t n, int32_t k, const void* alpha,
+                                        VkBuffer A, int32_t lda, int64_t strideA, size_t strideA_element,
+                                        VkBuffer B, int32_t ldb, int64_t strideB, size_t strideB_element,
+                                        const void* beta, VkBuffer C, int32_t ldc, int64_t strideC, size_t strideC_element,
+                                        VkBuffer D, int32_t ldd, int64_t strideD, size_t strideD_element,
+                                        int32_t batchCount, VkBLASComputeType_t computeType, VkBLASGemmFlags_t flags) {
+    (void)context; (void)cmd; (void)transA; (void)transB; (void)m; (void)n; (void)k;
+    (void)alpha; (void)A; (void)lda; (void)strideA; (void)strideA_element;
+    (void)B; (void)ldb; (void)strideB; (void)strideB_element;
+    (void)beta; (void)C; (void)ldc; (void)strideC; (void)strideC_element;
+    (void)D; (void)ldd; (void)strideD; (void)strideD_element;
+    (void)batchCount; (void)computeType; (void)flags;
+    return VK_ERROR_FEATURE_NOT_PRESENT;
+}

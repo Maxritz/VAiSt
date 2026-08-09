@@ -11,6 +11,12 @@
 
 #include "vkblas.h"  /* public types: VkBLASPointerMode_t, etc. */
 
+/* ── Data type constants ────────────────────────────────────────────────── */
+#define VKBLAS_DTYPE_F32 0
+#define VKBLAS_DTYPE_F16 1
+#define VKBLAS_DTYPE_BF16 2
+#define VKBLAS_DTYPE_I8   3
+
 /* ── Push constant block (must match GLSL push_constant layout, std140) ── */
 
 typedef struct {
