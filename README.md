@@ -1,3 +1,5 @@
+<img width="1255" height="539" alt="VAiSt1" src="https://github.com/user-attachments/assets/d4ac1269-0679-409f-b6c1-7aad39aa5959" />
+
 A Vulkan compute AI stack, built from scratch, implementing BLAS, FFT, RNG and 
 math primitives for AMD RDNA2 (gfx103x) and RDNA4 (gfx1201) GPUs, and really 
 any GPU that speaks Vulkan 1.4.
