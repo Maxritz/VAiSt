@@ -25,7 +25,7 @@ layout(push_constant) uniform PC {
     uint n;          // FFT size (power of two, 2..1024)
     uint log2n;      // log2(n)
     uint direction;  // 0 = forward, 1 = inverse
-    uint _pad;
+    uint mode;       // 0 = row (stride 1), 1 = col (stride n)
 } pc;
 
 layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn  { float16_t in_data[]; };
@@ -53,14 +53,19 @@ void main() {
     uint tid = gl_LocalInvocationID.x;
     uint iters = (pc.n + 255u) / 256u;
 
+    // Buffer slice: base = first element of the slice, stride = element step.
+    // Row: base = wg*n, stride 1. Col: base = wg, stride n.
+    uint base   = (pc.mode == 0u) ? gl_WorkGroupID.x * pc.n : gl_WorkGroupID.x;
+    uint stride = (pc.mode == 0u) ? 1u : pc.n;
+
     // Load with bit-reversal permutation (f16 -> f32, interleaved Re/Im).
     for (uint e = 0u; e < iters; e++) {
         uint idx = tid + e * 256u;
         if (idx < pc.n) {
-            uint base = 2u * idx;
+            uint buf_idx = base + idx * stride;
             s[bit_reverse(idx, pc.log2n)] = vec2(
-                float(in_data[base]),
-                float(in_data[base + 1u]));
+                float(in_data[2u * buf_idx]),
+                float(in_data[2u * buf_idx + 1u]));
         }
     }
     barrier();
@@ -94,9 +99,9 @@ void main() {
     for (uint e = 0u; e < iters; e++) {
         uint idx = tid + e * 256u;
         if (idx < pc.n) {
-            uint base = 2u * idx;
-            out_data[base]      = float16_t(s[idx].x);
-            out_data[base + 1u] = float16_t(s[idx].y);
+            uint buf_idx = base + idx * stride;
+            out_data[2u * buf_idx]      = float16_t(s[idx].x);
+            out_data[2u * buf_idx + 1u] = float16_t(s[idx].y);
         }
     }
 }

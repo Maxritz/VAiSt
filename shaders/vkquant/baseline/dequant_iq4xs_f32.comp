@@ -1,0 +1,65 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// IQ4_XS block dequantization to f32 (ggml block_iq4_xs, 136 bytes/block).
+// Layout: ggml_half d (2B LE), uint16_t scales_h (2B LE), uint8_t scales_l[4],
+//         uint8_t qs[128]. QK_K = 256 elements per block.
+// Dequant (canonical ggml dequantize_row_iq4_xs):
+//   8 groups of 32. For group ib:
+//     ls = ((scales_l[ib/2] >> 4*(ib&1)) & 0xF) | (((scales_h >> 2*ib) & 3) << 4)
+//     dl = d * (ls - 32)
+//     y[j]    = dl * iq4nl[qs[j] & 0xF]   (j in 0..15: low nibbles)
+//     y[j+16] = dl * iq4nl[qs[j] >> 4]    (high nibbles)
+// iq4nl = non-linear 4-bit lookup (kvalues_iq4nl from ggml-common.h).
+// One thread per output element; block = idx >> 8, lane = idx & 255.
+
+const int iq4nl[16] = int[](
+    -127, -104, -83, -65, -49, -35, -22, -10,
+      1,   13,  25,  38,  53,  69,  89, 113
+);
+
+layout(push_constant) uniform PC {
+    uint num_blocks;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn {
+    uint8_t raw[];
+};
+layout(scalar, set = 0, binding = 2) writeonly buffer BufOut {
+    float out_f32[];
+};
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = pc.num_blocks * 256u;
+    if (idx >= total) { return; }
+
+    uint block = idx >> 8;
+    uint lane  = idx & 255u;
+    uint base  = block * 136u;
+
+    uint d_bits = uint(raw[base]) | (uint(raw[base + 1u]) << 8u);
+    float d = unpackHalf2x16(d_bits).x;
+
+    uint scales_h = uint(raw[base + 2u]) | (uint(raw[base + 3u]) << 8u);
+
+    uint ib   = lane >> 5;           /* group 0..7                            */
+    uint j    = lane & 15u;          /* qs byte within group                  */
+    uint hi   = (lane >> 4) & 1u;    /* 0: low 16 elems, 1: high 16 elems     */
+
+    uint ls_l = (uint(raw[base + 4u + (ib >> 1u)]) >> (4u * (ib & 1u))) & 0xFu;
+    uint ls_h = (scales_h >> (2u * ib)) & 3u;
+    int  ls   = int(ls_l | (ls_h << 4u));
+    float dl  = d * float(ls - 32);
+
+    uint qbyte = uint(raw[base + 8u + ib * 16u + j]);
+    uint nib = (hi != 0u) ? (qbyte >> 4u) : (qbyte & 0xFu);
+
+    out_f32[idx] = dl * float(iq4nl[nib]);
+}

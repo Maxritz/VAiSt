@@ -11,9 +11,11 @@ Child of root `AGENTS.md` and `include/vkquant/AGENTS.md`.
 - No malloc per lookup; fixed-size cache array in context struct
 
 ### Capability detection at context creation
-- Mirrors `vkmath_init_capabilities`: queries `shaderInt64`, subgroup
-  properties, and cooperative-matrix features via pNext chains
-- Only baseline shaders exist; `ensure_pipeline` falls back to baseline
+Delegated to VKRuntime's `vkr_detect_capabilities()` (see `src/vkruntime/`):
+vkquant links vkruntime and calls it once in `vkquant_create_context` to fill
+the context's capability fields and `active_tier`. Only baseline shaders exist;
+`ensure_pipeline` falls back to baseline. The public
+`vkquant_init_capabilities()` re-detects via the same helper.
 
 ### SPIR-V embedding
 - Shader SPIR-V compiled to C arrays (`shaders_spv.h`) by `compile_shaders.ps1`
@@ -42,6 +44,22 @@ Binding 0 = quantized input (bytes), binding 2 = dequantized output (f32).
 - **Q4_0**: 20 bytes/block — f32 scale `d` (bytes 0..3) + 16 packed-nibble
   uint8 (bytes 4..19). `xi = qs[i>>1]`; `nibble = (i&1) ? xi>>4 : xi&0xF`;
   `out[i] = d * ((int)nibble - 8)`.
+- **Q4_K** (dequant, 144 B/256 elems): ggml `block_q4_K` — f16 `d`,`dmin`,
+  `scales[12]`, `qs[128]`. Per-32-group scale/min decode via ggml
+  `get_scale_min_k4`; `out = d*sc*nib - dmin*mn`.
+- **Q6_K** (dequant, 210 B/256 elems): ggml `block_q6_K` — `ql[128]`,
+  `qh[64]`, int8 `scales[16]`, f16 `d`. `out = d*sc*((ql4|qh2<<4)-32)`.
+- **IQ4_XS** (dequant, 136 B/256 elems): ggml `block_iq4_xs` — f16 `d`,
+  u16 `scales_h`, `scales_l[4]`, `qs[128]`, plus `kvalues_iq4nl` LUT.
+- **Quantize** (Q8_0/Q4_0 forward): f32 source -> our f32-scale formats.
+
+## Kernel ids
+
+| Kernel | id | Dispatch |
+|--------|----|----------|
+| dequant_q8_0 / q4_0 | 0 / 1 | `ceil(32*blocks/256)` |
+| dequant_q4k / q6k / iq4xs | 2 / 3 / 4 | `num_blocks` (256 elems/block) |
+| quantize_q8_0 / q4_0 | 5 / 6 | `ceil(num_blocks/8)` (8 blocks/wg) |
 
 ## Files
 

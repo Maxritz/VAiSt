@@ -10,6 +10,9 @@
  *   2. f32 inverse round-trip: n = 8, 16 — forward then inverse recovers the
  *      original signal scaled by n (unnormalized inverse, rocfft default).
  *   3. f16 forward: n = 16 (tolerance 1e-2), against a CPU f16 reference.
+ *   4. 2D separable forward: N = 4, 8 (N x N grids) against a CPU 2D DFT
+ *      reference (rows then columns, double precision; tolerance 1e-3), plus
+ *      a 2D inverse round trip recovering the input scaled by N*N.
  *
  * This is a header-only test: it includes only <vulkan/vulkan.h> and the
  * public vkfft.h header (relative include). No internal headers are pulled.
@@ -44,6 +47,10 @@
 
 static const uint32_t TEST_SIZES[] = { 8u, 16u, 32u, 512u, 1024u };
 #define TEST_SIZE_COUNT (sizeof(TEST_SIZES) / sizeof(TEST_SIZES[0]))
+
+/* 2D grid dimensions (N x N separable transform). */
+static const uint32_t TEST_2D_SIZES[] = { 4u, 8u };
+#define TEST_2D_SIZE_COUNT (sizeof(TEST_2D_SIZES) / sizeof(TEST_2D_SIZES[0]))
 
 /* ===========================================================================
  * Harness state
@@ -109,6 +116,31 @@ typedef struct {
     float *expected16;          /**< CPU f16 reference (2*n floats).        */
     float *expected16_inv;      /**< CPU f16 round-trip reference.          */
 } fft_case_t;
+
+/**
+ * \brief One 2D FFT test case: plan, sub-buffers, and mapped-region offsets.
+ *
+ * The buffer holds an N x N row-major grid of interleaved (Re, Im) pairs
+ * (2*N*N floats). Every case runs a forward f32 transform (in -> out) and a
+ * forward+inverse round trip (out -> out_inv) expected to recover the input
+ * scaled by N*N (unnormalized inverse over both axes).
+ */
+typedef struct {
+    VkFFTPlan *plan;
+    VkBuffer in;
+    VkBuffer out;
+    VkBuffer out_inv;
+    VkDeviceSize off_in;
+    VkDeviceSize off_out;
+    VkDeviceSize off_readback;
+    VkDeviceSize off_expected;
+    VkDeviceSize off_out_inv;
+    VkDeviceSize off_readback_inv;
+    VkDeviceSize off_expected_inv;
+    uint32_t n;                 /**< Grid dimension N.                      */
+    float *expected;            /**< CPU 2D DFT reference (2*N*N floats).   */
+    float *expected_inv;        /**< CPU 2D round-trip reference.           */
+} fft2d_case_t;
 
 /* ===========================================================================
  * Bootstrap helpers
@@ -380,6 +412,35 @@ static VkResult setup_case(VkDevice device, VkDeviceMemory mem,
     return VK_SUCCESS;
 }
 
+/**
+ * \brief Reserve input/output/readback/expected regions for one 2D case.
+ *
+ * Forward regions hold 2*N*N floats each; the round trip adds an inverse
+ * output plus its readback/expected regions (the same 2*N*N-float size).
+ */
+static VkResult setup_case_2d(VkDevice device, VkDeviceMemory mem,
+                              VkDeviceSize *cursor, VkDeviceSize align,
+                              uint32_t n, fft2d_case_t *c)
+{
+    c->n = n;
+    VkDeviceSize bytes = (VkDeviceSize)(2u * n * n) * sizeof(float);
+
+    c->off_in            = take_region(cursor, align, bytes);
+    c->off_out           = take_region(cursor, align, bytes);
+    c->off_readback      = take_region(cursor, align, bytes);
+    c->off_expected      = take_region(cursor, align, bytes);
+    c->off_out_inv       = take_region(cursor, align, bytes);
+    c->off_readback_inv  = take_region(cursor, align, bytes);
+    c->off_expected_inv  = take_region(cursor, align, bytes);
+
+    VkResult r = create_sub_buffer(device, mem, c->off_in, bytes, &c->in);
+    if (r != VK_SUCCESS) return r;
+    r = create_sub_buffer(device, mem, c->off_out, bytes, &c->out);
+    if (r != VK_SUCCESS) return r;
+    r = create_sub_buffer(device, mem, c->off_out_inv, bytes, &c->out_inv);
+    return r;
+}
+
 /* ===========================================================================
  * f16 helpers
  * ========================================================================== */
@@ -478,6 +539,56 @@ static void compute_dft_reference(uint32_t n, const float *in, float *out)
         out[2u * k]     = (float)re;
         out[2u * k + 1u] = (float)im;
     }
+}
+
+/**
+ * \brief Compute the forward 2D DFT reference for an N x N grid, separably.
+ *
+ * X[k][l] = sum_c sum_r x[r][c] exp(-2*pi*i*(r*k + c*l)/N). Evaluated as N
+ * row DFTs (over c) followed by N column DFTs (over r), both naive O(N^3)
+ * sums in double precision, cast to float at the end. The input is row-major
+ * interleaved (Re, Im): element (r, c) lives at in[2*(r*N+c)].
+ */
+static void compute_2d_dft_reference(uint32_t n, const float *in, float *out)
+{
+    /* rows[r][k] = DFT_c(in[r][c]) at frequency k. */
+    double *rows = (double *)malloc(2u * n * n * sizeof(double));
+    if (!rows) {
+        memset(out, 0, 2u * n * n * sizeof(float));
+        return;
+    }
+    for (uint32_t r = 0; r < n; r++) {
+        for (uint32_t k = 0; k < n; k++) {
+            double re = 0.0, im = 0.0;
+            for (uint32_t c = 0; c < n; c++) {
+                double angle = -2.0 * TEST_PI * (double)c * (double)k / (double)n;
+                double cr = cos(angle), si = sin(angle);
+                double xr = in[2u * (r * n + c)];
+                double xi = in[2u * (r * n + c) + 1u];
+                re += xr * cr - xi * si;
+                im += xr * si + xi * cr;
+            }
+            rows[2u * (r * n + k)]      = re;
+            rows[2u * (r * n + k) + 1u] = im;
+        }
+    }
+    /* out[k][l] = DFT_r(rows[r][l]) at frequency k. */
+    for (uint32_t l = 0; l < n; l++) {
+        for (uint32_t k = 0; k < n; k++) {
+            double re = 0.0, im = 0.0;
+            for (uint32_t r = 0; r < n; r++) {
+                double angle = -2.0 * TEST_PI * (double)r * (double)k / (double)n;
+                double cr = cos(angle), si = sin(angle);
+                double xr = rows[2u * (r * n + l)];
+                double xi = rows[2u * (r * n + l) + 1u];
+                re += xr * cr - xi * si;
+                im += xr * si + xi * cr;
+            }
+            out[2u * (k * n + l)]      = (float)re;
+            out[2u * (k * n + l) + 1u] = (float)im;
+        }
+    }
+    free(rows);
 }
 
 /**
@@ -606,6 +717,9 @@ int main(void)
 
     fft_case_t cases[TEST_SIZE_COUNT];
     memset(cases, 0, sizeof(cases));
+
+    fft2d_case_t cases2d[TEST_2D_SIZE_COUNT];
+    memset(cases2d, 0, sizeof(cases2d));
 
     int overall_pass = 1;
     VkResult r;
@@ -769,6 +883,53 @@ int main(void)
         }
     }
 
+    /* ── 8b. Build one 2D case per grid dimension ─────────────────────── */
+    for (uint32_t c = 0; c < TEST_2D_SIZE_COUNT; c++) {
+        uint32_t n = TEST_2D_SIZES[c];
+        r = setup_case_2d(h.device, h.mem, &h.cursor, h.align, n, &cases2d[c]);
+        if (r != VK_SUCCESS) {
+            fprintf(stderr, "test_vkfft: setup_case_2d(N=%u) failed (%d)\n",
+                    n, (int)r);
+            goto cleanup;
+        }
+        cases2d[c].expected = (float *)malloc(2u * n * n * sizeof(float));
+        cases2d[c].expected_inv = (float *)malloc(2u * n * n * sizeof(float));
+        if (!cases2d[c].expected || !cases2d[c].expected_inv) {
+            fprintf(stderr, "test_vkfft: malloc failed (2D)\n");
+            goto cleanup;
+        }
+        r = vkfft_create_plan_2d(h.physical_device, h.device, n,
+                                 &cases2d[c].plan);
+        if (r != VK_SUCCESS) {
+            fprintf(stderr, "test_vkfft: vkfft_create_plan_2d(N=%u) failed (%d)\n",
+                    n, (int)r);
+            goto cleanup;
+        }
+
+        /* Known signal: sum of two plane waves. */
+        float *in = (float *)((char *)h.mapped + cases2d[c].off_in);
+        for (uint32_t rr = 0; rr < n; rr++) {
+            for (uint32_t cc = 0; cc < n; cc++) {
+                uint32_t e = rr * n + cc;
+                in[2u * e] = cosf(2.0f * (float)TEST_PI *
+                                  (2.0f * (float)rr + 3.0f * (float)cc) / (float)n);
+                in[2u * e + 1u] = sinf(2.0f * (float)TEST_PI *
+                                       (1.0f * (float)rr + 4.0f * (float)cc) / (float)n);
+            }
+        }
+        compute_2d_dft_reference(n, in, cases2d[c].expected);
+        memcpy((char *)h.mapped + cases2d[c].off_expected,
+               cases2d[c].expected, 2u * n * n * sizeof(float));
+
+        /* Round trip: inverse_2d(forward_2d(x)) == N*N*x (unnormalized). */
+        for (uint32_t j = 0; j < 2u * n * n; j++) {
+            cases2d[c].expected_inv[j] =
+                (float)((double)n * (double)n * (double)in[j]);
+        }
+        memcpy((char *)h.mapped + cases2d[c].off_expected_inv,
+               cases2d[c].expected_inv, 2u * n * n * sizeof(float));
+    }
+
     printf("test_vkfft: device ready (arch=%s, tier=%u, staging=%u)\n",
            vkfft_get_arch_name(cases[0].plan), vkfft_get_arch_index(cases[0].plan),
            (unsigned)TEST_STAGING_SIZE);
@@ -793,6 +954,14 @@ int main(void)
             cases[c].n);
     }
 
+    /* 9a2. Forward 2D f32 (N x N). Rows then columns, barrier between. */
+    for (uint32_t c = 0; c < TEST_2D_SIZE_COUNT; c++) {
+        overall_pass &= record_dispatch("2d_fwd_f32",
+            vkfft_execute_2d_f32(cases2d[c].plan, h.cmd,
+                                 cases2d[c].in, cases2d[c].out),
+            cases2d[c].n);
+    }
+
     /* 9b. Forward f16 (n=16). No dependency on the f32 results. */
     for (uint32_t c = 0; c < TEST_SIZE_COUNT; c++) {
         if (!cases[c].has_f16) continue;
@@ -812,6 +981,14 @@ int main(void)
             vkfft_execute_inverse_f32(cases[c].plan, h.cmd,
                                       cases[c].out, cases[c].out_inv),
             cases[c].n);
+    }
+
+    /* 9d2. Inverse 2D f32 round trips: inverse(forward(x)) == N*N*x. */
+    for (uint32_t c = 0; c < TEST_2D_SIZE_COUNT; c++) {
+        overall_pass &= record_dispatch("2d_inv_f32",
+            vkfft_execute_2d_inverse_f32(cases2d[c].plan, h.cmd,
+                                         cases2d[c].out, cases2d[c].out_inv),
+            cases2d[c].n);
     }
 
     /* 9e. Inverse f16 round trip (n=16): reads the f16 forward output. */
@@ -843,6 +1020,15 @@ int main(void)
                                  cases[c].off_readback16_inv,
                                  2u * cases[c].n * sizeof(uint16_t));
         }
+    }
+
+    for (uint32_t c = 0; c < TEST_2D_SIZE_COUNT; c++) {
+        record_copy_readback(h.cmd, cases2d[c].out, h.staging,
+                             cases2d[c].off_readback,
+                             2u * cases2d[c].n * cases2d[c].n * sizeof(float));
+        record_copy_readback(h.cmd, cases2d[c].out_inv, h.staging,
+                             cases2d[c].off_readback_inv,
+                             2u * cases2d[c].n * cases2d[c].n * sizeof(float));
     }
 
     r = vkEndCommandBuffer(h.cmd);
@@ -906,6 +1092,21 @@ int main(void)
         }
     }
 
+    for (uint32_t c = 0; c < TEST_2D_SIZE_COUNT; c++) {
+        char name[32];
+        snprintf(name, sizeof(name), "fft2d_fwd_n%u", cases2d[c].n);
+        overall_pass &= check_output(name, h.mapped, cases2d[c].off_readback,
+                                     cases2d[c].expected,
+                                     2u * cases2d[c].n * cases2d[c].n,
+                                     TEST_F32_TOLERANCE);
+        float tol = TEST_F32_TOLERANCE * (float)cases2d[c].n * (float)cases2d[c].n;
+        snprintf(name, sizeof(name), "fft2d_inv_n%u", cases2d[c].n);
+        overall_pass &= check_output(name, h.mapped, cases2d[c].off_readback_inv,
+                                     cases2d[c].expected_inv,
+                                     2u * cases2d[c].n * cases2d[c].n,
+                                     tol);
+    }
+
 cleanup:
     for (uint32_t c = 0; c < TEST_SIZE_COUNT; c++) {
         if (cases[c].plan) vkfft_destroy_plan(cases[c].plan);
@@ -919,6 +1120,14 @@ cleanup:
         free(cases[c].expected_inv);
         free(cases[c].expected16);
         free(cases[c].expected16_inv);
+    }
+    for (uint32_t c = 0; c < TEST_2D_SIZE_COUNT; c++) {
+        if (cases2d[c].plan) vkfft_destroy_plan(cases2d[c].plan);
+        if (cases2d[c].in)      vkDestroyBuffer(h.device, cases2d[c].in, NULL);
+        if (cases2d[c].out)     vkDestroyBuffer(h.device, cases2d[c].out, NULL);
+        if (cases2d[c].out_inv) vkDestroyBuffer(h.device, cases2d[c].out_inv, NULL);
+        free(cases2d[c].expected);
+        free(cases2d[c].expected_inv);
     }
     if (h.staging) vkDestroyBuffer(h.device, h.staging, NULL);
     if (h.mapped)  vkUnmapMemory(h.device, h.mem);

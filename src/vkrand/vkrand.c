@@ -265,42 +265,6 @@ static uint32_t elem_to_groups(uint32_t count) {
     return g ? g : 1;
 }
 
-/* ── Capability detection ────────────────────────────────────────────────── */
-
-VkResult vkrand_init_capabilities(VkRandContext *ctx, VkPhysicalDevice pd) {
-    /* shaderInt64 feature (queried for parity; the shaders do not use it) */
-    VkPhysicalDeviceFeatures2 features2;
-    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    features2.pNext = NULL;
-    vkGetPhysicalDeviceFeatures2(pd, &features2);
-
-    ctx->has_shader_int64 = features2.features.shaderInt64 ? VK_TRUE : VK_FALSE;
-
-    /* Subgroup properties via pNext chain */
-    VkPhysicalDeviceSubgroupProperties subgroup_props;
-    subgroup_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
-    subgroup_props.pNext = NULL;
-
-    VkPhysicalDeviceProperties2 props2;
-    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-    props2.pNext = &subgroup_props;
-    vkGetPhysicalDeviceProperties2(pd, &props2);
-
-    ctx->max_subgroup_size = subgroup_props.subgroupSize;
-    memcpy(ctx->max_compute_workgroup_size,
-           props2.properties.limits.maxComputeWorkGroupSize,
-           sizeof(ctx->max_compute_workgroup_size));
-
-    /* Subgroup is a core Vulkan 1.3+ feature; supportedStages gates compute */
-    ctx->has_subgroup = (subgroup_props.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT)
-                        ? VK_TRUE : VK_FALSE;
-
-    /* Only a baseline shader exists; clamp the active tier to baseline. */
-    ctx->active_tier = VKRAND_TIER_BASELINE;
-
-    return VK_SUCCESS;
-}
-
 /* ── Context lifecycle ──────────────────────────────────────────────────── */
 
 VkResult vkrand_create_context(VkPhysicalDevice pd, VkDevice device,
@@ -311,13 +275,22 @@ VkResult vkrand_create_context(VkPhysicalDevice pd, VkDevice device,
     if (!ctx) return VK_ERROR_OUT_OF_HOST_MEMORY;
     ctx->device = device;
 
-    VkResult r = vkrand_init_capabilities(ctx, pd);
+    /* Capability detection + push-desc fn load via VKRuntime (single
+       implementation; was five inline copies). */
+    VkRuntimeCaps caps;
+    VkResult r = vkr_detect_capabilities(pd, device, &caps);
     if (r != VK_SUCCESS) { free(ctx); return r; }
 
-    /* Load push descriptor function pointer */
-    ctx->push_desc_fn = (PFN_vkCmdPushDescriptorSetKHR)
-        vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSetKHR");
-    ctx->has_push_descriptor = ctx->push_desc_fn ? VK_TRUE : VK_FALSE;
+    ctx->has_shader_int64 = caps.has_shader_int64;
+    ctx->has_subgroup     = caps.has_subgroup;
+    ctx->max_subgroup_size = caps.subgroup_size;
+    memcpy(ctx->max_compute_workgroup_size, caps.max_workgroup_size,
+           sizeof(ctx->max_compute_workgroup_size));
+    ctx->push_desc_fn = caps.push_desc_fn;
+    ctx->has_push_descriptor = caps.has_push_descriptor;
+
+    /* Only a baseline shader exists; clamp the active tier to baseline. */
+    ctx->active_tier = VKRAND_TIER_BASELINE;
 
     /* Descriptor set layout: 1 SSBO binding (write) at binding 2 — matches
        the shader exactly (layout declares what the shader uses). */
@@ -339,22 +312,15 @@ VkResult vkrand_create_context(VkPhysicalDevice pd, VkDevice device,
     r = vkCreateDescriptorSetLayout(device, &dslci, NULL, &ctx->set_layout);
     if (r != VK_SUCCESS) { free(ctx); return r; }
 
-    /* Pipeline layout: 1 descriptor set + 16-byte push constant range */
+    /* Pipeline layout: 1 descriptor set + 16-byte push constant range
+       (push-constant range is lib-specific, stays local). */
     VkPushConstantRange pc_range;
     pc_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     pc_range.offset = 0;
     pc_range.size = sizeof(vkrand_push_constants_t); /* 16 bytes */
 
-    VkPipelineLayoutCreateInfo plci;
-    plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    plci.pNext = NULL;
-    plci.flags = 0;
-    plci.setLayoutCount = 1;
-    plci.pSetLayouts = &ctx->set_layout;
-    plci.pushConstantRangeCount = 1;
-    plci.pPushConstantRanges = &pc_range;
-
-    r = vkCreatePipelineLayout(device, &plci, NULL, &ctx->pipeline_layout);
+    r = vkr_create_pipeline_layout(device, ctx->set_layout, 1, &pc_range,
+                                   &ctx->pipeline_layout);
     if (r != VK_SUCCESS) {
         vkDestroyDescriptorSetLayout(device, ctx->set_layout, NULL);
         free(ctx);
@@ -362,13 +328,7 @@ VkResult vkrand_create_context(VkPhysicalDevice pd, VkDevice device,
     }
 
     /* Pipeline cache (driver-level, accelerates lazy pipeline creation) */
-    VkPipelineCacheCreateInfo pcci;
-    pcci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-    pcci.pNext = NULL;
-    pcci.flags = 0;
-    pcci.initialDataSize = 0;
-    pcci.pInitialData = NULL;
-    r = vkCreatePipelineCache(device, &pcci, NULL, &ctx->pipeline_cache);
+    r = vkr_create_pipeline_cache(device, &ctx->pipeline_cache);
     if (r != VK_SUCCESS) {
         vkDestroyPipelineLayout(device, ctx->pipeline_layout, NULL);
         vkDestroyDescriptorSetLayout(device, ctx->set_layout, NULL);
@@ -378,19 +338,9 @@ VkResult vkrand_create_context(VkPhysicalDevice pd, VkDevice device,
 
     /* Descriptor pool only needed for non-push-descriptor fallback */
     if (!ctx->has_push_descriptor) {
-        VkDescriptorPoolSize pool_sizes[1];
-        pool_sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        pool_sizes[0].descriptorCount = VKRAND_MAX_PIPELINES;
-
-        VkDescriptorPoolCreateInfo dpci;
-        dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        dpci.pNext = NULL;
-        dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        dpci.maxSets = VKRAND_MAX_PIPELINES;
-        dpci.poolSizeCount = 1;
-        dpci.pPoolSizes = pool_sizes;
-
-        r = vkCreateDescriptorPool(device, &dpci, NULL, &ctx->descriptor_pool);
+        r = vkr_create_descriptor_pool(device, VKRAND_MAX_PIPELINES,
+                                       VKRAND_MAX_PIPELINES,
+                                       &ctx->descriptor_pool);
         if (r != VK_SUCCESS) {
             vkDestroyPipelineCache(device, ctx->pipeline_cache, NULL);
             vkDestroyPipelineLayout(device, ctx->pipeline_layout, NULL);

@@ -18,9 +18,14 @@ Only the baseline tier exists today. `vkfft_ensure_pipeline` walks the try
 order coop -> subgroup -> baseline and always lands on the baseline blob.
 
 ### File naming
-- `fft_f32.comp` — forward/inverse radix-2 complex FFT, f32 I/O.
+- `fft_f32.comp` — forward/inverse radix-2 complex FFT, f32 I/O. Serves both the
+  1D path (dispatch (1,1,1)) and the N x N separable 2D path: `pc.mode`
+  selects the buffer slice each workgroup transforms (0 = row: base = wg*n,
+  stride 1; 1 = col: base = wg, stride n). One workgroup per row/column.
 - `fft_f16.comp` — forward/inverse radix-2 complex FFT, f16 I/O (f32 internal
-  compute; `GL_EXT_shader_explicit_arithmetic_types` + `layout(scalar)`).
+  compute; `GL_EXT_shader_explicit_arithmetic_types` + `layout(scalar)`). Same
+  push-constant block as fft_f32.comp (`mode` included) but mode is always 0
+  in the public API (no 2D f16 path yet).
 
 ## Kernel contract
 
@@ -36,10 +41,14 @@ order coop -> subgroup -> baseline and always lands on the baseline blob.
   log2(n) radix-2 stages with a workgroup barrier between stages. Twiddles
   `exp(dir * 2*pi*i*j/m)` computed on the fly with `cos`/`sin`, where
   `dir = -1` for forward and `+1` for inverse (conjugate twiddles).
+- The buffer slice is selected by `pc.mode`: row mode reads/writes element
+  `base + idx*stride` with `base = wg*n`, `stride = 1`; column mode uses
+  `base = wg`, `stride = n`. Both operate on shared memory indexed by the
+  local FFT element index `idx`, so the butterfly stages are identical.
 - Direction is selected at runtime via `pc.direction` (0 = forward,
   1 = inverse); both precisions share one shader each. The inverse is
   unnormalized (rocfft default), so forward-then-inverse recovers the original
-  signal scaled by n.
+  signal scaled by n (1D) or N*N (2D, one unnormalized pass per axis).
 - f16 shaders use `layout(scalar)` SSBOs of `float16_t` (interleaved Re/Im
   pairs, tightly packed) and convert to/from f32 at the buffer boundary;
   shared memory and all compute stay f32.
@@ -49,11 +58,13 @@ order coop -> subgroup -> baseline and always lands on the baseline blob.
 Must match `vkfft_push_constants_t` exactly (no uint64_t):
 
 ```
-offset  0: uint n, log2n, direction, _pad  (16 bytes)
+offset  0: uint n, log2n, direction, mode  (16 bytes)
 Total: 16 bytes
 ```
 
 `direction` = 0 forward, 1 inverse (VKFFT_DIR_FORWARD / VKFFT_DIR_INVERSE).
+`mode` = 0 row (VKFFT_MODE_ROW, stride 1 — also the 1D path), 1 col
+(VKFFT_MODE_COL, stride n).
 
 ## Descriptor set layout (set=0)
 

@@ -261,56 +261,19 @@ static VkResult vkfft_cmd_dispatch(VkFFTPlan *plan, VkCommandBuffer cmd,
     return VK_SUCCESS;
 }
 
-/* ── Capability detection ────────────────────────────────────────────────── */
-
-static VkResult vkfft_init_capabilities(VkFFTPlan *plan, VkPhysicalDevice pd) {
-    /* shaderInt64 + cooperative matrix features (pNext chain) */
-    VkPhysicalDeviceCooperativeMatrixFeaturesKHR coop_features;
-    coop_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
-    coop_features.pNext = NULL;
-
-    VkPhysicalDeviceFeatures2 features2;
-    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    features2.pNext = &coop_features;
-    vkGetPhysicalDeviceFeatures2(pd, &features2);
-
-    plan->has_shader_int64 = features2.features.shaderInt64 ? VK_TRUE : VK_FALSE;
-    plan->has_coop_matrix  = coop_features.cooperativeMatrix ? VK_TRUE : VK_FALSE;
-
-    /* Subgroup properties via pNext chain */
-    VkPhysicalDeviceSubgroupProperties subgroup_props;
-    subgroup_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
-    subgroup_props.pNext = NULL;
-
-    VkPhysicalDeviceProperties2 props2;
-    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-    props2.pNext = &subgroup_props;
-    vkGetPhysicalDeviceProperties2(pd, &props2);
-
-    plan->max_subgroup_size = subgroup_props.subgroupSize;
-    memcpy(plan->max_compute_workgroup_size,
-           props2.properties.limits.maxComputeWorkGroupSize,
-           sizeof(plan->max_compute_workgroup_size));
-
-    /* Subgroup is a core Vulkan 1.3+ feature; supportedStages gates compute */
-    plan->has_subgroup = (subgroup_props.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT)
-                         ? VK_TRUE : VK_FALSE;
-
-    /* Highest supported tier */
-    if (plan->has_coop_matrix)
-        plan->active_tier = VKFFT_TIER_COOPMATRIX;
-    else if (plan->has_subgroup)
-        plan->active_tier = VKFFT_TIER_SUBGROUP;
-    else
-        plan->active_tier = VKFFT_TIER_BASELINE;
-
-    return VK_SUCCESS;
-}
-
 /* ── Plan lifecycle ──────────────────────────────────────────────────────── */
 
-VkResult vkfft_create_plan(VkPhysicalDevice pd, VkDevice device, uint32_t n,
-                           VkFFTPlan **pp_plan) {
+/*
+ * Shared 1D/2D plan creation. is_2d = 0 selects the 1D path, is_2d = 1 the
+ * N x N separable 2D path; both validate n as a power of two in [2, 1024]
+ * (the 2D FFT length equals the row/column dimension). The pipeline layout,
+ * descriptor set layout, and pipeline cache are identical for both, so the
+ * same 16-byte push-constant block (with the `mode` field) drives every
+ * kernel.
+ */
+static VkResult vkfft_create_plan_internal(VkPhysicalDevice pd, VkDevice device,
+                                           uint32_t n, uint32_t is_2d,
+                                           VkFFTPlan **pp_plan) {
     if (!pp_plan) return VK_ERROR_INITIALIZATION_FAILED;
 
     /* Validate n: power of two in [2, 1024]. The shader covers the whole FFT
@@ -325,19 +288,36 @@ VkResult vkfft_create_plan(VkPhysicalDevice pd, VkDevice device, uint32_t n,
     if (!plan) return VK_ERROR_OUT_OF_HOST_MEMORY;
     plan->device = device;
     plan->n = n;
+    plan->is_2d = is_2d;
 
     uint32_t log2n = 0;
     uint32_t t = n;
     while (t > 1u) { t >>= 1u; log2n++; }
     plan->log2n = log2n;
 
-    VkResult r = vkfft_init_capabilities(plan, pd);
+    /* Capability detection + push-desc fn load via VKRuntime (single
+       implementation; was five inline copies). */
+    VkRuntimeCaps caps;
+    VkResult r = vkr_detect_capabilities(pd, device, &caps);
     if (r != VK_SUCCESS) { free(plan); return r; }
 
-    /* Load push descriptor function pointer */
-    plan->push_desc_fn = (PFN_vkCmdPushDescriptorSetKHR)
-        vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSetKHR");
-    plan->has_push_descriptor = plan->push_desc_fn ? VK_TRUE : VK_FALSE;
+    plan->has_shader_int64 = caps.has_shader_int64;
+    plan->has_coop_matrix  = caps.has_coop_matrix;
+    plan->has_subgroup     = caps.has_subgroup;
+    plan->max_subgroup_size = caps.subgroup_size;
+    memcpy(plan->max_compute_workgroup_size, caps.max_workgroup_size,
+           sizeof(plan->max_compute_workgroup_size));
+    plan->push_desc_fn = caps.push_desc_fn;
+    plan->has_push_descriptor = caps.has_push_descriptor;
+
+    /* Highest supported tier from the vkr ladder (2=coopmatrix, 1=subgroup,
+       0=baseline). Only baseline shaders exist, so ensure_pipeline falls back. */
+    if (caps.arch_index == 2)
+        plan->active_tier = VKFFT_TIER_COOPMATRIX;
+    else if (caps.arch_index == 1)
+        plan->active_tier = VKFFT_TIER_SUBGROUP;
+    else
+        plan->active_tier = VKFFT_TIER_BASELINE;
 
     /* Descriptor set layout: binding 0 = input SSBO (read), binding 2 = output
        SSBO (write). Only those two bindings. */
@@ -373,22 +353,15 @@ VkResult vkfft_create_plan(VkPhysicalDevice pd, VkDevice device, uint32_t n,
     r = vkCreateDescriptorSetLayout(device, &dslci, NULL, &plan->set_layout);
     if (r != VK_SUCCESS) { free(plan); return r; }
 
-    /* Pipeline layout: 1 descriptor set + 16-byte push constant range */
+    /* Pipeline layout: 1 descriptor set + 16-byte push constant range
+       (push-constant range is lib-specific, stays local). */
     VkPushConstantRange pc_range;
     pc_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     pc_range.offset = 0;
     pc_range.size = sizeof(vkfft_push_constants_t); /* 16 bytes */
 
-    VkPipelineLayoutCreateInfo plci;
-    plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    plci.pNext = NULL;
-    plci.flags = 0;
-    plci.setLayoutCount = 1;
-    plci.pSetLayouts = &plan->set_layout;
-    plci.pushConstantRangeCount = 1;
-    plci.pPushConstantRanges = &pc_range;
-
-    r = vkCreatePipelineLayout(device, &plci, NULL, &plan->pipeline_layout);
+    r = vkr_create_pipeline_layout(device, plan->set_layout, 1, &pc_range,
+                                   &plan->pipeline_layout);
     if (r != VK_SUCCESS) {
         vkDestroyDescriptorSetLayout(device, plan->set_layout, NULL);
         free(plan);
@@ -396,13 +369,7 @@ VkResult vkfft_create_plan(VkPhysicalDevice pd, VkDevice device, uint32_t n,
     }
 
     /* Pipeline cache (driver-level, accelerates lazy pipeline creation) */
-    VkPipelineCacheCreateInfo pcci;
-    pcci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-    pcci.pNext = NULL;
-    pcci.flags = 0;
-    pcci.initialDataSize = 0;
-    pcci.pInitialData = NULL;
-    r = vkCreatePipelineCache(device, &pcci, NULL, &plan->pipeline_cache);
+    r = vkr_create_pipeline_cache(device, &plan->pipeline_cache);
     if (r != VK_SUCCESS) {
         vkDestroyPipelineLayout(device, plan->pipeline_layout, NULL);
         vkDestroyDescriptorSetLayout(device, plan->set_layout, NULL);
@@ -412,19 +379,9 @@ VkResult vkfft_create_plan(VkPhysicalDevice pd, VkDevice device, uint32_t n,
 
     /* Descriptor pool only needed for non-push-descriptor fallback */
     if (!plan->has_push_descriptor) {
-        VkDescriptorPoolSize pool_sizes[1];
-        pool_sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        pool_sizes[0].descriptorCount = VKFFT_MAX_PIPELINES * 2; /* 2 bindings */
-
-        VkDescriptorPoolCreateInfo dpci;
-        dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        dpci.pNext = NULL;
-        dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        dpci.maxSets = VKFFT_MAX_PIPELINES;
-        dpci.poolSizeCount = 1;
-        dpci.pPoolSizes = pool_sizes;
-
-        r = vkCreateDescriptorPool(device, &dpci, NULL, &plan->descriptor_pool);
+        r = vkr_create_descriptor_pool(device, VKFFT_MAX_PIPELINES,
+                                       VKFFT_MAX_PIPELINES * 2,
+                                       &plan->descriptor_pool);
         if (r != VK_SUCCESS) {
             vkDestroyPipelineCache(device, plan->pipeline_cache, NULL);
             vkDestroyPipelineLayout(device, plan->pipeline_layout, NULL);
@@ -436,6 +393,16 @@ VkResult vkfft_create_plan(VkPhysicalDevice pd, VkDevice device, uint32_t n,
 
     *pp_plan = plan;
     return VK_SUCCESS;
+}
+
+VkResult vkfft_create_plan(VkPhysicalDevice pd, VkDevice device, uint32_t n,
+                           VkFFTPlan **pp_plan) {
+    return vkfft_create_plan_internal(pd, device, n, 0, pp_plan);
+}
+
+VkResult vkfft_create_plan_2d(VkPhysicalDevice pd, VkDevice device, uint32_t n,
+                              VkFFTPlan **pp_plan) {
+    return vkfft_create_plan_internal(pd, device, n, 1, pp_plan);
 }
 
 void vkfft_destroy_plan(VkFFTPlan *plan) {
@@ -517,4 +484,67 @@ VkResult vkfft_execute_inverse_f16(VkFFTPlan *plan, VkCommandBuffer cmd,
                                    VkBuffer input, VkBuffer output) {
     return vkfft_execute_dir(plan, cmd, VKFFT_DTYPE_F16, VKFFT_DIR_INVERSE,
                              input, output);
+}
+
+/* ── Public API: execute 2D (separable N x N) ───────────────────────────── */
+
+/*
+ * 2D separable FFT: N x N interleaved complex buffer, N = plan->n (power of
+ * two). Records two passes into the same command buffer:
+ *
+ *   pass 1 (rows): dispatch N workgroups, mode=ROW. Workgroup r transforms
+ *                  row r of `input` (elements r*N .. r*N+N-1, stride 1) and
+ *                  writes it to `output`.
+ *   barrier:       compute -> compute, SHADER_WRITE -> SHADER_READ so pass 2
+ *                  sees pass 1's writes.
+ *   pass 2 (cols): dispatch N workgroups, mode=COL. Workgroup c transforms
+ *                  column c of `output` (elements c, c+N, ..., stride N) in
+ *                  place.
+ *
+ * Twiddle sign follows pc.direction exactly like the 1D path (forward = -2pi,
+ * inverse = +2pi, unnormalized), so forward-then-inverse over the two axes
+ * recovers the original signal scaled by N*N. The buffer holds 2*N*N floats.
+ */
+static VkResult vkfft_execute_dir_2d(VkFFTPlan *plan, VkCommandBuffer cmd,
+                                     uint32_t direction,
+                                     VkBuffer input, VkBuffer output) {
+    if (!plan) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!plan->is_2d) return VK_ERROR_INITIALIZATION_FAILED;
+
+    vkfft_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.n = plan->n;
+    pc.log2n = plan->log2n;
+    pc.direction = direction;
+
+    /* Pass 1: rows. One workgroup per row; base = wg*n, stride 1. */
+    pc.mode = VKFFT_MODE_ROW;
+    VkResult r = vkfft_cmd_dispatch(plan, cmd, VKFFT_KERNEL_FFT, VKFFT_DTYPE_F32,
+                                    &pc, plan->n, 1, 1, input, output);
+    if (r != VK_SUCCESS) return r;
+
+    /* Pass 2 reads pass 1 writes: compute -> compute barrier. */
+    VkMemoryBarrier barrier;
+    memset(&barrier, 0, sizeof(barrier));
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 1, &barrier, 0, NULL, 0, NULL);
+
+    /* Pass 2: columns, in place on `output`. base = wg, stride = n. */
+    pc.mode = VKFFT_MODE_COL;
+    return vkfft_cmd_dispatch(plan, cmd, VKFFT_KERNEL_FFT, VKFFT_DTYPE_F32,
+                              &pc, plan->n, 1, 1, output, output);
+}
+
+VkResult vkfft_execute_2d_f32(VkFFTPlan *plan, VkCommandBuffer cmd,
+                              VkBuffer input, VkBuffer output) {
+    return vkfft_execute_dir_2d(plan, cmd, VKFFT_DIR_FORWARD, input, output);
+}
+
+VkResult vkfft_execute_2d_inverse_f32(VkFFTPlan *plan, VkCommandBuffer cmd,
+                                      VkBuffer input, VkBuffer output) {
+    return vkfft_execute_dir_2d(plan, cmd, VKFFT_DIR_INVERSE, input, output);
 }

@@ -11,9 +11,10 @@ Child of root `AGENTS.md` and `include/vkrand/AGENTS.md`.
 - No malloc per lookup; fixed-size cache array in context struct
 
 ### Capability detection at context creation
-- Mirrors `vkmath_init_capabilities`: queries `shaderInt64`, subgroup
-  properties, and cooperative-matrix features via pNext chains
-- Only a baseline shader exists; `ensure_pipeline` falls back to baseline
+Delegated to VKRuntime's `vkr_detect_capabilities()` (see `src/vkruntime/`):
+vkrand links vkruntime and calls it once in `vkrand_create_context` to fill the
+context's capability fields. Only a baseline shader exists, so the active tier
+is clamped to baseline regardless of detected capabilities.
 
 ### SPIR-V embedding
 - Shader SPIR-V compiled to C arrays (`shaders_spv.h`) by `compile_shaders.ps1`

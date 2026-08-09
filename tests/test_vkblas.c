@@ -48,6 +48,7 @@
 #define TEST_F32_TOLERANCE 1e-3f  /**< GEMM f32 comparison tolerance.         */
 #define TEST_F64_TOLERANCE 1e-10  /**< GEMM f64 comparison tolerance.         */
 #define TEST_F16_TOLERANCE 1.0f   /**< Half-ULP-safe f16 comparison tol.      */
+#define TEST_BF16_TOLERANCE 1e-2f /**< bf16 truncation-safe comparison tol.   */
 
 /* ===========================================================================
  * f16 <-> f32 helpers (test-side; not part of the library)
@@ -112,6 +113,30 @@ static uint16_t f32_to_f16(float f)
 }
 
 /* ===========================================================================
+ * bf16 <-> f32 helpers (test-side; not part of the library)
+ * ========================================================================== */
+
+/* bfloat16 = top 16 bits of an f32. */
+static uint16_t f32_to_bf16(float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    /* round-to-nearest-even on bit 15 before truncating (matches hardware
+       bf16 conversion semantics closely enough for the 1e-2 tolerance). */
+    uint32_t rounding_bias = 0x7FFFu + ((u >> 16) & 1u);
+    u += rounding_bias;
+    return (uint16_t)(u >> 16);
+}
+
+static float bf16_to_f32(uint16_t b)
+{
+    uint32_t fbits = (uint32_t)b << 16;
+    float f;
+    memcpy(&f, &fbits, sizeof(f));
+    return f;
+}
+
+/* ===========================================================================
  * Harness state
  * ========================================================================== */
 
@@ -131,6 +156,7 @@ typedef struct {
     uint32_t subgroup_size;
     VkBool32 test_f16;
     VkBool32 test_f64;
+    VkBool32 test_bf16;
     VkBLASContext *blas_ctx;
 } harness_t;
 
@@ -269,7 +295,8 @@ static VkBool32 device_extension_available(VkPhysicalDevice physical_device,
 static VkResult create_device(VkPhysicalDevice physical_device,
                               VkDevice *out_device,
                               VkBool32 *out_test_f16,
-                              VkBool32 *out_test_f64)
+                              VkBool32 *out_test_f64,
+                              VkBool32 *out_test_bf16)
 {
     float priority = 1.0f;
 
@@ -315,6 +342,7 @@ static VkResult create_device(VkPhysicalDevice physical_device,
 
     features2.features.shaderInt64 = VK_TRUE;
     features2.features.shaderFloat64 = supported.features.shaderFloat64;
+    features2.features.shaderInt16 = supported.features.shaderInt16;
     vk11_enable.storageBuffer16BitAccess = vk11_supported.storageBuffer16BitAccess;
     vk11_enable.uniformAndStorageBuffer16BitAccess =
         vk11_supported.uniformAndStorageBuffer16BitAccess;
@@ -362,6 +390,8 @@ static VkResult create_device(VkPhysicalDevice physical_device,
                         vk11_supported.storageBuffer16BitAccess &&
                         vk11_supported.uniformAndStorageBuffer16BitAccess;
         *out_test_f64 = supported.features.shaderFloat64;
+        *out_test_bf16 = supported.features.shaderInt16 &&
+                         vk11_supported.storageBuffer16BitAccess;
     }
     return r;
 }
@@ -622,6 +652,38 @@ static int check_output_f16(const char *name, const void *mapped,
     return pass;
 }
 
+/**
+ * \brief bf16 check: readback is uint16_t bf16; expected is bf16 rounded from
+ * the double reference. Both are converted to f32 and compared with the
+ * TEST_BF16_TOLERANCE (bf16 truncation loses ~8 mantissa bits; 1e-2 absorbs
+ * the resulting quantization at the small magnitudes used here).
+ */
+static int check_output_bf16(const char *name, const void *mapped,
+                             VkDeviceSize off_readback,
+                             const uint16_t *expected, uint32_t count,
+                             float tolerance)
+{
+    const uint16_t *got = (const uint16_t *)((const char *)mapped + off_readback);
+    int pass = 1;
+    uint32_t mismatches = 0;
+
+    for (uint32_t i = 0; i < count; i++) {
+        float g = bf16_to_f32(got[i]);
+        float e = bf16_to_f32(expected[i]);
+        float diff = fabsf(g - e);
+        if (diff > tolerance) {
+            if (mismatches < 8) {
+                printf("    mismatch[%u]: got %.5f expected %.5f (diff %.3e)\n",
+                       i, g, e, diff);
+            }
+            mismatches++;
+            pass = 0;
+        }
+    }
+    printf("  %-18s : %s\n", name, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
 /* ===========================================================================
  * main
  * ========================================================================== */
@@ -654,6 +716,11 @@ int main(void)
     double A64[TEST_GEMM_M * TEST_GEMM_K];
     double B64[TEST_GEMM_K * TEST_GEMM_N];
     double D64_expected[TEST_GEMM_M * TEST_GEMM_N];
+    /* bf16 case buffers */
+    gemm_buffers_t bf16b;
+    uint16_t A16b[TEST_GEMM_M * TEST_GEMM_K];
+    uint16_t B16b[TEST_GEMM_K * TEST_GEMM_N];
+    uint16_t D16b_expected[TEST_GEMM_M * TEST_GEMM_N];
     /* strided-batched case buffers (TEST_BATCH batches per dtype) */
     gemm_buffers_t sb32b, sb16b, sb64b;
     float  SB32_expected[TEST_BATCH][TEST_GEMM_M * TEST_GEMM_N];
@@ -669,6 +736,7 @@ int main(void)
     memset(&f32b, 0, sizeof(f32b));
     memset(&f16b, 0, sizeof(f16b));
     memset(&f64b, 0, sizeof(f64b));
+    memset(&bf16b, 0, sizeof(bf16b));
     memset(&sb32b, 0, sizeof(sb32b));
     memset(&sb16b, 0, sizeof(sb16b));
     memset(&sb64b, 0, sizeof(sb64b));
@@ -710,7 +778,8 @@ int main(void)
     }
 
     /* ── 5. Logical device ──────────────────────────────────────────────── */
-    r = create_device(h.physical_device, &h.device, &h.test_f16, &h.test_f64);
+    r = create_device(h.physical_device, &h.device, &h.test_f16, &h.test_f64,
+                      &h.test_bf16);
     if (r != VK_SUCCESS) {
         fprintf(stderr, "test_vkblas: vkCreateDevice failed (%d)\n", (int)r);
         goto cleanup;
@@ -746,8 +815,29 @@ int main(void)
     printf("test_vkblas: device ready (arch=%s, tier=%u, subgroup=%u, staging=%u)\n",
            vkblas_get_arch_name(h.blas_ctx), vkblas_get_arch_index(h.blas_ctx),
            (unsigned)h.subgroup_size, (unsigned)TEST_STAGING_SIZE);
-    printf("test_vkblas: features f16=%s f64=%s\n",
-           h.test_f16 ? "on" : "off", h.test_f64 ? "on" : "off");
+    printf("test_vkblas: features f16=%s f64=%s bf16=%s\n",
+           h.test_f16 ? "on" : "off", h.test_f64 ? "on" : "off",
+           h.test_bf16 ? "on" : "off");
+
+    /* ── 8b. Cooperative-matrix probe (DRIVER-GUARDED, default safe) ───────
+     *
+     * The real GL_KHR_cooperative_matrix GEMM (coopMatMulAdd) is compiled and
+     * embedded (vkblas_spv_coopmatrix_gemm_f32) but is DORMANT by default: the
+     * AMD Windows driver 26.7.1 hard-crashes the process (0xE06D7363) inside
+     * vkCreateComputePipelines for any module containing coopMatMulAdd, even
+     * though it advertises VK_KHR_cooperative_matrix rev 2. vkblas_init_
+     * capabilities only activates the coopmatrix tier when VAIT_COOPMATRIX is
+     * set. NEVER run this test with VAIT_COOPMATRIX set on a 26.7.1-era
+     * driver; it will take down the process. All GEMMs below use the
+     * shared-memory subgroup/baseline path. */
+    if (getenv("VAIT_COOPMATRIX") != NULL) {
+        printf("test_vkblas: WARNING VAIT_COOPMATRIX set — coop-matrix tier "
+               "requested. Not exercised here (AMD 26.7.1 driver crash on "
+               "coopMatMulAdd pipeline creation); using shared-memory path.\n");
+    } else {
+        printf("test_vkblas: coop-matrix tier dormant (VAIT_COOPMATRIX unset) — "
+               "safe shared-memory path active.\n");
+    }
 
     /* ── 9. Region + buffer layout for each dtype ───────────────────────── */
     /* f32: A (m*k), B (k*n), D (m*n), readback, expected */
@@ -773,6 +863,15 @@ int main(void)
         f64b.off_D = take_region(&h.cursor, h.align, m * n * sizeof(double));
         f64b.off_readback = take_region(&h.cursor, h.align, m * n * sizeof(double));
         take_region(&h.cursor, h.align, m * n * sizeof(double)); /* expected */
+    }
+
+    /* bf16: same layout, 2-byte elements (uint16 storage) */
+    if (h.test_bf16) {
+        bf16b.off_A = take_region(&h.cursor, h.align, m * k * sizeof(uint16_t));
+        bf16b.off_B = take_region(&h.cursor, h.align, k * n * sizeof(uint16_t));
+        bf16b.off_D = take_region(&h.cursor, h.align, m * n * sizeof(uint16_t));
+        bf16b.off_readback = take_region(&h.cursor, h.align, m * n * sizeof(uint16_t));
+        take_region(&h.cursor, h.align, m * n * sizeof(uint16_t)); /* expected */
     }
 
     r = create_sub_buffer(h.device, h.mem, f32b.off_A,
@@ -806,6 +905,18 @@ int main(void)
         if (r != VK_SUCCESS) goto cleanup;
         r = create_sub_buffer(h.device, h.mem, f64b.off_D,
                               m * n * sizeof(double), &f64b.D);
+        if (r != VK_SUCCESS) goto cleanup;
+    }
+
+    if (h.test_bf16) {
+        r = create_sub_buffer(h.device, h.mem, bf16b.off_A,
+                              m * k * sizeof(uint16_t), &bf16b.A);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, bf16b.off_B,
+                              k * n * sizeof(uint16_t), &bf16b.B);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, bf16b.off_D,
+                              m * n * sizeof(uint16_t), &bf16b.D);
         if (r != VK_SUCCESS) goto cleanup;
     }
 
@@ -933,6 +1044,34 @@ int main(void)
         }
     }
 
+    /* bf16 reference: A/B stored as bf16 (converted to f32 for the compute),
+       accumulate in double, round result back to bf16. Mirrors the shader
+       (bf16 in -> f32 accumulate -> bf16 out). */
+    if (h.test_bf16) {
+        for (uint32_t row = 0; row < m; row++) {
+            for (uint32_t t = 0; t < k; t++) {
+                A16b[row + t * TEST_GEMM_LDA] = f32_to_bf16(1.0f);
+            }
+        }
+        for (uint32_t t = 0; t < k; t++) {
+            for (uint32_t c = 0; c < n; c++) {
+                float v = (float)(1 + t + 8 * c);
+                B16b[t + c * TEST_GEMM_LDB] = f32_to_bf16(v);
+            }
+        }
+        for (uint32_t row = 0; row < m; row++) {
+            for (uint32_t c = 0; c < n; c++) {
+                double acc = 0.0;
+                for (uint32_t t = 0; t < k; t++) {
+                    double av = (double)bf16_to_f32(A16b[row + t * TEST_GEMM_LDA]);
+                    double bv = (double)bf16_to_f32(B16b[t + c * TEST_GEMM_LDB]);
+                    acc += av * bv;
+                }
+                D16b_expected[row + c * TEST_GEMM_LDD] = f32_to_bf16((float)acc);
+            }
+        }
+    }
+
     /* strided-batched fill + references: batch b scales A by (b+1). */
     for (int b = 0; b < TEST_BATCH; b++) {
         float scale = (float)(b + 1);
@@ -1017,6 +1156,10 @@ int main(void)
         memcpy((char *)h.mapped + f64b.off_A, A64, m * k * sizeof(double));
         memcpy((char *)h.mapped + f64b.off_B, B64, k * n * sizeof(double));
     }
+    if (h.test_bf16) {
+        memcpy((char *)h.mapped + bf16b.off_A, A16b, m * k * sizeof(uint16_t));
+        memcpy((char *)h.mapped + bf16b.off_B, B16b, k * n * sizeof(uint16_t));
+    }
 
     /* f64 alpha/beta packing check: D = 1.5 * A*B + (-0.5) * C. */
     if (h.test_f64) {
@@ -1086,6 +1229,20 @@ int main(void)
                          &beta64, VK_NULL_HANDLE, 0,
                          f64b.D, TEST_GEMM_LDD),
             "dgemm m=n=k=8");
+    }
+
+    /* bgemm (bf16): storage is uint16 bf16; alpha/beta are bf16 bits too. */
+    if (h.test_bf16) {
+        const uint16_t alpha16b = f32_to_bf16(1.0f);
+        const uint16_t beta16b  = f32_to_bf16(0.0f);
+        overall_pass &= record_dispatch(
+            vkblas_bgemm(h.blas_ctx, h.cmd, VKBLAS_OP_N, VKBLAS_OP_N,
+                         (int32_t)m, (int32_t)n, (int32_t)k,
+                         &alpha16b, bf16b.A, TEST_GEMM_LDA,
+                         bf16b.B, TEST_GEMM_LDB,
+                         &beta16b, VK_NULL_HANDLE, 0,
+                         bf16b.D, TEST_GEMM_LDD),
+            "bgemm m=n=k=8");
     }
 
     /* ── 11b. Strided-batched dispatches (TEST_BATCH batches) ───────────── */
@@ -1187,6 +1344,9 @@ int main(void)
     if (h.test_f64)
         record_copy_readback(h.cmd, f64b.D, h.staging, f64b.off_readback,
                              m * n * sizeof(double));
+    if (h.test_bf16)
+        record_copy_readback(h.cmd, bf16b.D, h.staging, bf16b.off_readback,
+                             m * n * sizeof(uint16_t));
     record_copy_readback(h.cmd, sb32b.D, h.staging, sb32b.off_readback,
                          TEST_BATCH * m * n * sizeof(float));
     if (h.test_f16)
@@ -1253,6 +1413,14 @@ int main(void)
     else
         printf("  %-18s : SKIP (f64 features absent)\n", "dgemm m=n=k=8");
 
+    /* bgemm (bf16) — must be a real PASS line, not FEATURE_NOT_PRESENT. */
+    if (h.test_bf16)
+        overall_pass &= check_output_bf16("bgemm m=n=k=8", h.mapped,
+                                          bf16b.off_readback, D16b_expected,
+                                          elem_count, TEST_BF16_TOLERANCE);
+    else
+        printf("  %-18s : SKIP (bf16 16-bit features absent)\n", "bgemm m=n=k=8");
+
     /* strided-batched: expected array is [batch][m*n]; the readback is one
        contiguous [batch][m*n] block, so pass the flattened batch pointer. */
     overall_pass &= check_output_f32("sgemm_strided x2", h.mapped,
@@ -1300,6 +1468,9 @@ cleanup:
     if (f64b.A) vkDestroyBuffer(h.device, f64b.A, NULL);
     if (f64b.B) vkDestroyBuffer(h.device, f64b.B, NULL);
     if (f64b.D) vkDestroyBuffer(h.device, f64b.D, NULL);
+    if (bf16b.A) vkDestroyBuffer(h.device, bf16b.A, NULL);
+    if (bf16b.B) vkDestroyBuffer(h.device, bf16b.B, NULL);
+    if (bf16b.D) vkDestroyBuffer(h.device, bf16b.D, NULL);
     if (sb32b.A) vkDestroyBuffer(h.device, sb32b.A, NULL);
     if (sb32b.B) vkDestroyBuffer(h.device, sb32b.B, NULL);
     if (sb32b.D) vkDestroyBuffer(h.device, sb32b.D, NULL);

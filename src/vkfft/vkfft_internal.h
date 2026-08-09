@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "vkruntime.h"
 #include "vkfft.h"
 
 /* ── Push constant block (std140, 16 bytes, must match GLSL exactly) ────── */
@@ -21,8 +22,12 @@ typedef struct {
     uint32_t n;         /* offset  0: FFT size (power of two, 2..1024)       */
     uint32_t log2n;     /* offset  4: log2(n)                                */
     uint32_t direction; /* offset  8: VKFFT_DIR_FORWARD (0) or INVERSE (1)   */
-    uint32_t _pad;      /* offset 12: padding (no uint64_t in push constants)*/
+    uint32_t mode;      /* offset 12: 0 = row (stride 1), 1 = col (stride n) */
 } vkfft_push_constants_t;
+
+/* Buffer-slice modes for the shared FFT kernel (pc.mode). */
+#define VKFFT_MODE_ROW 0  /* contiguous run: base = wg*n, stride 1  */
+#define VKFFT_MODE_COL 1  /* strided column: base = wg, stride n    */
 
 /* Static assert (C99-compatible): struct must be exactly 16 bytes */
 typedef char vkfft_pc_static_assert[sizeof(vkfft_push_constants_t) == 16 ? 1 : -1];
@@ -87,6 +92,7 @@ struct VkFFTPlan {
     /* FFT size */
     uint32_t n;
     uint32_t log2n;
+    uint32_t is_2d;     /* 1 = N x N separable 2D plan (vkfft_create_plan_2d) */
 };
 
 /* ── Internal functions ────────────────────────────────────────────────── */

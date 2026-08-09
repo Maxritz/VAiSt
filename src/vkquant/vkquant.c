@@ -32,6 +32,11 @@ static const shader_blob_t s_shader_table[] = {
     /* baseline tier — the only tier with dequant shaders */
     {VKQUANT_KERNEL_Q8_0_DEQUANT, VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_dequant_q8_0, vkquant_spv_baseline_dequant_q8_0_size},
     {VKQUANT_KERNEL_Q4_0_DEQUANT, VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_dequant_q4_0, vkquant_spv_baseline_dequant_q4_0_size},
+    {VKQUANT_KERNEL_Q4K_DEQUANT,  VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_dequant_q4k_f32, vkquant_spv_baseline_dequant_q4k_f32_size},
+    {VKQUANT_KERNEL_Q6K_DEQUANT,  VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_dequant_q6k_f32, vkquant_spv_baseline_dequant_q6k_f32_size},
+    {VKQUANT_KERNEL_IQ4XS_DEQUANT,VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_dequant_iq4xs_f32, vkquant_spv_baseline_dequant_iq4xs_f32_size},
+    {VKQUANT_KERNEL_Q8_0_QUANT,   VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_quantize_q8_0_f32, vkquant_spv_baseline_quantize_q8_0_f32_size},
+    {VKQUANT_KERNEL_Q4_0_QUANT,   VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_quantize_q4_0_f32, vkquant_spv_baseline_quantize_q4_0_f32_size},
 };
 #define SHADER_TABLE_COUNT (sizeof(s_shader_table) / sizeof(s_shader_table[0]))
 
@@ -278,37 +283,20 @@ static uint32_t elem_to_groups(uint32_t num_elements) {
 /* ── Capability detection ────────────────────────────────────────────────── */
 
 VkResult vkquant_init_capabilities(VkQuantContext *ctx, VkPhysicalDevice pd) {
-    /* shaderInt64 + cooperative matrix features (pNext chain) */
-    VkPhysicalDeviceCooperativeMatrixFeaturesKHR coop_features;
-    coop_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
-    coop_features.pNext = NULL;
+    if (!ctx) return VK_ERROR_INITIALIZATION_FAILED;
 
-    VkPhysicalDeviceFeatures2 features2;
-    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    features2.pNext = &coop_features;
-    vkGetPhysicalDeviceFeatures2(pd, &features2);
+    /* Single VKRuntime implementation: shaderInt64 / subgroup / cooperative
+       matrix / push-descriptor detection plus the tier ladder. */
+    VkRuntimeCaps caps;
+    VkResult r = vkr_detect_capabilities(pd, ctx->device, &caps);
+    if (r != VK_SUCCESS) return r;
 
-    ctx->has_shader_int64 = features2.features.shaderInt64 ? VK_TRUE : VK_FALSE;
-    ctx->has_coop_matrix  = coop_features.cooperativeMatrix ? VK_TRUE : VK_FALSE;
-
-    /* Subgroup properties via pNext chain */
-    VkPhysicalDeviceSubgroupProperties subgroup_props;
-    subgroup_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
-    subgroup_props.pNext = NULL;
-
-    VkPhysicalDeviceProperties2 props2;
-    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-    props2.pNext = &subgroup_props;
-    vkGetPhysicalDeviceProperties2(pd, &props2);
-
-    ctx->max_subgroup_size = subgroup_props.subgroupSize;
-    memcpy(ctx->max_compute_workgroup_size,
-           props2.properties.limits.maxComputeWorkGroupSize,
+    ctx->has_shader_int64 = caps.has_shader_int64;
+    ctx->has_coop_matrix  = caps.has_coop_matrix;
+    ctx->has_subgroup     = caps.has_subgroup;
+    ctx->max_subgroup_size = caps.subgroup_size;
+    memcpy(ctx->max_compute_workgroup_size, caps.max_workgroup_size,
            sizeof(ctx->max_compute_workgroup_size));
-
-    /* Subgroup is a core Vulkan 1.3+ feature; supportedStages gates compute */
-    ctx->has_subgroup = (subgroup_props.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT)
-                        ? VK_TRUE : VK_FALSE;
 
     /* Highest supported tier (informational — only baseline shaders exist) */
     if (ctx->has_coop_matrix)
@@ -331,13 +319,28 @@ VkResult vkquant_create_context(VkPhysicalDevice pd, VkDevice device,
     if (!ctx) return VK_ERROR_OUT_OF_HOST_MEMORY;
     ctx->device = device;
 
-    VkResult r = vkquant_init_capabilities(ctx, pd);
+    /* Capability detection + push-desc fn load via VKRuntime (single
+       implementation; was five inline copies). */
+    VkRuntimeCaps caps;
+    VkResult r = vkr_detect_capabilities(pd, device, &caps);
     if (r != VK_SUCCESS) { free(ctx); return r; }
 
-    /* Load push descriptor function pointer */
-    ctx->push_desc_fn = (PFN_vkCmdPushDescriptorSetKHR)
-        vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSetKHR");
-    ctx->has_push_descriptor = ctx->push_desc_fn ? VK_TRUE : VK_FALSE;
+    ctx->has_shader_int64 = caps.has_shader_int64;
+    ctx->has_coop_matrix  = caps.has_coop_matrix;
+    ctx->has_subgroup     = caps.has_subgroup;
+    ctx->max_subgroup_size = caps.subgroup_size;
+    memcpy(ctx->max_compute_workgroup_size, caps.max_workgroup_size,
+           sizeof(ctx->max_compute_workgroup_size));
+    ctx->push_desc_fn = caps.push_desc_fn;
+    ctx->has_push_descriptor = caps.has_push_descriptor;
+
+    /* Active tier from the vkr ladder (2=coopmatrix, 1=subgroup, 0=baseline) */
+    if (caps.arch_index == 2)
+        ctx->active_tier = VKQUANT_TIER_COOPMATRIX;
+    else if (caps.arch_index == 1)
+        ctx->active_tier = VKQUANT_TIER_SUBGROUP;
+    else
+        ctx->active_tier = VKQUANT_TIER_BASELINE;
 
     /* Descriptor set layout: 2 SSBO bindings (binding 0 read, binding 2 write) */
     VkDescriptorSetLayoutBinding bindings[2];
@@ -373,22 +376,15 @@ VkResult vkquant_create_context(VkPhysicalDevice pd, VkDevice device,
     r = vkCreateDescriptorSetLayout(device, &dslci, NULL, &ctx->set_layout);
     if (r != VK_SUCCESS) { free(ctx); return r; }
 
-    /* Pipeline layout: 1 descriptor set + 16-byte push constant range */
+    /* Pipeline layout: 1 descriptor set + 16-byte push constant range
+       (push-constant range is lib-specific, stays local). */
     VkPushConstantRange pc_range;
     pc_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     pc_range.offset = 0;
     pc_range.size = sizeof(vkquant_push_constants_t); /* 16 bytes */
 
-    VkPipelineLayoutCreateInfo plci;
-    plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    plci.pNext = NULL;
-    plci.flags = 0;
-    plci.setLayoutCount = 1;
-    plci.pSetLayouts = &ctx->set_layout;
-    plci.pushConstantRangeCount = 1;
-    plci.pPushConstantRanges = &pc_range;
-
-    r = vkCreatePipelineLayout(device, &plci, NULL, &ctx->pipeline_layout);
+    r = vkr_create_pipeline_layout(device, ctx->set_layout, 1, &pc_range,
+                                   &ctx->pipeline_layout);
     if (r != VK_SUCCESS) {
         vkDestroyDescriptorSetLayout(device, ctx->set_layout, NULL);
         free(ctx);
@@ -396,13 +392,7 @@ VkResult vkquant_create_context(VkPhysicalDevice pd, VkDevice device,
     }
 
     /* Pipeline cache (driver-level, accelerates lazy pipeline creation) */
-    VkPipelineCacheCreateInfo pcci;
-    pcci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-    pcci.pNext = NULL;
-    pcci.flags = 0;
-    pcci.initialDataSize = 0;
-    pcci.pInitialData = NULL;
-    r = vkCreatePipelineCache(device, &pcci, NULL, &ctx->pipeline_cache);
+    r = vkr_create_pipeline_cache(device, &ctx->pipeline_cache);
     if (r != VK_SUCCESS) {
         vkDestroyPipelineLayout(device, ctx->pipeline_layout, NULL);
         vkDestroyDescriptorSetLayout(device, ctx->set_layout, NULL);
@@ -412,19 +402,9 @@ VkResult vkquant_create_context(VkPhysicalDevice pd, VkDevice device,
 
     /* Descriptor pool only needed for non-push-descriptor fallback */
     if (!ctx->has_push_descriptor) {
-        VkDescriptorPoolSize pool_sizes[1];
-        pool_sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        pool_sizes[0].descriptorCount = VKQUANT_MAX_PIPELINES * 2;
-
-        VkDescriptorPoolCreateInfo dpci;
-        dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        dpci.pNext = NULL;
-        dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        dpci.maxSets = VKQUANT_MAX_PIPELINES;
-        dpci.poolSizeCount = 1;
-        dpci.pPoolSizes = pool_sizes;
-
-        r = vkCreateDescriptorPool(device, &dpci, NULL, &ctx->descriptor_pool);
+        r = vkr_create_descriptor_pool(device, VKQUANT_MAX_PIPELINES,
+                                       VKQUANT_MAX_PIPELINES * 2,
+                                       &ctx->descriptor_pool);
         if (r != VK_SUCCESS) {
             vkDestroyPipelineCache(device, ctx->pipeline_cache, NULL);
             vkDestroyPipelineLayout(device, ctx->pipeline_layout, NULL);
@@ -494,5 +474,62 @@ VkResult vkquant_dequant_q4_0_f32(VkQuantContext *ctx, VkCommandBuffer cmd,
     pc.num_blocks = num_blocks;
     return vkquant_cmd_dispatch(ctx, cmd, VKQUANT_KERNEL_Q4_0_DEQUANT,
         &pc, elem_to_groups(num_blocks * 32u),
+        input, output);
+}
+
+/* ── Public API: Q4_K / Q6_K / IQ4_XS dequantization (f32) ────────────── */
+
+VkResult vkquant_dequant_q4k_f32(VkQuantContext *ctx, VkCommandBuffer cmd,
+                                 uint32_t num_blocks, VkBuffer input, VkBuffer output) {
+    vkquant_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_blocks = num_blocks;
+    return vkquant_cmd_dispatch(ctx, cmd, VKQUANT_KERNEL_Q4K_DEQUANT,
+        &pc, num_blocks,
+        input, output);
+}
+
+VkResult vkquant_dequant_q6k_f32(VkQuantContext *ctx, VkCommandBuffer cmd,
+                                 uint32_t num_blocks, VkBuffer input, VkBuffer output) {
+    vkquant_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_blocks = num_blocks;
+    return vkquant_cmd_dispatch(ctx, cmd, VKQUANT_KERNEL_Q6K_DEQUANT,
+        &pc, num_blocks,
+        input, output);
+}
+
+VkResult vkquant_dequant_iq4xs_f32(VkQuantContext *ctx, VkCommandBuffer cmd,
+                                   uint32_t num_blocks, VkBuffer input, VkBuffer output) {
+    vkquant_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_blocks = num_blocks;
+    return vkquant_cmd_dispatch(ctx, cmd, VKQUANT_KERNEL_IQ4XS_DEQUANT,
+        &pc, num_blocks,
+        input, output);
+}
+
+/* ── Public API: forward quantization (f32 -> Q8_0 / Q4_0) ──────────────
+ * Our Q8_0/Q4_0 formats use an f32 scale (matching our existing dequant
+ * shaders). Each workgroup of 256 threads handles 8 blocks of 32 elements.
+ */
+
+VkResult vkquant_quantize_q8_0_f32(VkQuantContext *ctx, VkCommandBuffer cmd,
+                                   uint32_t num_blocks, VkBuffer input, VkBuffer output) {
+    vkquant_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_blocks = num_blocks;
+    return vkquant_cmd_dispatch(ctx, cmd, VKQUANT_KERNEL_Q8_0_QUANT,
+        &pc, (num_blocks + 7u) / 8u,
+        input, output);
+}
+
+VkResult vkquant_quantize_q4_0_f32(VkQuantContext *ctx, VkCommandBuffer cmd,
+                                   uint32_t num_blocks, VkBuffer input, VkBuffer output) {
+    vkquant_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_blocks = num_blocks;
+    return vkquant_cmd_dispatch(ctx, cmd, VKQUANT_KERNEL_Q4_0_QUANT,
+        &pc, (num_blocks + 7u) / 8u,
         input, output);
 }

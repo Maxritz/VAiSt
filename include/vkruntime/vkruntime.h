@@ -41,6 +41,56 @@ extern "C" {
  */
 typedef struct VkRuntime VkRuntime;
 
+/**
+ * \brief Device capability set shared by every library's context.
+ *
+ * Filled by vkr_detect_capabilities(). This is the single de-duplicated
+ * description of what the five per-library contexts (vkmath, vkblas, vkquant,
+ * vkrand, vkfft) used to detect inline: shaderInt64 / subgroup /
+ * cooperative-matrix feature flags, subgroup and workgroup sizes, the
+ * vkCmdPushDescriptorSetKHR device function pointer, and the shader-tier
+ * architecture index/name.
+ *
+ * arch_index follows the tier ladder: 2 = coopmatrix, 1 = subgroup,
+ * 0 = baseline. arch_name is one of the static strings "coopmatrix",
+ * "subgroup", "baseline".
+ */
+typedef struct {
+    VkBool32 has_shader_int64;      /**< VkPhysicalDeviceFeatures::shaderInt64.  */
+    VkBool32 has_subgroup;          /**< Compute-stage subgroup ops available.   */
+    VkBool32 has_coop_matrix;       /**< VK_KHR_cooperative_matrix feature.      */
+    VkBool32 has_push_descriptor;   /**< vkCmdPushDescriptorSetKHR available.    */
+    uint32_t subgroup_size;         /**< Device subgroup size (e.g. 64 RDNA2).   */
+    uint32_t max_workgroup_size[3]; /**< maxComputeWorkGroupSize x/y/z limits.   */
+    PFN_vkCmdPushDescriptorSetKHR push_desc_fn; /**< Loaded device fn (may be NULL). */
+    uint32_t arch_index;            /**< 2=coopmatrix, 1=subgroup, 0=baseline.   */
+    const char *arch_name;          /**< Static name for arch_index.             */
+} VkRuntimeCaps;
+
+/* ===========================================================================
+ * Capability detection
+ * ========================================================================== */
+
+/**
+ * \brief Detect the GPU capability set for a physical/logical device pair.
+ *
+ * Single implementation of the capability detection every higher library used
+ * to duplicate at context creation: a VkPhysicalDeviceFeatures2 pNext chain
+ * (with VkPhysicalDeviceCooperativeMatrixFeaturesKHR) for shaderInt64 and
+ * cooperative matrix, a VkPhysicalDeviceProperties2 pNext chain (with
+ * VkPhysicalDeviceSubgroupProperties) for subgroup size/stages and the
+ * maxComputeWorkGroupSize limits, and a vkGetDeviceProcAddr lookup for
+ * vkCmdPushDescriptorSetKHR.
+ *
+ * \param pd     Physical device to query.
+ * \param device Logical device (used for the push-descriptor fn lookup).
+ * \param caps   Receives the detected capability set.
+ * \retval VK_SUCCESS
+ * \retval VK_ERROR_INITIALIZATION_FAILED Invalid argument.
+ */
+VkResult vkr_detect_capabilities(VkPhysicalDevice pd, VkDevice device,
+                                 VkRuntimeCaps* caps);
+
 /* ===========================================================================
  * Runtime lifecycle
  * ========================================================================== */
@@ -282,18 +332,59 @@ VkResult vkr_create_command_pool(VkRuntime* rt, uint32_t queue_family,
  *
  * Allocates \p max_sets sets, each able to consume up to \p ssbo_count storage
  * buffer descriptors (the descriptor count is the pooled total, not per-set).
- * The pool supports vkFreeDescriptorSet(). The caller owns the returned pool
- * and destroys it with vkDestroyDescriptorPool().
+ * The pool is created with VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT
+ * and a single VK_DESCRIPTOR_TYPE_STORAGE_BUFFER pool size. This is the shared
+ * helper every library's context uses for its push-descriptor fallback pool.
+ * The caller owns the returned pool and destroys it with
+ * vkDestroyDescriptorPool().
  *
- * \param rt         Valid runtime.
+ * \param device     Logical device to create the pool on.
  * \param max_sets   Maximum number of descriptor sets that can be allocated.
  * \param ssbo_count Pooled count of VK_DESCRIPTOR_TYPE_STORAGE_BUFFER descriptors.
  * \param pPool      Receives the VkDescriptorPool.
  * \retval VK_SUCCESS
+ * \retval VK_ERROR_INITIALIZATION_FAILED Invalid argument.
  */
-VkResult vkr_create_descriptor_pool(VkRuntime* rt, uint32_t max_sets,
+VkResult vkr_create_descriptor_pool(VkDevice device, uint32_t max_sets,
                                     uint32_t ssbo_count,
                                     VkDescriptorPool* pPool);
+
+/**
+ * \brief Create a pipeline layout for one descriptor set + push constants.
+ *
+ * Shared helper for the per-library pipeline layouts: binds exactly \p set_layout
+ * as set 0 and declares \p push_range_count compute-stage push-constant ranges.
+ * The caller owns the returned layout and destroys it with
+ * vkDestroyPipelineLayout().
+ *
+ * \param device           Logical device to create the layout on.
+ * \param set_layout       Descriptor set layout for set 0 (may be VK_NULL_HANDLE).
+ * \param push_range_count Number of push-constant ranges (0 allowed).
+ * \param ranges           Array of \p push_range_count VkPushConstantRange.
+ * \param pLayout          Receives the VkPipelineLayout.
+ * \retval VK_SUCCESS
+ * \retval VK_ERROR_INITIALIZATION_FAILED Invalid argument.
+ */
+VkResult vkr_create_pipeline_layout(VkDevice device,
+                                    VkDescriptorSetLayout set_layout,
+                                    uint32_t push_range_count,
+                                    const VkPushConstantRange* ranges,
+                                    VkPipelineLayout* pLayout);
+
+/**
+ * \brief Create a driver-level pipeline cache.
+ *
+ * Shared helper for the per-library pipeline caches: creates an empty
+ * VkPipelineCache (no initial data) that accelerates lazy compute pipeline
+ * creation. The caller owns the returned cache and destroys it with
+ * vkDestroyPipelineCache().
+ *
+ * \param device Logical device to create the cache on.
+ * \param pCache Receives the VkPipelineCache.
+ * \retval VK_SUCCESS
+ * \retval VK_ERROR_INITIALIZATION_FAILED Invalid argument.
+ */
+VkResult vkr_create_pipeline_cache(VkDevice device, VkPipelineCache* pCache);
 
 /**
  * \brief Wait until all submitted work on the runtime's queue is complete.

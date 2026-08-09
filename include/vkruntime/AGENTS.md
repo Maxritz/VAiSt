@@ -15,7 +15,16 @@ no shaders (no `shaders_spv.h`, no `shaders/` subtree).
 
 ```
 typedef struct VkRuntime VkRuntime;   /* opaque */
+typedef struct VkRuntimeCaps {        /* capability set, see vkruntime.h */
+    VkBool32 has_shader_int64, has_subgroup, has_coop_matrix, has_push_descriptor;
+    uint32_t subgroup_size;
+    uint32_t max_workgroup_size[3];
+    PFN_vkCmdPushDescriptorSetKHR push_desc_fn;
+    uint32_t arch_index;              /* 2=coopmatrix, 1=subgroup, 0=baseline */
+    const char* arch_name;
+} VkRuntimeCaps;
 
+VkResult vkr_detect_capabilities(VkPhysicalDevice, VkDevice, VkRuntimeCaps*);
 VkResult vkr_create_runtime(VkPhysicalDevice, VkDevice, VkQueue, VkRuntime**);
 void     vkr_destroy_runtime(VkRuntime*);
 uint32_t    vkr_get_arch_index(VkRuntime*);
@@ -32,8 +41,12 @@ VkResult vkr_upload(VkRuntime*, VkCommandBuffer, VkQueue, const void*,
 VkResult vkr_download(VkRuntime*, VkCommandBuffer, VkQueue, VkBuffer,
                       VkDeviceSize, void*, VkDeviceSize);
 VkResult vkr_create_command_pool(VkRuntime*, uint32_t queue_family, VkCommandPool*);
-VkResult vkr_create_descriptor_pool(VkRuntime*, uint32_t max_sets,
+VkResult vkr_create_descriptor_pool(VkDevice, uint32_t max_sets,
                                     uint32_t ssbo_count, VkDescriptorPool*);
+VkResult vkr_create_pipeline_layout(VkDevice, VkDescriptorSetLayout,
+                                    uint32_t push_range_count,
+                                    const VkPushConstantRange*, VkPipelineLayout*);
+VkResult vkr_create_pipeline_cache(VkDevice, VkPipelineCache*);
 void     vkr_wait_idle(VkRuntime*);
 ```
 
@@ -56,8 +69,14 @@ void     vkr_wait_idle(VkRuntime*);
   (begin → one vkCmdCopyBuffer → end → submit → wait → reset). On return the
   command buffer is reusable; it must be unbegun on entry and come from a pool
   with RESET_COMMAND_BUFFER_BIT on the same queue family as the submitted queue.
-- **Pool helpers return caller-owned objects**: command/descriptor pools are
-  destroyed by the caller via `vkDestroy*`, not by the runtime.
+- **Pool helpers return caller-owned objects**: command/descriptor pools,
+  pipeline layouts, and pipeline caches are destroyed by the caller via
+  `vkDestroy*`, not by the runtime.
+- **Single capability implementation**: `vkr_detect_capabilities()` is the one
+  place the stack queries shaderInt64 / subgroup / cooperative-matrix / push
+  descriptors and derives arch_index/arch_name. `vkr_create_runtime()` caches
+  its result; every higher library (vkmath/vkblas/vkquant/vkrand/vkfft) calls
+  it at context creation instead of duplicating the pNext chains.
 - **No stubs**: every declared function has a real implementation and a
   passing harness test (tests/test_vkruntime.c).
 - **C99 + DOX**: DOX `\brief`/`\param`/`\retval` doc comments on every function.

@@ -8,7 +8,11 @@
  *   (b) pooled allocator: 1 MiB + 1000 varying-size sub-allocations, all
  *       distinct, then vkr_free of everything;
  *   (c) upload/download round-trip through a device-local buffer;
- *   (d) command-pool + descriptor-pool helpers.
+ *   (d) command-pool + descriptor-pool helpers;
+ *   (e) vkr_detect_capabilities() consistency with the runtime's arch
+ *       queries, and nonzero subgroup size;
+ *   (f) vkr_create_descriptor_pool / vkr_create_pipeline_cache /
+ *       vkr_create_pipeline_layout creation helpers return VK_SUCCESS.
  *
  * This is a header-only test: it includes only <vulkan/vulkan.h> and the
  * public vkruntime.h header (relative include). No internal headers are pulled.
@@ -327,12 +331,81 @@ int main(void)
         overall_pass &= report(r == VK_SUCCESS, "command pool created");
         if (cmd_pool) vkDestroyCommandPool(device, cmd_pool, NULL);
 
-        r = vkr_create_descriptor_pool(rt, 64, 256, &desc_pool);
+        r = vkr_create_descriptor_pool(device, 64, 256, &desc_pool);
         overall_pass &= report(r == VK_SUCCESS, "descriptor pool created");
         if (desc_pool) vkDestroyDescriptorPool(device, desc_pool, NULL);
 
         vkr_wait_idle(rt);
         overall_pass &= report(1, "vkr_wait_idle");
+    }
+
+    /* ── 10. (e) vkr_detect_capabilities consistency ───────────────────── */
+    printf("  --- vkr_detect_capabilities ---\n");
+    {
+        VkRuntimeCaps caps;
+        memset(&caps, 0, sizeof(caps));
+        r = vkr_detect_capabilities(physical_device, device, &caps);
+        overall_pass &= report(r == VK_SUCCESS, "detect succeeds");
+
+        overall_pass &= report(caps.arch_index == vkr_get_arch_index(rt),
+                               "arch index matches runtime");
+        int name_ok = caps.arch_name != NULL &&
+                      strcmp(caps.arch_name, vkr_get_arch_name(rt)) == 0;
+        overall_pass &= report(name_ok, "arch name matches runtime");
+        overall_pass &= report(caps.subgroup_size > 0, "subgroup size > 0");
+        overall_pass &= report(caps.subgroup_size == vkr_get_subgroup_size(rt),
+                               "subgroup size matches runtime");
+        overall_pass &= report(caps.has_subgroup == vkr_has_subgroup(rt),
+                               "has_subgroup matches runtime");
+        overall_pass &= report(caps.has_coop_matrix == vkr_has_coop_matrix(rt),
+                               "has_coop_matrix matches runtime");
+    }
+
+    /* ── 11. (f) creation helpers ──────────────────────────────────────── */
+    printf("  --- creation helpers ---\n");
+    {
+        VkPipelineCache cache = VK_NULL_HANDLE;
+        VkDescriptorPool pool = VK_NULL_HANDLE;
+        VkPipelineLayout layout = VK_NULL_HANDLE;
+        VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
+
+        r = vkr_create_pipeline_cache(device, &cache);
+        overall_pass &= report(r == VK_SUCCESS, "pipeline cache created");
+
+        r = vkr_create_descriptor_pool(device, 64, 256, &pool);
+        overall_pass &= report(r == VK_SUCCESS, "descriptor pool created");
+
+        /* trivial set layout (one SSBO binding) + one push-constant range */
+        VkDescriptorSetLayoutBinding binding;
+        memset(&binding, 0, sizeof(binding));
+        binding.binding = 0;
+        binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        binding.descriptorCount = 1;
+        binding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutCreateInfo dslci;
+        memset(&dslci, 0, sizeof(dslci));
+        dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        dslci.bindingCount = 1;
+        dslci.pBindings = &binding;
+        r = vkCreateDescriptorSetLayout(device, &dslci, NULL, &set_layout);
+        overall_pass &= report(r == VK_SUCCESS, "set layout created");
+
+        if (r == VK_SUCCESS) {
+            VkPushConstantRange pcr;
+            memset(&pcr, 0, sizeof(pcr));
+            pcr.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            pcr.offset = 0;
+            pcr.size = 16;
+            r = vkr_create_pipeline_layout(device, set_layout, 1, &pcr,
+                                           &layout);
+            overall_pass &= report(r == VK_SUCCESS, "pipeline layout created");
+        }
+
+        if (cache) vkDestroyPipelineCache(device, cache, NULL);
+        if (pool) vkDestroyDescriptorPool(device, pool, NULL);
+        if (layout) vkDestroyPipelineLayout(device, layout, NULL);
+        if (set_layout) vkDestroyDescriptorSetLayout(device, set_layout, NULL);
     }
 
 cleanup:

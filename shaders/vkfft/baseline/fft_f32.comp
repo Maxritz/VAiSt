@@ -2,11 +2,22 @@
 
 // Forward/inverse radix-2 complex FFT (f32), baseline tier.
 //
-// One workgroup of 256 threads per FFT; n active elements (n = power of two,
-// 2 <= n <= 1024). Each thread strides over up to n/256 elements via a strided
-// loop, so a single 256-thread workgroup covers the whole FFT regardless of n.
-// Buffer layout is interleaved (Re, Im) pairs: element j lives at
-// in[2j], in[2j+1] and out[2j], out[2j+1].
+// One workgroup of 256 threads per length-n transform; n active elements
+// (n = power of two, 2 <= n <= 1024). Each thread strides over up to n/256
+// elements via a strided loop, so a single 256-thread workgroup covers the
+// whole transform regardless of n. Buffer layout is interleaved (Re, Im)
+// pairs: element j lives at in[2j], in[2j+1] and out[2j], out[2j+1].
+//
+// pc.mode selects which slice of a buffer this workgroup transforms:
+//   mode 0 (row):  workgroup w transforms the w-th contiguous run of n
+//                  elements: base = w*n, stride 1. This is the 1D FFT when
+//                  the dispatch is (1,1,1) and w == 0, and one row of an
+//                  N x N 2D transform when dispatch is (N,1,1).
+//   mode 1 (col):  workgroup w transforms the w-th strided column of an
+//                  N x N 2D transform: base = w, stride = n (in place over
+//                  the same buffer after the row pass).
+// The kernel body is identical for both modes: bit-reversal load, shared
+// memory, log2(n) radix-2 stages, strided store.
 //
 // Algorithm (shared-memory Cooley-Tukey DIT):
 //   1. Load input into shared memory with a bit-reversal permutation.
@@ -28,7 +39,7 @@ layout(push_constant) uniform PC {
     uint n;          // FFT size (power of two, 2..1024)
     uint log2n;      // log2(n)
     uint direction;  // 0 = forward, 1 = inverse
-    uint _pad;
+    uint mode;       // 0 = row (stride 1), 1 = col (stride n)
 } pc;
 
 layout(set = 0, binding = 0) restrict readonly buffer BufIn  { vec2 in_data[]; };
@@ -56,11 +67,17 @@ void main() {
     uint tid = gl_LocalInvocationID.x;
     uint iters = (pc.n + 255u) / 256u;
 
-    // Load with bit-reversal permutation. s[rev] = in[idx] for idx < n.
+    // Buffer slice: base = first element of the slice, stride = element step.
+    // Row: base = wg*n, stride 1. Col: base = wg, stride n.
+    uint base   = (pc.mode == 0u) ? gl_WorkGroupID.x * pc.n : gl_WorkGroupID.x;
+    uint stride = (pc.mode == 0u) ? 1u : pc.n;
+
+    // Load with bit-reversal permutation. s[rev] = in[base + idx*stride] for
+    // idx < n (idx is the local FFT element index).
     for (uint e = 0u; e < iters; e++) {
         uint idx = tid + e * 256u;
         if (idx < pc.n) {
-            s[bit_reverse(idx, pc.log2n)] = in_data[idx];
+            s[bit_reverse(idx, pc.log2n)] = in_data[base + idx * stride];
         }
     }
     barrier();
@@ -93,11 +110,11 @@ void main() {
         barrier();
     }
 
-    // Write result: element j goes to out[2j], out[2j+1].
+    // Write result: element idx goes to out[base + idx*stride].
     for (uint e = 0u; e < iters; e++) {
         uint idx = tid + e * 256u;
         if (idx < pc.n) {
-            out_data[idx] = s[idx];
+            out_data[base + idx * stride] = s[idx];
         }
     }
 }

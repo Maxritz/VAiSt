@@ -12,8 +12,12 @@ Child of root `AGENTS.md` and `include/vkruntime/AGENTS.md`.
 | `VkPhysicalDeviceCooperativeMatrixFeaturesKHR.cooperativeMatrix` | pNext on `VkPhysicalDeviceFeatures2` | cooperative matrix |
 | `vkGetDeviceProcAddr("vkCmdPushDescriptorSetKHR")` | device fn ptr | push descriptors |
 
-Same pNext-chain technique as `vkmath_init_capabilities()`. Arch index mirrors
-the vkmath tier ladder: 2 = coopmatrix, 1 = subgroup, 0 = baseline.
+Implemented as the public `vkr_detect_capabilities()` (fills `VkRuntimeCaps`);
+`vkr_create_runtime()` caches the result into the runtime, and every higher
+library (vkmath/vkblas/vkquant/vkrand/vkfft) calls the same function at context
+creation. Same pNext-chain technique the libraries used to duplicate inline.
+Arch index mirrors the vkmath tier ladder: 2 = coopmatrix, 1 = subgroup,
+0 = baseline.
 
 ### Pooled allocator (hipMalloc/hipFree equivalent)
 - Two pools: device-local (index 0) and host-visible+coherent (index 1).

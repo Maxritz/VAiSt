@@ -52,17 +52,24 @@ static uint32_t pool_index_for_usage(VkBufferUsageFlags usage)
 /**
  * \brief Detect shaderInt64, subgroup, cooperative matrix, push descriptors.
  *
- * Mirrors vkmath_init_capabilities(): feature detection through a
+ * Mirrors the capability detection every higher library (vkmath/vkblas/vkquant/
+ * vkrand/vkfft) used to duplicate inline: feature detection through a
  * VkPhysicalDeviceCooperativeMatrixFeaturesKHR pNext on
  * VkPhysicalDeviceFeatures2, subgroup info through a
- * VkPhysicalDeviceSubgroupProperties pNext on VkPhysicalDeviceProperties2.
+ * VkPhysicalDeviceSubgroupProperties pNext on VkPhysicalDeviceProperties2,
+ * and a vkGetDeviceProcAddr lookup for vkCmdPushDescriptorSetKHR.
  *
- * \param rt Runtime whose caps are populated.
- * \param pd Physical device to query.
+ * \param pd     Physical device to query.
+ * \param device Logical device (used for the push-descriptor fn lookup).
+ * \param caps   Receives the detected capability set.
+ * \retval VK_SUCCESS
+ * \retval VK_ERROR_INITIALIZATION_FAILED Invalid argument.
  */
-static void vkr_init_capabilities(VkRuntime *rt, VkPhysicalDevice pd)
+VkResult vkr_detect_capabilities(VkPhysicalDevice pd, VkDevice device,
+                                 VkRuntimeCaps *caps)
 {
-    vkr_caps_t *caps = &rt->caps;
+    if (!pd || !device || !caps) return VK_ERROR_INITIALIZATION_FAILED;
+    memset(caps, 0, sizeof(*caps));
 
     /* shaderInt64 + cooperative matrix features (pNext chain) */
     VkPhysicalDeviceCooperativeMatrixFeaturesKHR coop_features;
@@ -90,6 +97,9 @@ static void vkr_init_capabilities(VkRuntime *rt, VkPhysicalDevice pd)
     vkGetPhysicalDeviceProperties2(pd, &props2);
 
     caps->subgroup_size = subgroup_props.subgroupSize;
+    caps->max_workgroup_size[0] = props2.properties.limits.maxComputeWorkGroupSize[0];
+    caps->max_workgroup_size[1] = props2.properties.limits.maxComputeWorkGroupSize[1];
+    caps->max_workgroup_size[2] = props2.properties.limits.maxComputeWorkGroupSize[2];
 
     /* Subgroup is a core Vulkan 1.3+ feature; supportedStages gates compute */
     caps->has_subgroup = (subgroup_props.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT)
@@ -98,19 +108,33 @@ static void vkr_init_capabilities(VkRuntime *rt, VkPhysicalDevice pd)
     /* Highest supported shader tier (mirrors vkmath tier selection) */
     if (caps->has_coop_matrix) {
         caps->arch_index = 2;
-        memcpy(caps->arch_name, "coopmatrix", 11);
+        caps->arch_name = "coopmatrix";
     } else if (caps->has_subgroup) {
         caps->arch_index = 1;
-        memcpy(caps->arch_name, "subgroup", 9);
+        caps->arch_name = "subgroup";
     } else {
         caps->arch_index = 0;
-        memcpy(caps->arch_name, "baseline", 9);
+        caps->arch_name = "baseline";
     }
 
     /* Push descriptor availability via device function pointer */
-    rt->push_desc_fn = (PFN_vkCmdPushDescriptorSetKHR)
-        vkGetDeviceProcAddr(rt->device, "vkCmdPushDescriptorSetKHR");
-    caps->has_push_descriptor = rt->push_desc_fn ? VK_TRUE : VK_FALSE;
+    caps->push_desc_fn = (PFN_vkCmdPushDescriptorSetKHR)
+        vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSetKHR");
+    caps->has_push_descriptor = caps->push_desc_fn ? VK_TRUE : VK_FALSE;
+
+    return VK_SUCCESS;
+}
+
+/**
+ * \brief Populate a runtime's cached capability set.
+ *
+ * \param rt Runtime whose caps are populated.
+ * \param pd Physical device to query.
+ */
+static void vkr_init_capabilities(VkRuntime *rt, VkPhysicalDevice pd)
+{
+    (void)vkr_detect_capabilities(pd, rt->device, &rt->caps);
+    rt->push_desc_fn = rt->caps.push_desc_fn;
 }
 
 /* ===========================================================================
@@ -785,11 +809,11 @@ VkResult vkr_create_command_pool(VkRuntime *rt, uint32_t queue_family,
     return vkCreateCommandPool(rt->device, &cpci, NULL, pPool);
 }
 
-VkResult vkr_create_descriptor_pool(VkRuntime *rt, uint32_t max_sets,
+VkResult vkr_create_descriptor_pool(VkDevice device, uint32_t max_sets,
                                     uint32_t ssbo_count,
                                     VkDescriptorPool *pPool)
 {
-    if (!rt || !pPool) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!device || !pPool) return VK_ERROR_INITIALIZATION_FAILED;
 
     VkDescriptorPoolSize pool_size;
     memset(&pool_size, 0, sizeof(pool_size));
@@ -803,7 +827,36 @@ VkResult vkr_create_descriptor_pool(VkRuntime *rt, uint32_t max_sets,
     dpci.maxSets = max_sets;
     dpci.poolSizeCount = 1;
     dpci.pPoolSizes = &pool_size;
-    return vkCreateDescriptorPool(rt->device, &dpci, NULL, pPool);
+    return vkCreateDescriptorPool(device, &dpci, NULL, pPool);
+}
+
+VkResult vkr_create_pipeline_layout(VkDevice device,
+                                    VkDescriptorSetLayout set_layout,
+                                    uint32_t push_range_count,
+                                    const VkPushConstantRange *ranges,
+                                    VkPipelineLayout *pLayout)
+{
+    if (!device || !pLayout) return VK_ERROR_INITIALIZATION_FAILED;
+    if (push_range_count > 0 && !ranges) return VK_ERROR_INITIALIZATION_FAILED;
+
+    VkPipelineLayoutCreateInfo plci;
+    memset(&plci, 0, sizeof(plci));
+    plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plci.setLayoutCount = 1;
+    plci.pSetLayouts = &set_layout;
+    plci.pushConstantRangeCount = push_range_count;
+    plci.pPushConstantRanges = ranges;
+    return vkCreatePipelineLayout(device, &plci, NULL, pLayout);
+}
+
+VkResult vkr_create_pipeline_cache(VkDevice device, VkPipelineCache *pCache)
+{
+    if (!device || !pCache) return VK_ERROR_INITIALIZATION_FAILED;
+
+    VkPipelineCacheCreateInfo pcci;
+    memset(&pcci, 0, sizeof(pcci));
+    pcci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    return vkCreatePipelineCache(device, &pcci, NULL, pCache);
 }
 
 void vkr_wait_idle(VkRuntime *rt)

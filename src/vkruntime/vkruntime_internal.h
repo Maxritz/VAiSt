@@ -63,17 +63,13 @@ typedef struct {
     VkDeviceSize   size;    /**< Region size (aligned up).                  */
 } vkr_alloc_slot_t;
 
-/* ── Capability cache ──────────────────────────────────────────────────── */
+/* ── Capability cache ────────────────────────────────────────────────────
+ * The runtime caches the same public VkRuntimeCaps struct filled by
+ * vkr_detect_capabilities(). The push_desc_fn member mirrors the runtime's
+ * own device-fn field so the getters can read caps directly.
+ * ──────────────────────────────────────────────────────────────────────── */
 
-typedef struct {
-    VkBool32 has_shader_int64;
-    VkBool32 has_subgroup;
-    VkBool32 has_coop_matrix;
-    VkBool32 has_push_descriptor;
-    uint32_t subgroup_size;
-    uint32_t arch_index;
-    char     arch_name[32];
-} vkr_caps_t;
+typedef VkRuntimeCaps vkr_caps_t;
 
 /* ── Runtime ───────────────────────────────────────────────────────────── */
 

@@ -11,11 +11,11 @@ Child of root `AGENTS.md` and `include/vkblas/AGENTS.md`.
 - No malloc per lookup; fixed-size cache array
 
 ### Capability detection at context creation
-| Extension | Tier unlocked | Fallback if absent |
-|-----------|---------------|--------------------|
-| `shaderInt64` | 64-bit push constants | 32-bit push constants (stride limited to 4GiB) |
-| `VK_KHR_shader_subgroup` | Tier 1 (subgroup) | Falls back to Tier 0 (baseline) |
-| `VK_KHR_cooperative_matrix` | Tier 2 (coopmatrix) | Falls back to Tier 1 (subgroup) |
+Delegated to VKRuntime's `vkr_detect_capabilities()` (see `src/vkruntime/`):
+vkblas links vkruntime and calls it once in `vkblas_create_context` to fill the
+context's capability fields. The driver-guarded `use_coopmat` (env
+`VAIT_COOPMATRIX`) and `active_tier` selection stay in the lib. The public
+`vkblas_init_capabilities()` re-detects via the same helper.
 
 ### SPIR-V embedding
 - All shader SPIR-V files are compiled to C arrays (`shaders_spv.h`)

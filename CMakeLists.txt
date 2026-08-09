@@ -30,6 +30,16 @@ if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/compile_shaders.ps1")
         COMMENT "Regenerating embedded SPIR-V headers (compile_shaders.ps1)")
 endif()
 
+# ── VKRuntime library (base layer; every other library sits on it) ──────────
+add_library(vkruntime STATIC src/vkruntime/vkruntime.c)
+target_include_directories(vkruntime PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/vkruntime
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
+)
+target_link_libraries(vkruntime PUBLIC Vulkan::Vulkan)
+target_compile_options(vkruntime PRIVATE -Wall -Wextra)
+
 # ── VKMath library ──────────────────────────────────────────────────────────
 add_library(vkmath STATIC
     src/vkmath/vkmath.c
@@ -38,8 +48,10 @@ target_include_directories(vkmath PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/include/vkmath
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vkmath
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/vkruntime
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
 )
-target_link_libraries(vkmath PUBLIC Vulkan::Vulkan)
+target_link_libraries(vkmath PUBLIC Vulkan::Vulkan vkruntime)
 target_compile_options(vkmath PRIVATE -Wall -Wextra)
 
 # ── VKBLAS library ──────────────────────────────────────────────────────────
@@ -50,8 +62,10 @@ target_include_directories(vkblas PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/include/vkblas
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vkblas
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/vkruntime
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
 )
-target_link_libraries(vkblas PUBLIC Vulkan::Vulkan)
+target_link_libraries(vkblas PUBLIC Vulkan::Vulkan vkruntime)
 target_compile_options(vkblas PRIVATE -Wall -Wextra)
 
 # ── Test harnesses ──────────────────────────────────────────────────────────
@@ -81,8 +95,10 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/include/vkquant
         ${CMAKE_CURRENT_SOURCE_DIR}/src/vkquant
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkruntime
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
     )
-    target_link_libraries(vkquant PUBLIC Vulkan::Vulkan)
+    target_link_libraries(vkquant PUBLIC Vulkan::Vulkan vkruntime)
     target_compile_options(vkquant PRIVATE -Wall -Wextra)
 
     add_executable(test_vkquant tests/test_vkquant.c)
@@ -99,8 +115,10 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/include/vkrand
         ${CMAKE_CURRENT_SOURCE_DIR}/src/vkrand
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkruntime
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
     )
-    target_link_libraries(vkrand PUBLIC Vulkan::Vulkan)
+    target_link_libraries(vkrand PUBLIC Vulkan::Vulkan vkruntime)
     target_compile_options(vkrand PRIVATE -Wall -Wextra)
 
     add_executable(test_vkrand tests/test_vkrand.c)
@@ -117,8 +135,10 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/include/vkfft
         ${CMAKE_CURRENT_SOURCE_DIR}/src/vkfft
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkruntime
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
     )
-    target_link_libraries(vkfft PUBLIC Vulkan::Vulkan)
+    target_link_libraries(vkfft PUBLIC Vulkan::Vulkan vkruntime)
     target_compile_options(vkfft PRIVATE -Wall -Wextra)
 
     add_executable(test_vkfft tests/test_vkfft.c)
@@ -128,16 +148,6 @@ if(BUILD_TESTING)
     )
     target_link_libraries(test_vkfft PRIVATE vkfft Vulkan::Vulkan)
     add_test(NAME test_vkfft COMMAND test_vkfft)
-
-    # ── VKRuntime library ─────────────────────────────────────────────────
-    add_library(vkruntime STATIC src/vkruntime/vkruntime.c)
-    target_include_directories(vkruntime PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkruntime
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
-    )
-    target_link_libraries(vkruntime PUBLIC Vulkan::Vulkan)
-    target_compile_options(vkruntime PRIVATE -Wall -Wextra)
 
     add_executable(test_vkruntime tests/test_vkruntime.c)
     target_include_directories(test_vkruntime PRIVATE

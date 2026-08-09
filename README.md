@@ -80,7 +80,8 @@ automatically based on GPU capabilities:
 | `vkblas_sgemm` | f32 | Single GEMM |
 | `vkblas_hgemm` | f16 (f32 accumulate) | Single GEMM |
 | `vkblas_dgemm` | f64 | Single GEMM |
-| `vkblas_s/h/dgemm_strided_batched` | f32/f16/f64 | Strided batched GEMM |
+| `vkblas_bgemm` | bf16 (f32 accumulate) | Single GEMM |
+| `vkblas_s/h/d/bgemm_strided_batched` | f32/f16/f64/bf16 | Strided batched GEMM |
 | `vkblas_gemm_ex` | f16/f32 | Mixed-precision with compute-type control |
 | `vkblas_sgemm_batched` | f32 | Per-buffer batched GEMM |
 
@@ -96,12 +97,12 @@ vkblas_sgemm(ctx, cmd, VKBLAS_OP_N, VKBLAS_OP_N,
              &beta, bufC, ldc, bufD, ldd);
 ```
 
-> **Note:** the coopmatrix tier currently uses the correct shared-memory
-> fallback. A real `GL_KHR_cooperative_matrix` (coopMatMulAddKHR) path was
-> written and compiles, but the AMD 26.7.1 driver crashes inside
-> `vkCreateComputePipelines` on RDNA2, so the fallback is retained until the
-> driver is fixed. `vkblas_bgemm` (bf16) remains a
-> `VK_ERROR_FEATURE_NOT_PRESENT` stub.
+> **Note (cooperative matrix):** a real `GL_KHR_cooperative_matrix`
+> (`coopMatMulAddKHR`) GEMM path is implemented and compiles to valid SPIR-V,
+> but it is **dormant by default** because the AMD 26.7.1 driver hard-crashes
+> inside `vkCreateComputePipelines` on any coopmat pipeline (RDNA2). Set the
+> env var `VAIT_COOPMATRIX=1` to enable it on a fixed/newer driver. The
+> correct shared-memory GEMM is the default path.
 
 ### VKBLAS L1/L2 (implemented)
 
@@ -148,6 +149,14 @@ context/pipeline-cache pattern as VKMath.
 |----------|-------------|
 | `vkquant_dequant_q8_0_f32` | Q8_0 blocks (f32 scale + 32×int8) → 32 f32 each |
 | `vkquant_dequant_q4_0_f32` | Q4_0 blocks (f32 scale + 16 packed nibbles) → 32 f32 each |
+| `vkquant_dequant_q4k_f32` | Q4_K blocks (ggml, 256 elems) → 256 f32 each |
+| `vkquant_dequant_q6k_f32` | Q6_K blocks (ggml, 256 elems) → 256 f32 each |
+| `vkquant_dequant_iq4xs_f32` | IQ4_XS blocks (ggml + iq4nl LUT) → 256 f32 each |
+| `vkquant_quantize_q8_0_f32` | Forward quantize f32 → Q8_0 blocks |
+| `vkquant_quantize_q4_0_f32` | Forward quantize f32 → Q4_0 blocks |
+
+Q4_K/Q6_K/IQ4_XS layouts are ported bit-exact from ggml-common.h (validated
+GPU vs CPU).
 
 ### VKRAND (implemented)
 
@@ -171,6 +180,8 @@ n = power of two ≤ 1024.
 | `vkfft_create_plan` / `vkfft_destroy_plan` | Create/destroy an FFT plan for size n |
 | `vkfft_execute_f32` / `vkfft_execute_inverse_f32` | Forward / inverse FFT (f32) |
 | `vkfft_execute_f16` / `vkfft_execute_inverse_f16` | Forward / inverse FFT (f16 I/O, f32 compute) |
+| `vkfft_create_plan_2d` | N×N plan (n = power of two ≤ 1024) |
+| `vkfft_execute_2d_f32` / `vkfft_execute_2d_inverse_f32` | Separable 2D forward / inverse FFT |
 
 ### VKRuntime (implemented)
 
@@ -179,23 +190,25 @@ The hipRuntime-equivalent base layer every library sits on. Vulkan-native.
 | Function | Description |
 |----------|-------------|
 | `vkr_create_runtime` / `vkr_destroy_runtime` | Device/queue wrapper + capability detection |
+| `vkr_detect_capabilities` | Shared feature/property detection + arch ladder |
 | `vkr_malloc` / `vkr_free` | Pooled buffer allocator (hipMalloc-equivalent) |
 | `vkr_upload` / `vkr_download` | Staging upload/download with sync |
-| `vkr_create_command_pool` / `vkr_create_descriptor_pool` | Pool helpers |
+| `vkr_create_command_pool` / `vkr_create_descriptor_pool` / `vkr_create_pipeline_layout` / `vkr_create_pipeline_cache` | Pool/layout/cache helpers |
 | `vkr_get_arch_index` / `vkr_get_arch_name` / `vkr_has_subgroup` / `vkr_has_coop_matrix` | Capability queries |
+
+All five libraries (vkmath, vkblas, vkquant, vkrand, vkfft) now build their
+contexts on VKRuntime: capability detection, descriptor pool, pipeline layout
+and pipeline cache are created via `vkr_*` helpers instead of duplicated
+inline Vulkan code.
 
 ### In Progress
 
-- **VKBLAS bf16 GEMM** — `vkblas_bgemm` still returns
-  `VK_ERROR_FEATURE_NOT_PRESENT` until the bf16 shader lands.
-- **Real cooperative-matrix GEMM** — blocked by the AMD 26.7.1 driver crash
-  on `coopMatMulAddKHR`; shared-memory fallback is active.
-- **VKFFT 2D** — separable row+column FFT not yet implemented.
-- **VKQuant advanced formats** — Q4_K, Q6_K, IQ4_XS and forward
-  quantization not yet implemented.
-- **Refactor the five per-library contexts onto VKRuntime** — the libs still
-  embed their own context/capability/pipeline-cache copies; adopting
-  VKRuntime is a follow-up.
+- **Real cooperative-matrix GEMM on this driver** — the coopmat path is
+  implemented and compiled but dormant (env `VAIT_COOPMATRIX=1` to enable);
+  the AMD 26.7.1 driver crashes on `coopMatMulAddKHR`. Testable on a newer
+  driver or via `ssh rr@macx`.
+- **Forward quantization of Q4_K/Q6_K/IQ4_XS** — only Q8_0/Q4_0 forward
+  quantize is implemented so far.
 
 ---
 

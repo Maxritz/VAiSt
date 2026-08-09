@@ -188,6 +188,80 @@ VkResult vkfft_execute_inverse_f16(VkFFTPlan* plan,
                                    VkBuffer input,
                                    VkBuffer output);
 
+/**
+ * \brief Create a 2D FFT plan for an N x N separable radix-2 transform.
+ *
+ * The buffer layout is an N x N grid of interleaved (Re, Im) pairs stored
+ * row-major: element (r, c) lives at in[2*(r*N+c)], in[2*(r*N+c)+1], and the
+ * buffer holds 2*N*N floats. N must be a power of two with 2 <= N <= 1024.
+ * The transform is separable: it is evaluated as N length-N row FFTs followed
+ * by N length-N column FFTs, both through the same shared-memory kernel (the
+ * row/column slice is selected by the `mode` push constant). The plan is
+ * direction-agnostic like the 1D plan; direction is passed per-execute, and
+ * the inverse is unnormalized so a forward-then-inverse round trip recovers
+ * the original grid scaled by N*N.
+ *
+ * \param physicalDevice Physical device handle (for capability queries).
+ * \param device          Logical device the plan will bind to.
+ * \param n               Grid dimension N (power of two, 2..1024).
+ * \param pPlan           Receives the plan handle on success.
+ * \retval VK_SUCCESS On success.
+ * \retval VKFFT_ERROR_INVALID_ARGUMENT n is not a power of two in [2, 1024].
+ * \retval VK_ERROR_OUT_OF_HOST_MEMORY Host allocation failed.
+ * \retval VK_ERROR_INITIALIZATION_FAILED Device queries or shader load failed.
+ */
+VkResult vkfft_create_plan_2d(VkPhysicalDevice physicalDevice,
+                              VkDevice device,
+                              uint32_t n,
+                              VkFFTPlan** pPlan);
+
+/**
+ * \brief Record a forward 2D f32 FFT dispatch into a command buffer.
+ *
+ * Computes the N x N forward transform of the interleaved complex grid in
+ * `input` (N = plan->n, power of two) and writes it to `output`. The
+ * transform is separable: pass 1 runs N workgroups in ROW mode reading
+ * `input` and writing `output`, a compute-to-compute memory barrier follows,
+ * and pass 2 runs N workgroups in COLUMN mode reading `output` and writing it
+ * in place. X[k][l] = sum_c sum_r x[r][c] * exp(-2*pi*i*(r*k + c*l)/N). The
+ * command buffer must be in the recording state; the caller orders barriers
+ * for anything that reads `output` afterwards.
+ *
+ * \param plan   Valid 2D plan (created with vkfft_create_plan_2d).
+ * \param cmd    Command buffer in the recording state.
+ * \param input  Storage buffer of 2*N*N floats (interleaved Re/Im, row-major).
+ * \param output Storage buffer of 2*N*N floats (interleaved Re/Im, row-major).
+ * \retval VK_SUCCESS On success.
+ * \retval VK_ERROR_INITIALIZATION_FAILED plan is NULL or not a 2D plan.
+ * \retval VK_ERROR_FEATURE_NOT_PRESENT No shader blob available for the tier.
+ */
+VkResult vkfft_execute_2d_f32(VkFFTPlan* plan,
+                              VkCommandBuffer cmd,
+                              VkBuffer input,
+                              VkBuffer output);
+
+/**
+ * \brief Record an inverse 2D f32 FFT dispatch into a command buffer.
+ *
+ * Same separable structure as vkfft_execute_2d_f32 but with the conjugated
+ * twiddles (y[r][c] = sum_l sum_k X[k][l] * exp(+2*pi*i*(k*r + l*c)/N)). The
+ * inverse is unnormalized (matching the rocfft default), so a
+ * forward-then-inverse round trip over both axes returns the original grid
+ * scaled by N*N.
+ *
+ * \param plan   Valid 2D plan (created with vkfft_create_plan_2d).
+ * \param cmd    Command buffer in the recording state.
+ * \param input  Storage buffer of 2*N*N floats (interleaved Re/Im, row-major).
+ * \param output Storage buffer of 2*N*N floats (interleaved Re/Im, row-major).
+ * \retval VK_SUCCESS On success.
+ * \retval VK_ERROR_INITIALIZATION_FAILED plan is NULL or not a 2D plan.
+ * \retval VK_ERROR_FEATURE_NOT_PRESENT No shader blob available for the tier.
+ */
+VkResult vkfft_execute_2d_inverse_f32(VkFFTPlan* plan,
+                                      VkCommandBuffer cmd,
+                                      VkBuffer input,
+                                      VkBuffer output);
+
 /* ===========================================================================
  * Queries
  * ========================================================================== */

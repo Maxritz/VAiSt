@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "vkruntime.h"
 #include "vkquant.h"
 
 /* ── Push constant block (std140, must match GLSL layout exactly) ──────── */
@@ -33,9 +34,14 @@ typedef char vkquant_pc_static_assert[sizeof(vkquant_push_constants_t) == 16 ? 1
 
 /* ── Kernel types ──────────────────────────────────────────────────────── */
 
-#define VKQUANT_KERNEL_Q8_0_DEQUANT 0
-#define VKQUANT_KERNEL_Q4_0_DEQUANT 1
-#define VKQUANT_KERNEL_COUNT        2
+#define VKQUANT_KERNEL_Q8_0_DEQUANT   0
+#define VKQUANT_KERNEL_Q4_0_DEQUANT   1
+#define VKQUANT_KERNEL_Q4K_DEQUANT    2
+#define VKQUANT_KERNEL_Q6K_DEQUANT    3
+#define VKQUANT_KERNEL_IQ4XS_DEQUANT  4
+#define VKQUANT_KERNEL_Q8_0_QUANT     5
+#define VKQUANT_KERNEL_Q4_0_QUANT     6
+#define VKQUANT_KERNEL_COUNT          7
 
 /* ── Capability tiers ──────────────────────────────────────────────────── */
 

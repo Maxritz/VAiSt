@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "vkruntime.h"
 #include "vkblas.h"  /* public types: VkBLASPointerMode_t, etc. */
 
 /* ── Data type constants ────────────────────────────────────────────────── */
@@ -84,6 +85,11 @@ struct VkBLASContext {
     /* capability flags */
     VkBool32 has_subgroup;
     VkBool32 has_coop_matrix;
+    /* Driver-guarded cooperative-matrix path. Default OFF: the AMD 26.7.1
+       Windows driver hard-crashes (0xE06D7363) inside vkCreateComputePipelines
+       for any module containing coopMatMulAddKHR. Only enabled when the
+       VAIT_COOPMATRIX env var is set AND the device advertises the feature. */
+    VkBool32 use_coopmat;
     uint32_t max_subgroup_size;
     uint32_t max_compute_workgroup_size[3];
 

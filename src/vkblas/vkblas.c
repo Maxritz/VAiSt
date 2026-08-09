@@ -15,6 +15,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/* ── bf16 -> f32 conversion (CPU side) ──────────────────────────────────── */
+
+/* bfloat16 is the high 16 bits of an IEEE-754 f32; zero the low mantissa
+   bits and reinterpret. Handles 0/inf/nan exactly (all share the exponent). */
+static float vkblas_bf16_to_f32(uint16_t b)
+{
+    uint32_t fbits = (uint32_t)b << 16;
+    float f;
+    memcpy(&f, &fbits, sizeof(f));
+    return f;
+}
+
 /* ── f16 -> f32 conversion (CPU side) ───────────────────────────────────── */
 
 static float vkblas_f16_to_f32(uint16_t h)
@@ -95,6 +107,11 @@ static const uint32_t* vkblas_select_spirv(VkBLASContext* ctx,
     (void)ctx;
     switch (tier) {
     case VKBLAS_TIER_COOPMATRIX:
+        /* Real coop-matrix shader is dormant unless explicitly enabled via
+           VAIT_COOPMATRIX; AMD 26.7.1 crashes on coopMatMulAddKHR pipelines.
+           When disabled, fall through to the shared-memory tiers below. */
+        if (ctx->use_coopmat != VK_TRUE)
+            return NULL;
         switch (data_type) {
         case VKBLAS_DTYPE_F32:
             *out_size = vkblas_spv_coopmatrix_gemm_f32_size;
@@ -118,6 +135,9 @@ static const uint32_t* vkblas_select_spirv(VkBLASContext* ctx,
         case VKBLAS_DTYPE_F16:
             *out_size = vkblas_spv_baseline_gemm_f16_size;
             return vkblas_spv_baseline_gemm_f16;
+        case VKBLAS_DTYPE_BF16:
+            *out_size = vkblas_spv_baseline_gemm_bf16_size;
+            return vkblas_spv_baseline_gemm_bf16;
         case VKBLAS_DTYPE_F64:
             *out_size = vkblas_spv_baseline_gemm_f64_size;
             return vkblas_spv_baseline_gemm_f64;
@@ -183,44 +203,6 @@ static VkResult vkblas_create_set_layout(VkBLASContext* ctx)
         .pBindings    = bindings,
     };
     return vkCreateDescriptorSetLayout(ctx->device, &dslci, NULL, &ctx->set_layout);
-}
-
-/* ── Pipeline layout ─────────────────────────────────────────────────────── */
-
-static VkResult vkblas_create_pipeline_layout(VkBLASContext* ctx)
-{
-    VkPushConstantRange pcr = {
-        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-        .offset     = 0,
-        .size       = sizeof(vkblas_push_constants_t),
-    };
-
-    VkPipelineLayoutCreateInfo plci = {
-        .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = 1,
-        .pSetLayouts    = &ctx->set_layout,
-        .pushConstantRangeCount = 1,
-        .pPushConstantRanges    = &pcr,
-    };
-    return vkCreatePipelineLayout(ctx->device, &plci, NULL, &ctx->pipeline_layout);
-}
-
-/* ── Descriptor pool ──────────────────────────────────────────────────────── */
-
-static VkResult vkblas_create_descriptor_pool(VkBLASContext* ctx)
-{
-    VkDescriptorPoolSize pool_sizes[1] = {
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VKBLAS_MAX_PIPELINES },
-    };
-
-    VkDescriptorPoolCreateInfo dpci = {
-        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-        .maxSets       = VKBLAS_MAX_PIPELINES,
-        .poolSizeCount = 1,
-        .pPoolSizes    = pool_sizes,
-    };
-    return vkCreateDescriptorPool(ctx->device, &dpci, NULL, &ctx->descriptor_pool);
 }
 
 /* ── Pipeline cache lookup / creation ─────────────────────────────────────── */
@@ -441,35 +423,60 @@ VkResult vkblas_create_context(VkPhysicalDevice physicalDevice,
 
     memset(ctx, 0, sizeof(*ctx));
     ctx->device = device;
-    ctx->pipeline_cache = VK_NULL_HANDLE;
 
-    /* Create pipeline cache */
-    VkPipelineCacheCreateInfo pcci = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
-    };
-    VkResult r = vkCreatePipelineCache(device, &pcci, NULL, &ctx->pipeline_cache);
+    /* Pipeline cache via VKRuntime helper */
+    VkResult r = vkr_create_pipeline_cache(device, &ctx->pipeline_cache);
     if (r != VK_SUCCESS) goto fail;
 
-    /* Create descriptor pool */
-    r = vkblas_create_descriptor_pool(ctx);
+    /* Descriptor pool via VKRuntime helper */
+    r = vkr_create_descriptor_pool(device, VKBLAS_MAX_PIPELINES,
+                                   VKBLAS_MAX_PIPELINES, &ctx->descriptor_pool);
     if (r != VK_SUCCESS) goto fail;
 
-    /* Create descriptor set layout */
+    /* Descriptor set layout (lib-specific, stays local) */
     r = vkblas_create_set_layout(ctx);
     if (r != VK_SUCCESS) goto fail;
 
-    /* Create pipeline layout */
-    r = vkblas_create_pipeline_layout(ctx);
+    /* Pipeline layout via VKRuntime helper; the push-constant range is
+       lib-specific and stays local. */
+    VkPushConstantRange pcr = {
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .offset     = 0,
+        .size       = sizeof(vkblas_push_constants_t),
+    };
+    r = vkr_create_pipeline_layout(device, ctx->set_layout, 1, &pcr,
+                                   &ctx->pipeline_layout);
     if (r != VK_SUCCESS) goto fail;
 
-    /* Detect capabilities inline (per AGENTS.md: "Capability detection at
-       context creation") using the physical device handle. */
-    r = vkblas_init_capabilities(ctx, physicalDevice);
+    /* Detect capabilities via VKRuntime (single implementation). */
+    VkRuntimeCaps caps;
+    r = vkr_detect_capabilities(physicalDevice, device, &caps);
     if (r != VK_SUCCESS) {
         /* Fall back to baseline if detection fails */
         ctx->active_tier = VKBLAS_TIER_BASELINE;
         ctx->has_subgroup = VK_FALSE;
         ctx->has_coop_matrix = VK_FALSE;
+    } else {
+        ctx->has_subgroup = caps.has_subgroup;
+        ctx->has_coop_matrix = caps.has_coop_matrix;
+        ctx->max_subgroup_size = caps.subgroup_size;
+        ctx->max_compute_workgroup_size[0] = caps.max_workgroup_size[0];
+        ctx->max_compute_workgroup_size[1] = caps.max_workgroup_size[1];
+        ctx->max_compute_workgroup_size[2] = caps.max_workgroup_size[2];
+
+        /* Driver-guarded cooperative-matrix path (see AGENTS.md): default OFF
+           because the AMD 26.7.1 Windows driver hard-crashes
+           (0xE06D7363) inside vkCreateComputePipelines for modules containing
+           coopMatMulAddKHR. Enabled only when VAIT_COOPMATRIX is set. */
+        ctx->use_coopmat = (getenv("VAIT_COOPMATRIX") != NULL) &&
+                           (ctx->has_coop_matrix == VK_TRUE);
+        if (ctx->use_coopmat && ctx->has_subgroup) {
+            ctx->active_tier = VKBLAS_TIER_COOPMATRIX;
+        } else if (ctx->has_subgroup) {
+            ctx->active_tier = VKBLAS_TIER_SUBGROUP;
+        } else {
+            ctx->active_tier = VKBLAS_TIER_BASELINE;
+        }
     }
 
     *pContext = ctx;
@@ -528,38 +535,30 @@ const char* vkblas_get_arch_name(VkBLASContext* context)
 
 VkResult vkblas_init_capabilities(VkBLASContext* ctx, VkPhysicalDevice pd)
 {
-    /* Check for subgroup support */
-    {
-        VkPhysicalDeviceSubgroupProperties subgroup_props = {
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
-        };
-        VkPhysicalDeviceProperties2 props2 = {
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-            .pNext = &subgroup_props,
-        };
-        vkGetPhysicalDeviceProperties2(pd, &props2);
-        ctx->max_subgroup_size = subgroup_props.subgroupSize;
-        ctx->has_subgroup = (subgroup_props.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) ? VK_TRUE : VK_FALSE;
-        ctx->max_compute_workgroup_size[0] = props2.properties.limits.maxComputeWorkGroupSize[0];
-        ctx->max_compute_workgroup_size[1] = props2.properties.limits.maxComputeWorkGroupSize[1];
-        ctx->max_compute_workgroup_size[2] = props2.properties.limits.maxComputeWorkGroupSize[2];
-    }
+    if (!ctx) return VK_ERROR_INITIALIZATION_FAILED;
 
-    /* Check for cooperative matrix support */
-    {
-        VkPhysicalDeviceCooperativeMatrixFeaturesKHR coop_features = {
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR,
-        };
-        VkPhysicalDeviceFeatures2 features2 = {
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-            .pNext = &coop_features,
-        };
-        vkGetPhysicalDeviceFeatures2(pd, &features2);
-        ctx->has_coop_matrix = coop_features.cooperativeMatrix;
-    }
+    /* Single VKRuntime implementation: subgroup / cooperative-matrix /
+       shaderInt64 detection plus push-desc fn load. */
+    VkRuntimeCaps caps;
+    VkResult r = vkr_detect_capabilities(pd, ctx->device, &caps);
+    if (r != VK_SUCCESS) return r;
 
-    /* Select highest tier */
-    if (ctx->has_coop_matrix && ctx->has_subgroup) {
+    ctx->has_subgroup = caps.has_subgroup;
+    ctx->has_coop_matrix = caps.has_coop_matrix;
+    ctx->max_subgroup_size = caps.subgroup_size;
+    ctx->max_compute_workgroup_size[0] = caps.max_workgroup_size[0];
+    ctx->max_compute_workgroup_size[1] = caps.max_workgroup_size[1];
+    ctx->max_compute_workgroup_size[2] = caps.max_workgroup_size[2];
+
+    /* Select highest tier.
+       The cooperative-matrix tier is SELECTABLE but dormant by default: the
+       AMD 26.7.1 Windows driver crashes the whole process (0xE06D7363) inside
+       vkCreateComputePipelines when compiling a module that contains
+       coopMatMulAddKHR. We therefore only route through the coopmatrix shader
+       when the operator explicitly opts in via VAIT_COOPMATRIX. */
+    ctx->use_coopmat = (getenv("VAIT_COOPMATRIX") != NULL) &&
+                       (ctx->has_coop_matrix == VK_TRUE);
+    if (ctx->use_coopmat && ctx->has_subgroup) {
         ctx->active_tier = VKBLAS_TIER_COOPMATRIX;
     } else if (ctx->has_subgroup) {
         ctx->active_tier = VKBLAS_TIER_SUBGROUP;
@@ -616,6 +615,18 @@ static void vkblas_fill_scalars(uint32_t dtype, vkblas_push_constants_t* pc,
         memcpy(&pc->alpha, &av, sizeof(av));   /* offsets 12..19 */
         memcpy(&pc->_pad2, &bv, sizeof(bv));   /* offsets 76..83 */
         if (bv == 0.0)
+            pc->beta_is_zero = 1;
+        break;
+    }
+    case VKBLAS_DTYPE_BF16: {
+        /* bf16 alpha/beta: uint16 bits; promote to f32 via bits<<16. */
+        float av = (alpha != NULL)
+            ? vkblas_bf16_to_f32(*(const uint16_t*)alpha) : 1.0f;
+        float bv = (beta != NULL)
+            ? vkblas_bf16_to_f32(*(const uint16_t*)beta) : 0.0f;
+        pc->alpha = av;
+        pc->beta  = bv;
+        if (bv == 0.0f)
             pc->beta_is_zero = 1;
         break;
     }
@@ -839,9 +850,8 @@ VkResult vkblas_sgemm_batched(VkBLASContext*    context,
 }
 
 /* ── Non-f32 GEMM variants ───────────────────────────────────────────────── *
- * dgemm (f64) and hgemm (f16) use the same dispatch machinery as sgemm with
- * a dtype selector. bgemm (bf16) remains FEATURE_NOT_PRESENT until a bf16
- * shader is added.
+ * dgemm (f64), hgemm (f16) and bgemm (bf16) all use the same dispatch
+ * machinery as sgemm with a dtype selector (VKBLAS_DTYPE_F64 / F16 / BF16).
  * ─────────────────────────────────────────────────────────────────────────── */
 
 VkResult vkblas_dgemm(VkBLASContext* context, VkCommandBuffer cmd,
@@ -938,11 +948,16 @@ VkResult vkblas_bgemm(VkBLASContext* context, VkCommandBuffer cmd,
                       VkBuffer A, int32_t lda, VkBuffer B, int32_t ldb,
                       const uint16_t* beta, VkBuffer C, int32_t ldc,
                       VkBuffer D, int32_t ldd) {
-    (void)context; (void)cmd; (void)transA; (void)transB; (void)m; (void)n;
-    (void)k; (void)alpha; (void)A; (void)lda; (void)B; (void)ldb;
-    (void)beta; (void)C; (void)ldc; (void)D; (void)ldd;
-    /* bf16 shader not yet implemented — see AGENTS.md fallback policy. */
-    return VK_ERROR_FEATURE_NOT_PRESENT;
+    if (!context || !cmd || !A || !B || !D || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m <= 0 || n <= 0 || k <= 0)
+        return VK_SUCCESS;
+
+    return vkblas_gemm_common(context, cmd, transA, transB,
+                              m, n, k, VKBLAS_DTYPE_BF16,
+                              (const void*)alpha, A, lda, B, ldb,
+                              (const void*)beta, C, ldc, D, ldd,
+                              0, 0, 0, 0, 1, VK_FALSE);
 }
 
 VkResult vkblas_bgemm_strided_batched(VkBLASContext* context, VkCommandBuffer cmd,
@@ -952,11 +967,23 @@ VkResult vkblas_bgemm_strided_batched(VkBLASContext* context, VkCommandBuffer cm
                                       VkBuffer B, int32_t ldb, int64_t strideB,
                                       const uint16_t* beta, VkBuffer C, int32_t ldc, int64_t strideC,
                                       VkBuffer D, int32_t ldd, int64_t strideD, int32_t batchCount) {
-    (void)context; (void)cmd; (void)transA; (void)transB; (void)m; (void)n; (void)k;
-    (void)alpha; (void)A; (void)lda; (void)strideA; (void)B; (void)ldb; (void)strideB;
-    (void)beta; (void)C; (void)ldc; (void)strideC; (void)D; (void)ldd; (void)strideD; (void)batchCount;
-    /* bf16 shader not yet implemented — see AGENTS.md fallback policy. */
-    return VK_ERROR_FEATURE_NOT_PRESENT;
+    if (!context || !cmd || !A || !B || !D || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m <= 0 || n <= 0 || k <= 0 || batchCount <= 0)
+        return VK_SUCCESS;
+
+    uint32_t elem_strideA = (uint32_t)(strideA / sizeof(uint16_t));
+    uint32_t elem_strideB = (uint32_t)(strideB / sizeof(uint16_t));
+    uint32_t elem_strideC = (uint32_t)(strideC / sizeof(uint16_t));
+    uint32_t elem_strideD = (uint32_t)(strideD / sizeof(uint16_t));
+
+    return vkblas_gemm_common(context, cmd, transA, transB,
+                              m, n, k, VKBLAS_DTYPE_BF16,
+                              (const void*)alpha, A, lda, B, ldb,
+                              (const void*)beta, C, ldc, D, ldd,
+                              elem_strideA, elem_strideB,
+                              elem_strideC, elem_strideD,
+                              batchCount, VK_TRUE);
 }
 
 /* Map a gemm_ex compute type to a storage dtype + element size.

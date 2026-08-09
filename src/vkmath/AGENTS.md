@@ -11,11 +11,10 @@ Child of root `AGENTS.md` and `include/vkmath/AGENTS.md`.
 - No malloc per lookup; fixed-size cache array in context struct
 
 ### Capability detection at context creation
-| Extension | Tier unlocked | Fallback if absent |
-|-----------|---------------|--------------------|
-| `shaderInt64` | 64-bit push constants | 32-bit push constants |
-| `VK_KHR_shader_subgroup` | Tier 1 (subgroup) | Falls back to Tier 0 (baseline) |
-| `VK_KHR_cooperative_matrix` | Tier 2 (coopmatrix) | Falls back to Tier 1 (subgroup) |
+Delegated to VKRuntime's `vkr_detect_capabilities()` (see `src/vkruntime/`):
+vkmath links vkruntime and calls it once in `vkmath_create_context` to fill the
+context's capability fields and `active_tier`. The public
+`vkmath_init_capabilities()` re-detects via the same helper.
 
 ### SPIR-V embedding
 - All shader SPIR-V files are compiled to C arrays (`shaders_spv.h`)

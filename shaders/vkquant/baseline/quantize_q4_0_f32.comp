@@ -1,0 +1,78 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Forward quantization f32 -> Q4_0 (our f32-scale format, 20 bytes/block).
+// Block layout: f32 d (bytes 0..3) + 16 x uint8 packed nibbles (bytes 4..19).
+// Per block: d = max(|x|) / 8; q = round(x/d) + 8 clamped to [0,15].
+// Packing: element 2j -> low nibble, element 2j+1 -> high nibble.
+// 256 threads/workgroup; 8 blocks of 32 elements per workgroup.
+// Block-local max via shared memory tree reduction; nibble packing in shared.
+
+layout(push_constant) uniform PC {
+    uint num_blocks;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn {
+    float x[];
+};
+layout(scalar, set = 0, binding = 2) writeonly buffer BufOut {
+    uint8_t obytes[];
+};
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+shared float smax[256];
+shared int   sq[256];
+
+void main() {
+    uint tid  = gl_LocalInvocationID.x;
+    uint blk  = tid >> 5;              /* block within workgroup (0..7)      */
+    uint lane = tid & 31u;
+    uint base = blk * 32u;
+    uint gblk = gl_WorkGroupID.x * 8u + blk;
+    uint gidx = gblk * 32u + lane;
+
+    float v = 0.0f;
+    if (gidx < pc.num_blocks * 32u) v = abs(x[gidx]);
+    smax[tid] = v;
+    barrier();
+
+    for (uint s = 16u; s > 0u; s >>= 1u) {
+        if (lane < s) smax[tid] = max(smax[tid], smax[tid + s]);
+        barrier();
+    }
+
+    if (lane == 0u) {
+        float d = smax[base] / 8.0f;
+        if (d == 0.0f) d = 1.0f;
+        smax[base] = d;
+        if (gblk < pc.num_blocks) {
+            uint bits = floatBitsToUint(d);
+            obytes[gblk * 20u + 0u] = uint8_t(bits & 0xFFu);
+            obytes[gblk * 20u + 1u] = uint8_t((bits >> 8u) & 0xFFu);
+            obytes[gblk * 20u + 2u] = uint8_t((bits >> 16u) & 0xFFu);
+            obytes[gblk * 20u + 3u] = uint8_t((bits >> 24u) & 0xFFu);
+        }
+    }
+    barrier();
+
+    if (gblk < pc.num_blocks) {
+        float d = smax[base];
+        int q = clamp(int(round(x[gidx] / d)) + 8, 0, 15);
+        sq[tid] = q;
+    } else {
+        sq[tid] = 0;
+    }
+    barrier();
+
+    if (gblk < pc.num_blocks && lane < 16u) {
+        int q0 = sq[base + lane * 2u];
+        int q1 = sq[base + lane * 2u + 1u];
+        obytes[gblk * 20u + 4u + lane] =
+            uint8_t(uint(q0 & 0xF) | uint((q1 & 0xF) << 4u));
+    }
+}

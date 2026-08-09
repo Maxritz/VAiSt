@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "vkruntime.h"
 #include "vkmath.h"
 
 /* ── Push constant block (std140, must match GLSL layout exactly) ──────── */
