@@ -1,4 +1,5 @@
-<img width="1440" height="720" alt="VAiSt" src="https://github.com/user-attachments/assets/a3568ee1-3ae0-4715-a571-85c49169313b" />
+<img width="1256" height="540" alt="VAiSt1" src="https://github.com/user-attachments/assets/6ea52605-4746-49bd-8419-d6e229829892" />
+
 
 # VAiSt - Vulkan AI Stack
 
