@@ -1,0 +1,114 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+
+// Specialization constants
+layout(constant_id = 0) const uint TILE_M = 16;
+layout(constant_id = 1) const uint TILE_N = 16;
+layout(constant_id = 2) const uint TILE_K = 16;
+
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    float alpha;
+    float beta;
+    uint  lda;
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    int64_t strideA;
+    int64_t strideB;
+    int64_t strideC;
+    int64_t strideD;
+    int64_t batchCount;
+    int64_t _pad1;
+} pc;
+
+layout(set = 0, binding = 0) restrict readonly buffer BufA { float data_A[]; };
+layout(set = 0, binding = 1) restrict readonly buffer BufB { float data_B[]; };
+layout(set = 0, binding = 2) restrict readonly buffer BufC { float data_C[]; };
+layout(set = 0, binding = 3) writeonly  buffer BufD { float data_D[]; };
+
+shared float As[TILE_M * TILE_K];
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    uint row  = gl_LocalInvocationID.x;
+    uint col  = gl_LocalInvocationID.y;
+    uint lane = gl_SubgroupInvocationID;
+
+    uint grRow = gl_WorkGroupID.x;
+    uint grCol = gl_WorkGroupID.y;
+    uint batch = gl_WorkGroupID.z;
+
+    uint globalRow = grRow * TILE_M + row;
+    uint globalCol = grCol * TILE_N + col;
+
+    float acc = 0.0;
+    uint numTiles = (pc.k + TILE_K - 1) / TILE_K;
+
+    float b_reg = 0.0;
+
+    for (uint t = 0; t < numTiles; ++t) {
+        // ── Load A tile into shared memory ──────────────────────────────
+        for (uint a_col = col; a_col < TILE_K; a_col += TILE_N) {
+            uint aRow, aCol;
+            if (pc.transA == 0) {
+                aRow = globalRow;
+                aCol = t * TILE_K + a_col;
+            } else {
+                aRow = t * TILE_K + a_col;
+                aCol = globalRow;
+            }
+            uint idx = aRow + uint(aCol) * pc.lda + batch * pc.strideA;
+            As[row * TILE_K + a_col] = data_A[idx];
+        }
+
+        // ── Load one B element into register ────────────────────────────
+        // Thread [row, col] loads B[tile_kk=row, tile_col=col]
+        {
+            uint bRow, bCol;
+            if (pc.transB == 0) {
+                bRow = t * TILE_K + row;
+                bCol = globalCol;
+            } else {
+                bRow = globalCol;
+                bCol = t * TILE_K + row;
+            }
+            uint idx = bRow + uint(bCol) * pc.ldb + batch * pc.strideB;
+            b_reg = data_B[idx];
+        }
+
+        subgroupBarrier();
+        subgroupMemoryBarrier();
+
+        // ── Compute: acc += As[kk, row] * shuffle(b_reg, kk) ─────────────
+        // Thread at lane kk (i.e., thread [kk, col]) holds B[kk, col].
+        // subgroupShuffle fetches it from that lane.
+        for (uint kk = 0; kk < TILE_K; ++kk) {
+            float a_val = As[kk * TILE_K + row];
+            float b_val = subgroupShuffle(b_reg, kk);
+            acc += a_val * b_val;
+        }
+
+        subgroupBarrier();
+    }
+
+    // ── Scale and write ──────────────────────────────────────────────────
+    float result = pc.alpha * acc;
+
+    if (pc.beta_is_zero == 0) {
+        uint cIdx = globalRow + globalCol * pc.ldc + batch * pc.strideC;
+        result += pc.beta * data_C[cIdx];
+    }
+
+    uint dIdx = globalRow + globalCol * pc.ldd + batch * pc.strideD;
+    data_D[dIdx] = result;
+}

@@ -1,0 +1,1289 @@
+VkBufferCreateInfo::size used to create that VkBuffer
+• VUID-VkDeviceAddress-None-10894
+If a VkDeviceAddress was retrieved from a non-sparse buffer, that buffer must be bound
+completely and contiguously to a single VkDeviceMemory object
+Commands that create Vulkan objects are of the form vkCreate* and take Vk*CreateInfo structures
+with the parameters needed to create the object. These Vulkan objects are destroyed with
+commands of the form vkDestroy*.
+The last in-parameter to each command that creates or destroys a Vulkan object is pAllocator. The
+pAllocator parameter can be a non- NULL value, in which case allocations for the given object are
+delegated to an application provided callback. Refer to the Memory Allocation chapter for further
+details.
+Commands that allocate Vulkan objects owned by pool objects are of the form vkAllocate*, and take
+Vk*AllocateInfo structures. These Vulkan objects are freed with commands of the form vkFree*.
+These objects do not take allocators; if host memory is needed, they will use the allocator that was
+specified when their parent pool was created.
+Commands are recorded into a command buffer by calling API commands of the form vkCmd*. Each
+such command may have different restrictions on where it can be used: in a primary and/or
+secondary command buffer, inside and/or outside a render pass, and in one or more of the
+supported queue types. These restrictions are documented together with the definition of each such
+command.
+The duration of a Vulkan command refers to the interval between calling the command and its
+return to the caller.
+3.5.1. Lifetime of Retrieved Results
+Information is retrieved from the implementation with commands of the form vkGet* and
+vkEnumerate*.
+Unless otherwise specified for an individual command, the results are invariant; that is, they will
+remain unchanged when retrieved again by calling the same command with the same parameters,
+so long as those parameters themselves all remain valid.
+3.5.2. Array Results
+Some query commands of the form vkGet* and vkEnumerate* enable retrieving multiple results in
+the form of a return array. Such commands typically have two pointer arguments as follows:
+• An element count pointer pointing to an integer variable, conventionally named as p*Count
+where * is the capitalized singular form of the name of the retrieved values.
+• A pointer to an array where the result array is retrieved, conventionally named as p* where * is
+the capitalized plural form of the name of the retrieved values.
+If such commands are called with the array pointer set to NULL, then the number of retrievable
+elements is returned in the variable pointed to by the element count pointer. Otherwise, the
+element count pointer must point to a variable set by the application to the number of elements in
+the return array, and on return the variable is overwritten with the number of elements actually
+written to the return array. If the input element count is less than the number of retrievable array
+elements, the query will write only as many elements to the return array as specified by the
+element count variable set by the application, and the command will return VK_INCOMPLETE
+instead of VK_SUCCESS, to indicate that not all retrievable array elements were returned.
+NOTE
+In practice, this means that applications will typically call such query commands
+twice:
+• First, with the array pointer set to NULL, to retrieve the number of retrievable
+elements.
+• Second, with the array pointer pointing to an application allocated storage for at
+least as many elements as indicated by the variable pointed to by the element
+count pointer, to retrieve at most as many of the retrievable elements.
+Query commands that return one or more structures, regardless of whether they return a single or
+an array of structures with or without a pNext chain, may also contain arrays within those
+structures. Such return arrays are typically defined in the form of two members as follows:
+• An integer value specifying the element count, conventionally named as *Count where * is the
+singular form of the name of the retrieved values.
+• A pointer to an array where the result array is retrieved, conventionally named as p* where * is
+the capitalized plural form of the name of the retrieved values.
+Analogously to query commands that return multiple results, if the command is called with the
+array pointer member of the output structure in question set to NULL, then the number of
+retrievable elements is returned in the element count member of that output structure. Otherwise,
+the element count must specify the number of elements in the return array, and on return the
+element count member is overwritten with the number of elements actually written to the return
+array. If the input element count is less than the number of retrievable array elements, the query
+will write only as many elements to the return array as specified by the input element count, and
+the command will return VK_INCOMPLETE instead of VK_SUCCESS, if the query command has a
+VkResult return type, to indicate that not all retrievable array elements were returned.
+NOTE
+Applications need to separately track the value they provided as the input element
+count member for such arrays and compare those with the returned element counts
+in order to determine whether the actually returned element count is smaller than
+the size of the return array. Another side effect of this is that it is impossible for the
+application to determine if the number of retrievable elements has increased
+beyond the provided input element count so using return arrays in output
+structures should be limited to invariant array results. In practice, this means that
+applications will typically call such query commands multiple times:
+• First, with the array pointer member(s) set to NULL, to retrieve the number(s) of
+retrievable elements.
+• Second, with the array pointer(s) pointing to an application allocated storage for
+at least as many elements as indicated by the element count member(s), to
+retrieve at most as many of the retrievable elements.
+• Then the process may need to be repeated for all other newly introduced return
+arrays in any nested output structures indirectly specified through the
+previously retrieved result arrays.
+Regardless of the type of query command, any array pointer member of an output structure must
+either be NULL, or point to an application-allocated array. Query commands must not return a
+pointer to implementation allocated storage in any output structure.
+3.5.3. Opaque Binary Data Results
+Some query commands of the form vkGet* retrieve opaque binary data in the form of a byte array
+and have a possible result code of VK_ERROR_NOT_ENOUGH_SPACE_KHR. Such commands always
+have two pointer arguments as follows:
+• A binary data size pointer pointing to a size_t variable, conventionally named as p*Size where
+* is the capitalized form of the name of the retrieved binary data.
+• A pointer to a byte array where the binary data is retrieved, conventionally named as p* where
+* is the capitalized form of the name of the retrieved binary data.
+If such commands are called with the binary pointer not set to NULL, the binary size pointer must
+point to a variable set by the application to the allocated size of the binary pointer. These
+arguments may also be placed in an extensible structure, in which case the binary data size
+argument is not a pointer.
+If the input binary size is less than the total retrievable binary size, the query will not write any
+data to the location pointed to the binary pointer, and the command will return
+VK_ERROR_NOT_ENOUGH_SPACE_KHR instead of VK_SUCCESS.
+If the return code is VK_SUCCESS or VK_ERROR_NOT_ENOUGH_SPACE_KHR, the total size of the
+binary data that can be retrieved is returned in the variable pointed to by the binary size pointer.
+If multiple binaries are being retrieved, VK_ERROR_NOT_ENOUGH_SPACE_KHR will be returned if
+any input binary sizes are less than their respective total retrievable binary sizes. Unless otherwise
+specified, this command will determine writing data to each binary individually based on if their
+input binary sizes are sufficiently sized, following the behavior for single binary retrieval.
+For all other error codes, the contents of the return structures are undefined.
+NOTE
+If VK_ERROR_NOT_ENOUGH_SPACE_KHR is returned with a command that returns
+multiple binaries, the application can determine which binaries are undersized by
+comparing the total binary size that is returned for each binary against the
+allocated size that was provided to the command.
+NOTE
+Some binary queries do not behave consistently with this pattern for historical
+reasons, primarily that the VK_ERROR_NOT_ENOUGH_SPACE_KHR error code was
+not defined until after those queries were written.
+A NOTE is added to each such query, describing such inconsistent behavior.
+3.6. Threading Behavior
+Vulkan is intended to provide scalable performance when used on multiple host threads. All
+commands support being called concurrently from multiple threads, but certain parameters, or
+components of parameters are defined to be externally synchronized . This means that the caller
+must guarantee that no more than one thread is using such a parameter at a given time.
+More precisely, Vulkan commands use simple stores to update the state of Vulkan objects. The
+implementation may not synchronize accesses to memory parameters or object parameters
+declared as externally synchronized with other accesses. If two commands access the same object
+or memory and at least one of the commands declares the object to be externally synchronized,
+then the caller must guarantee not only that the commands do not execute simultaneously, but also
+that the two commands are separated by an appropriate memory barrier (if needed). Similarly, if a
+Vulkan command accesses a non-const memory parameter and the application also accesses that
+memory, or if the application writes to that memory and the command accesses it as a const
+memory parameter, the application must ensure the accesses are properly synchronized with a
+memory barrier if needed.
+NOTE
+Memory barriers are particularly relevant for hosts based on the ARM CPU
+architecture, which is more weakly ordered than many developers are accustomed
+to from x86/x64 programming. Fortunately, most higher-level synchronization
+primitives (like the pthread library) perform memory barriers as a part of mutual
+exclusion, so mutexing Vulkan objects via these primitives will have the desired
+effect.
+Any object parameters that are not labeled as externally synchronized are either not mutated by
+the command or are internally synchronized. Additionally, certain objects related to a command’s
+parameters (e.g. command pools and descriptor pools) may be affected by a command, and must
+also be externally synchronized. These implicit parameters are documented as described below.
+Parameters of commands that are externally synchronized are listed below.
+Externally Synchronized Parameters and Members
+• The instance parameter in vkDestroyInstance
+• The device parameter in vkDestroyDevice
+• The queue parameter in vkQueueSubmit, if it was not created with
+VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR
+• The fence parameter in vkQueueSubmit
+• The queue parameter in vkQueueWaitIdle, if it was not created with
+VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR
+• The memory parameter in vkFreeMemory
+• The memory parameter in vkMapMemory
+• The memory parameter in vkUnmapMemory
+• The buffer parameter in vkBindBufferMemory
+• The image parameter in vkBindImageMemory
+• The queue parameter in vkQueueBindSparse, if it was not created with
+VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR
+• The fence parameter in vkQueueBindSparse
+• The fence parameter in vkDestroyFence
+• The semaphore parameter in vkDestroySemaphore
+• The queryPool parameter in vkDestroyQueryPool
+• The buffer parameter in vkDestroyBuffer
+• The image parameter in vkDestroyImage
+• The imageView parameter in vkDestroyImageView
+• The commandPool parameter in vkDestroyCommandPool
+• The commandPool parameter in vkResetCommandPool
+• The commandPool parameter in vkFreeCommandBuffers
+• The commandBuffer parameter in vkBeginCommandBuffer
+• The commandBuffer parameter in vkEndCommandBuffer
+• The commandBuffer parameter in vkResetCommandBuffer
+• The commandBuffer parameter in vkCmdCopyBuffer
+• The commandBuffer parameter in vkCmdCopyImage
+• The commandBuffer parameter in vkCmdCopyBufferToImage
+• The commandBuffer parameter in vkCmdCopyImageToBuffer
+• The commandBuffer parameter in vkCmdUpdateBuffer
+• The commandBuffer parameter in vkCmdFillBuffer
+• The commandBuffer parameter in vkCmdPipelineBarrier
+• The commandBuffer parameter in vkCmdBeginQuery
+• The commandBuffer parameter in vkCmdEndQuery
+• The commandBuffer parameter in vkCmdResetQueryPool
+• The commandBuffer parameter in vkCmdWriteTimestamp
+• The commandBuffer parameter in vkCmdCopyQueryPoolResults
+• The commandBuffer parameter in vkCmdExecuteCommands
+• The event parameter in vkDestroyEvent
+• The event parameter in vkSetEvent
+• The event parameter in vkResetEvent
+• The bufferView parameter in vkDestroyBufferView
+• The shaderModule parameter in vkDestroyShaderModule
+• The pipelineCache parameter in vkDestroyPipelineCache
+• The dstCache parameter in vkMergePipelineCaches, conditionally1
+• The pipelineCache parameter in vkCreateComputePipelines, conditionally1
+• The pipeline parameter in vkDestroyPipeline
+• The pipelineLayout parameter in vkDestroyPipelineLayout
+• The sampler parameter in vkDestroySampler
+• The descriptorSetLayout parameter in vkDestroyDescriptorSetLayout
+• The descriptorPool parameter in vkDestroyDescriptorPool
+• The descriptorPool parameter in vkResetDescriptorPool
+• The descriptorPool parameter in vkFreeDescriptorSets
+• The commandBuffer parameter in vkCmdBindPipeline
+• The commandBuffer parameter in vkCmdBindDescriptorSets
+• The commandBuffer parameter in vkCmdClearColorImage
+• The commandBuffer parameter in vkCmdDispatch
+• The commandBuffer parameter in vkCmdDispatchIndirect
+• The commandBuffer parameter in vkCmdSetEvent
+• The commandBuffer parameter in vkCmdResetEvent
+• The commandBuffer parameter in vkCmdWaitEvents
+• The commandBuffer parameter in vkCmdPushConstants
+• The pipelineCache parameter in vkCreateGraphicsPipelines, conditionally1
+• The framebuffer parameter in vkDestroyFramebuffer
+• The renderPass parameter in vkDestroyRenderPass
+• The commandBuffer parameter in vkCmdSetViewport
+• The commandBuffer parameter in vkCmdSetScissor
+• The commandBuffer parameter in vkCmdSetLineWidth
+• The commandBuffer parameter in vkCmdSetDepthBias
+• The commandBuffer parameter in vkCmdSetBlendConstants
+• The commandBuffer parameter in vkCmdSetDepthBounds
+• The commandBuffer parameter in vkCmdSetStencilCompareMask
+• The commandBuffer parameter in vkCmdSetStencilWriteMask
+• The commandBuffer parameter in vkCmdSetStencilReference
+• The commandBuffer parameter in vkCmdBindIndexBuffer
+• The commandBuffer parameter in vkCmdBindVertexBuffers
+• The commandBuffer parameter in vkCmdDraw
+• The commandBuffer parameter in vkCmdDrawIndexed
+• The commandBuffer parameter in vkCmdDrawIndirect
+• The commandBuffer parameter in vkCmdDrawIndexedIndirect
+• The commandBuffer parameter in vkCmdBlitImage
+• The commandBuffer parameter in vkCmdClearDepthStencilImage
+• The commandBuffer parameter in vkCmdClearAttachments
+• The commandBuffer parameter in vkCmdResolveImage
+• The commandBuffer parameter in vkCmdBeginRenderPass
+• The commandBuffer parameter in vkCmdNextSubpass
+• The commandBuffer parameter in vkCmdEndRenderPass
+• The commandBuffer parameter in vkCmdSetDeviceMask
+• The commandPool parameter in vkTrimCommandPool
+• The commandBuffer parameter in vkCmdDispatchBase
+• The descriptorUpdateTemplate parameter in vkDestroyDescriptorUpdateTemplate
+• The descriptorSet parameter in vkUpdateDescriptorSetWithTemplate, conditionally1
+• The ycbcrConversion parameter in vkDestroySamplerYcbcrConversion
+• The commandBuffer parameter in vkCmdDrawIndirectCount
+• The commandBuffer parameter in vkCmdDrawIndexedIndirectCount
+• The commandBuffer parameter in vkCmdBeginRenderPass2
+• The commandBuffer parameter in vkCmdNextSubpass2
+• The commandBuffer parameter in vkCmdEndRenderPass2
+• The privateDataSlot parameter in vkDestroyPrivateDataSlot
+• The commandBuffer parameter in vkCmdPipelineBarrier2
+• The commandBuffer parameter in vkCmdWriteTimestamp2
+• The queue parameter in vkQueueSubmit2, if it was not created with
+VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR
+• The fence parameter in vkQueueSubmit2
+• The commandBuffer parameter in vkCmdCopyBuffer2
+• The commandBuffer parameter in vkCmdCopyImage2
+• The commandBuffer parameter in vkCmdCopyBufferToImage2
+• The commandBuffer parameter in vkCmdCopyImageToBuffer2
+• The commandBuffer parameter in vkCmdSetEvent2
+• The commandBuffer parameter in vkCmdResetEvent2
+• The commandBuffer parameter in vkCmdWaitEvents2
+• The commandBuffer parameter in vkCmdBlitImage2
+• The commandBuffer parameter in vkCmdResolveImage2
+• The commandBuffer parameter in vkCmdBeginRendering
+• The commandBuffer parameter in vkCmdEndRendering
+• The commandBuffer parameter in vkCmdSetCullMode
+• The commandBuffer parameter in vkCmdSetFrontFace
+• The commandBuffer parameter in vkCmdSetPrimitiveTopology
+• The commandBuffer parameter in vkCmdSetViewportWithCount
+• The commandBuffer parameter in vkCmdSetScissorWithCount
+• The commandBuffer parameter in vkCmdBindVertexBuffers2
+• The commandBuffer parameter in vkCmdSetDepthTestEnable
+• The commandBuffer parameter in vkCmdSetDepthWriteEnable
+• The commandBuffer parameter in vkCmdSetDepthCompareOp
+• The commandBuffer parameter in vkCmdSetDepthBoundsTestEnable
+• The commandBuffer parameter in vkCmdSetStencilTestEnable
+• The commandBuffer parameter in vkCmdSetStencilOp
+• The commandBuffer parameter in vkCmdSetRasterizerDiscardEnable
+• The commandBuffer parameter in vkCmdSetDepthBiasEnable
+• The commandBuffer parameter in vkCmdSetPrimitiveRestartEnable
+• The commandBuffer parameter in vkCmdPushDescriptorSet
+• The commandBuffer parameter in vkCmdPushDescriptorSetWithTemplate
+• The commandBuffer parameter in vkCmdBindDescriptorSets2
+• The commandBuffer parameter in vkCmdPushConstants2
+• The commandBuffer parameter in vkCmdPushDescriptorSet2
+• The commandBuffer parameter in vkCmdPushDescriptorSetWithTemplate2
+• The commandBuffer parameter in vkCmdSetLineStipple
+• The commandBuffer parameter in vkCmdBindIndexBuffer2
+• The commandBuffer parameter in vkCmdSetRenderingAttachmentLocations
+• The commandBuffer parameter in vkCmdSetRenderingInputAttachmentIndices
+• The surface parameter in vkDestroySurfaceKHR
+• The swapchain parameter in vkDestroySwapchainKHR
+• The swapchain parameter in vkAcquireNextImageKHR
+• The semaphore parameter in vkAcquireNextImageKHR
+• The fence parameter in vkAcquireNextImageKHR
+• The queue parameter in vkQueuePresentKHR, if it was not created with
+VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR
+• The surface parameter in vkGetDeviceGroupSurfacePresentModesKHR
+• The surface parameter in vkGetPhysicalDevicePresentRectanglesKHR
+• The display parameter in vkCreateDisplayModeKHR
+• The mode parameter in vkGetDisplayPlaneCapabilitiesKHR
+• The videoSession parameter in vkDestroyVideoSessionKHR
+• The videoSession parameter in vkBindVideoSessionMemoryKHR
+• The videoSessionParameters parameter in vkDestroyVideoSessionParametersKHR
+• The commandBuffer parameter in vkCmdBeginVideoCodingKHR
+• The commandBuffer parameter in vkCmdEndVideoCodingKHR
+• The commandBuffer parameter in vkCmdControlVideoCodingKHR
+• The commandBuffer parameter in vkCmdDecodeVideoKHR
+• The commandBuffer parameter in vkCmdBeginRenderingKHR
+• The commandBuffer parameter in vkCmdEndRenderingKHR
+• The commandBuffer parameter in vkCmdSetDeviceMaskKHR
+• The commandBuffer parameter in vkCmdDispatchBaseKHR
+• The commandPool parameter in vkTrimCommandPoolKHR
+• The commandBuffer parameter in vkCmdPushDescriptorSetKHR
+• The commandBuffer parameter in vkCmdPushDescriptorSetWithTemplateKHR
+• The descriptorUpdateTemplate parameter in vkDestroyDescriptorUpdateTemplateKHR
+• The descriptorSet parameter in vkUpdateDescriptorSetWithTemplateKHR, conditionally1
+• The commandBuffer parameter in vkCmdBeginRenderPass2KHR
+• The commandBuffer parameter in vkCmdNextSubpass2KHR
+• The commandBuffer parameter in vkCmdEndRenderPass2KHR
+• The swapchain parameter in vkGetSwapchainStatusKHR
+• The ycbcrConversion parameter in vkDestroySamplerYcbcrConversionKHR
+• The commandBuffer parameter in vkCmdDrawIndirectCountKHR
+• The commandBuffer parameter in vkCmdDrawIndexedIndirectCountKHR
+• The commandBuffer parameter in vkCmdSetFragmentShadingRateKHR
+• The commandBuffer parameter in vkCmdSetRenderingAttachmentLocationsKHR
+• The commandBuffer parameter in vkCmdSetRenderingInputAttachmentIndicesKHR
+• The swapchain parameter in vkWaitForPresentKHR
+• The operation parameter in vkDestroyDeferredOperationKHR
+• The commandBuffer parameter in vkCmdEncodeVideoKHR
+• The commandBuffer parameter in vkCmdSetEvent2KHR
+• The commandBuffer parameter in vkCmdResetEvent2KHR
+• The commandBuffer parameter in vkCmdWaitEvents2KHR
+• The commandBuffer parameter in vkCmdPipelineBarrier2KHR
+• The commandBuffer parameter in vkCmdWriteTimestamp2KHR
+• The queue parameter in vkQueueSubmit2KHR, if it was not created with
+VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR
+• The fence parameter in vkQueueSubmit2KHR
+• The commandBuffer parameter in vkCmdBindIndexBuffer3KHR
+• The commandBuffer parameter in vkCmdBindVertexBuffers3KHR
+• The commandBuffer parameter in vkCmdDrawIndirect2KHR
+• The commandBuffer parameter in vkCmdDrawIndexedIndirect2KHR
+• The commandBuffer parameter in vkCmdDispatchIndirect2KHR
+• The commandBuffer parameter in vkCmdCopyMemoryKHR
+• The commandBuffer parameter in vkCmdCopyMemoryToImageKHR
+• The commandBuffer parameter in vkCmdCopyImageToMemoryKHR
+• The commandBuffer parameter in vkCmdUpdateMemoryKHR
+• The commandBuffer parameter in vkCmdFillMemoryKHR
+• The commandBuffer parameter in vkCmdCopyQueryPoolResultsToMemoryKHR
+• The commandBuffer parameter in vkCmdDrawIndirectCount2KHR
+• The commandBuffer parameter in vkCmdDrawIndexedIndirectCount2KHR
+• The commandBuffer parameter in vkCmdBeginConditionalRendering2EXT
+• The commandBuffer parameter in vkCmdBindTransformFeedbackBuffers2EXT
+• The commandBuffer parameter in vkCmdBeginTransformFeedback2EXT
+• The commandBuffer parameter in vkCmdEndTransformFeedback2EXT
+• The commandBuffer parameter in vkCmdDrawIndirectByteCount2EXT
+• The commandBuffer parameter in vkCmdDrawMeshTasksIndirect2EXT
+• The commandBuffer parameter in vkCmdDrawMeshTasksIndirectCount2EXT
+• The commandBuffer parameter in vkCmdWriteMarkerToMemoryAMD
+• The commandBuffer parameter in vkCmdCopyBuffer2KHR
+• The commandBuffer parameter in vkCmdCopyImage2KHR
+• The commandBuffer parameter in vkCmdCopyBufferToImage2KHR
+• The commandBuffer parameter in vkCmdCopyImageToBuffer2KHR
+• The commandBuffer parameter in vkCmdBlitImage2KHR
+• The commandBuffer parameter in vkCmdResolveImage2KHR
+• The commandBuffer parameter in vkCmdTraceRaysIndirect2KHR
+• The commandBuffer parameter in vkCmdBindIndexBuffer2KHR
+• The swapchain parameter in vkWaitForPresent2KHR
+• The pipelineBinary parameter in vkDestroyPipelineBinaryKHR
+• The commandBuffer parameter in vkCmdSetLineStippleKHR
+• The commandBuffer parameter in vkCmdBindDescriptorSets2KHR
+• The commandBuffer parameter in vkCmdPushConstants2KHR
+• The commandBuffer parameter in vkCmdPushDescriptorSet2KHR
+• The commandBuffer parameter in vkCmdPushDescriptorSetWithTemplate2KHR
+• The commandBuffer parameter in vkCmdSetDescriptorBufferOffsets2EXT
+• The commandBuffer parameter in vkCmdBindDescriptorBufferEmbeddedSamplers2EXT
+• The commandBuffer parameter in vkCmdCopyMemoryIndirectKHR
+• The commandBuffer parameter in vkCmdCopyMemoryToImageIndirectKHR
+• The commandBuffer parameter in vkCmdEndRendering2KHR
+• The callback parameter in vkDestroyDebugReportCallbackEXT
+• The commandBuffer parameter in vkCmdDebugMarkerBeginEXT
+• The commandBuffer parameter in vkCmdDebugMarkerEndEXT
+• The commandBuffer parameter in vkCmdDebugMarkerInsertEXT
+• The commandBuffer parameter in vkCmdBindTransformFeedbackBuffersEXT
+• The commandBuffer parameter in vkCmdBeginTransformFeedbackEXT
+• The commandBuffer parameter in vkCmdEndTransformFeedbackEXT
+• The commandBuffer parameter in vkCmdBeginQueryIndexedEXT
+• The commandBuffer parameter in vkCmdEndQueryIndexedEXT
+• The commandBuffer parameter in vkCmdDrawIndirectByteCountEXT
+• The commandBuffer parameter in vkCmdDrawIndirectCountAMD
+• The commandBuffer parameter in vkCmdDrawIndexedIndirectCountAMD
+• The commandBuffer parameter in vkCmdBeginConditionalRenderingEXT
+• The commandBuffer parameter in vkCmdEndConditionalRenderingEXT
+• The commandBuffer parameter in vkCmdSetViewportWScalingNV
+• The swapchain parameter in vkGetRefreshCycleDurationGOOGLE
+• The swapchain parameter in vkGetPastPresentationTimingGOOGLE
+• The commandBuffer parameter in vkCmdSetDiscardRectangleEXT
+• The commandBuffer parameter in vkCmdSetDiscardRectangleEnableEXT
+• The commandBuffer parameter in vkCmdSetDiscardRectangleModeEXT
+• The objectHandle member of the pNameInfo parameter in vkSetDebugUtilsObjectNameEXT
+• The queue parameter in vkQueueBeginDebugUtilsLabelEXT, if it was not created with
+VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR
+• The queue parameter in vkQueueEndDebugUtilsLabelEXT, if it was not created with
+VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR
+• The queue parameter in vkQueueInsertDebugUtilsLabelEXT, if it was not created with
+VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR
+• The commandBuffer parameter in vkCmdBeginDebugUtilsLabelEXT
+• The commandBuffer parameter in vkCmdEndDebugUtilsLabelEXT
+• The commandBuffer parameter in vkCmdInsertDebugUtilsLabelEXT
+• The messenger parameter in vkDestroyDebugUtilsMessengerEXT
+• The gpaSession parameter in vkDestroyGpaSessionAMD
+• The commandBuffer parameter in vkCmdBeginGpaSessionAMD
+• The commandBuffer parameter in vkCmdEndGpaSessionAMD
+• The commandBuffer parameter in vkCmdBeginGpaSampleAMD
+• The commandBuffer parameter in vkCmdEndGpaSampleAMD
+• The commandBuffer parameter in vkCmdCopyGpaSessionResultsAMD
+• The pipelineCache parameter in vkCreateExecutionGraphPipelinesAMDX, conditionally1
+• The commandBuffer parameter in vkCmdBindSamplerHeapEXT
+• The commandBuffer parameter in vkCmdBindResourceHeapEXT
+• The commandBuffer parameter in vkCmdPushDataEXT
+• The commandBuffer parameter in vkCmdSetSampleLocationsEXT
+• The validationCache parameter in vkDestroyValidationCacheEXT
+• The dstCache parameter in vkMergeValidationCachesEXT
+• The commandBuffer parameter in vkCmdBindShadingRateImageNV
+• The commandBuffer parameter in vkCmdSetViewportShadingRatePaletteNV
+• The commandBuffer parameter in vkCmdSetCoarseSampleOrderNV
+• The accelerationStructure parameter in vkDestroyAccelerationStructureNV
+• The commandBuffer parameter in vkCmdBuildAccelerationStructureNV
+• The commandBuffer parameter in vkCmdCopyAccelerationStructureNV
+• The commandBuffer parameter in vkCmdTraceRaysNV
+• The pipelineCache parameter in vkCreateRayTracingPipelinesNV, conditionally1
+• The commandBuffer parameter in vkCmdWriteAccelerationStructuresPropertiesNV
+• The commandBuffer parameter in vkCmdWriteBufferMarkerAMD
+• The commandBuffer parameter in vkCmdWriteBufferMarker2AMD
+• The commandBuffer parameter in vkCmdDrawMeshTasksNV
+• The commandBuffer parameter in vkCmdDrawMeshTasksIndirectNV
+• The commandBuffer parameter in vkCmdDrawMeshTasksIndirectCountNV
+• The commandBuffer parameter in vkCmdSetExclusiveScissorEnableNV
+• The commandBuffer parameter in vkCmdSetExclusiveScissorNV
+• The commandBuffer parameter in vkCmdSetCheckpointNV
+• The swapchain parameter in vkSetSwapchainPresentTimingQueueSizeEXT
+• The swapchain parameter in vkGetSwapchainTimingPropertiesEXT
+• The swapchain parameter in vkGetSwapchainTimeDomainPropertiesEXT
+• The commandBuffer parameter in vkCmdSetPerformanceMarkerINTEL
+• The commandBuffer parameter in vkCmdSetPerformanceStreamMarkerINTEL
+• The commandBuffer parameter in vkCmdSetPerformanceOverrideINTEL
+• The configuration parameter in vkReleasePerformanceConfigurationINTEL
+• The queue parameter in vkQueueSetPerformanceConfigurationINTEL, if it was not created
+with VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR
+• The commandBuffer parameter in vkCmdSetLineStippleEXT
+• The commandBuffer parameter in vkCmdSetCullModeEXT
+• The commandBuffer parameter in vkCmdSetFrontFaceEXT
+• The commandBuffer parameter in vkCmdSetPrimitiveTopologyEXT
+• The commandBuffer parameter in vkCmdSetViewportWithCountEXT
+• The commandBuffer parameter in vkCmdSetScissorWithCountEXT
+• The commandBuffer parameter in vkCmdBindVertexBuffers2EXT
+• The commandBuffer parameter in vkCmdSetDepthTestEnableEXT
+• The commandBuffer parameter in vkCmdSetDepthWriteEnableEXT
+• The commandBuffer parameter in vkCmdSetDepthCompareOpEXT
+• The commandBuffer parameter in vkCmdSetDepthBoundsTestEnableEXT
+• The commandBuffer parameter in vkCmdSetStencilTestEnableEXT
+• The commandBuffer parameter in vkCmdSetStencilOpEXT
+• The commandBuffer parameter in vkCmdPreprocessGeneratedCommandsNV
+• The commandBuffer parameter in vkCmdExecuteGeneratedCommandsNV
+• The commandBuffer parameter in vkCmdBindPipelineShaderGroupNV
+• The indirectCommandsLayout parameter in vkDestroyIndirectCommandsLayoutNV
+• The commandBuffer parameter in vkCmdSetDepthBias2EXT
+• The privateDataSlot parameter in vkDestroyPrivateDataSlotEXT
+• The queue parameter in vkQueueSetPerfHintQCOM, if it was not created with
+VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR
+• The commandBuffer parameter in vkCmdBindDescriptorBuffersEXT
+• The commandBuffer parameter in vkCmdSetDescriptorBufferOffsetsEXT
+• The commandBuffer parameter in vkCmdBindDescriptorBufferEmbeddedSamplersEXT
+• The commandBuffer parameter in vkCmdSetFragmentShadingRateEnumNV
+• The commandBuffer parameter in vkCmdSetVertexInputEXT
+• The commandBuffer parameter in vkCmdSubpassShadingHUAWEI
+• The commandBuffer parameter in vkCmdBindInvocationMaskHUAWEI
+• The commandBuffer parameter in vkCmdSetPatchControlPointsEXT
+• The commandBuffer parameter in vkCmdSetRasterizerDiscardEnableEXT
+• The commandBuffer parameter in vkCmdSetDepthBiasEnableEXT
+• The commandBuffer parameter in vkCmdSetLogicOpEXT
+• The commandBuffer parameter in vkCmdSetPrimitiveRestartEnableEXT
+• The commandBuffer parameter in vkCmdSetColorWriteEnableEXT
+• The commandBuffer parameter in vkCmdDrawMultiEXT
+• The commandBuffer parameter in vkCmdDrawMultiIndexedEXT
+• The micromap parameter in vkDestroyMicromapEXT
+• The commandBuffer parameter in vkCmdBuildMicromapsEXT
+• The commandBuffer parameter in vkCmdCopyMicromapEXT
+• The commandBuffer parameter in vkCmdCopyMicromapToMemoryEXT
+• The commandBuffer parameter in vkCmdCopyMemoryToMicromapEXT
+• The commandBuffer parameter in vkCmdWriteMicromapsPropertiesEXT
+• The commandBuffer parameter in vkCmdDrawClusterHUAWEI
+• The commandBuffer parameter in vkCmdDrawClusterIndirectHUAWEI
+• The commandBuffer parameter in vkCmdSetDispatchParametersARM
+• The commandBuffer parameter in vkCmdCopyMemoryIndirectNV
+• The commandBuffer parameter in vkCmdCopyMemoryToImageIndirectNV
+• The commandBuffer parameter in vkCmdDecompressMemoryNV
+• The commandBuffer parameter in vkCmdDecompressMemoryIndirectCountNV
+• The commandBuffer parameter in vkCmdUpdatePipelineIndirectBufferNV
+• The commandBuffer parameter in vkCmdSetDepthClampEnableEXT
+• The commandBuffer parameter in vkCmdSetPolygonModeEXT
+• The commandBuffer parameter in vkCmdSetRasterizationSamplesEXT
+• The commandBuffer parameter in vkCmdSetSampleMaskEXT
+• The commandBuffer parameter in vkCmdSetAlphaToCoverageEnableEXT
+• The commandBuffer parameter in vkCmdSetAlphaToOneEnableEXT
+• The commandBuffer parameter in vkCmdSetLogicOpEnableEXT
+• The commandBuffer parameter in vkCmdSetColorBlendEnableEXT
+• The commandBuffer parameter in vkCmdSetColorBlendEquationEXT
+• The commandBuffer parameter in vkCmdSetColorWriteMaskEXT
+• The commandBuffer parameter in vkCmdSetTessellationDomainOriginEXT
+• The commandBuffer parameter in vkCmdSetRasterizationStreamEXT
+• The commandBuffer parameter in vkCmdSetConservativeRasterizationModeEXT
+• The commandBuffer parameter in vkCmdSetExtraPrimitiveOverestimationSizeEXT
+• The commandBuffer parameter in vkCmdSetDepthClipEnableEXT
+• The commandBuffer parameter in vkCmdSetSampleLocationsEnableEXT
+• The commandBuffer parameter in vkCmdSetColorBlendAdvancedEXT
+• The commandBuffer parameter in vkCmdSetProvokingVertexModeEXT
+• The commandBuffer parameter in vkCmdSetLineRasterizationModeEXT
+• The commandBuffer parameter in vkCmdSetLineStippleEnableEXT
+• The commandBuffer parameter in vkCmdSetDepthClipNegativeOneToOneEXT
+• The commandBuffer parameter in vkCmdSetViewportWScalingEnableNV
+• The commandBuffer parameter in vkCmdSetViewportSwizzleNV
+• The commandBuffer parameter in vkCmdSetCoverageToColorEnableNV
+• The commandBuffer parameter in vkCmdSetCoverageToColorLocationNV
+• The commandBuffer parameter in vkCmdSetCoverageModulationModeNV
+• The commandBuffer parameter in vkCmdSetCoverageModulationTableEnableNV
+• The commandBuffer parameter in vkCmdSetCoverageModulationTableNV
+• The commandBuffer parameter in vkCmdSetShadingRateImageEnableNV
+• The commandBuffer parameter in vkCmdSetRepresentativeFragmentTestEnableNV
+• The commandBuffer parameter in vkCmdSetCoverageReductionModeNV
+• The tensor parameter in vkDestroyTensorARM
+• The tensorView parameter in vkDestroyTensorViewARM
+• The commandBuffer parameter in vkCmdCopyTensorARM
+• The shader parameter in vkDestroyShaderEXT
+• The commandBuffer parameter in vkCmdBindShadersEXT
+• The commandBuffer parameter in vkCmdSetDepthClampRangeEXT
+• The commandBuffer parameter in vkCmdConvertCooperativeVectorMatrixNV
+• The session parameter in vkDestroyDataGraphPipelineSessionARM
+• The commandBuffer parameter in vkCmdDispatchDataGraphARM
+• The commandBuffer parameter in vkCmdSetAttachmentFeedbackLoopEnableEXT
+• The commandBuffer parameter in vkCmdBindTileMemoryQCOM
+• The commandBuffer parameter in vkCmdDecompressMemoryEXT
+• The commandBuffer parameter in vkCmdDecompressMemoryIndirectCountEXT
+• The commandBuffer parameter in vkCmdBuildClusterAccelerationStructureIndirectNV
+• The commandBuffer parameter in vkCmdBuildPartitionedAccelerationStructuresNV
+• The commandBuffer parameter in vkCmdPreprocessGeneratedCommandsEXT
+• The stateCommandBuffer parameter in vkCmdPreprocessGeneratedCommandsEXT
+• The commandBuffer parameter in vkCmdExecuteGeneratedCommandsEXT
+• The indirectCommandsLayout parameter in vkDestroyIndirectCommandsLayoutEXT
+• The indirectExecutionSet parameter in vkDestroyIndirectExecutionSetEXT
+• The indirectExecutionSet parameter in vkUpdateIndirectExecutionSetPipelineEXT
+• The indirectExecutionSet parameter in vkUpdateIndirectExecutionSetShaderEXT
+• The instrumentation parameter in vkDestroyShaderInstrumentationARM
+• The commandBuffer parameter in vkCmdBeginShaderInstrumentationARM
+• The instrumentation parameter in vkCmdBeginShaderInstrumentationARM
+• The commandBuffer parameter in vkCmdEndShaderInstrumentationARM
+• The commandBuffer parameter in vkCmdEndRendering2EXT
+• The commandBuffer parameter in vkCmdBeginCustomResolveEXT
+• The commandBuffer parameter in vkCmdSetPrimitiveRestartIndexEXT
+• The accelerationStructure parameter in vkDestroyAccelerationStructureKHR
+• The commandBuffer parameter in vkCmdBuildAccelerationStructuresKHR
+• The commandBuffer parameter in vkCmdBuildAccelerationStructuresIndirectKHR
+• The commandBuffer parameter in vkCmdCopyAccelerationStructureKHR
+• The commandBuffer parameter in vkCmdCopyAccelerationStructureToMemoryKHR
+• The commandBuffer parameter in vkCmdCopyMemoryToAccelerationStructureKHR
+• The commandBuffer parameter in vkCmdWriteAccelerationStructuresPropertiesKHR
+• The commandBuffer parameter in vkCmdTraceRaysKHR
+• The pipelineCache parameter in vkCreateRayTracingPipelinesKHR, conditionally1
+• The commandBuffer parameter in vkCmdTraceRaysIndirectKHR
+• The commandBuffer parameter in vkCmdSetRayTracingPipelineStackSizeKHR
+• The commandBuffer parameter in vkCmdDrawMeshTasksEXT
+• The commandBuffer parameter in vkCmdDrawMeshTasksIndirectEXT
+• The commandBuffer parameter in vkCmdDrawMeshTasksIndirectCountEXT
+• The commandPool member of VkCommandBufferAllocateInfo
+• The dstSet member of VkCopyDescriptorSet, conditionally1
+• The descriptorPool member of VkDescriptorSetAllocateInfo
+• The buffer member of VkBindBufferMemoryInfo
+• The image member of VkBindImageMemoryInfo
+• The memory member of VkMemoryMapInfo
+• The memory member of VkMemoryUnmapInfo
+• The surface member of VkSwapchainCreateInfoKHR
+• The oldSwapchain member of VkSwapchainCreateInfoKHR
+• The swapchain member of VkBindImageMemorySwapchainInfoKHR
+• The swapchain member of VkAcquireNextImageInfoKHR
+• The semaphore member of VkAcquireNextImageInfoKHR
+• The fence member of VkAcquireNextImageInfoKHR
+• The semaphore member of VkImportSemaphoreWin32HandleInfoKHR
+• The semaphore member of VkImportSemaphoreFdInfoKHR
+• The fence member of VkImportFenceWin32HandleInfoKHR
+• The fence member of VkImportFenceFdInfoKHR
+• The mode member of VkDisplayPlaneInfo2KHR
+• The pipeline member of VkReleaseCapturedPipelineDataInfoKHR
+• The swapchain member of VkReleaseSwapchainImagesInfoKHR
+• The object member of VkDebugMarkerObjectNameInfoEXT
+• The object member of VkDebugMarkerObjectTagInfoEXT
+• The objectHandle member of VkDebugUtilsObjectTagInfoEXT
+• The swapchain member of VkPastPresentationTimingInfoEXT
+• The semaphore member of VkImportSemaphoreZirconHandleInfoFUCHSIA
+• The tensor member of VkBindTensorMemoryInfoARM
+1
+ See Valid Usage language for this token for details.
+There are also a few instances where a command can take in an application-allocated list whose
+contents are externally synchronized parameters. In these cases, the caller must guarantee that at
+most one thread is using a given element within the list at a given time. These parameters are listed
+below.
+Externally Synchronized Parameter and Member Lists
+• Each element of the pFences parameter in vkResetFences
+• Each element of the pCommandBuffers parameter in vkFreeCommandBuffers
+• Each element of the pDescriptorSets parameter in vkFreeDescriptorSets
+• The dstSet member of each element of the pDescriptorWrites parameter in
+vkUpdateDescriptorSets, conditionally1
+• Each element of the pSwapchains parameter in vkSetHdrMetadataEXT
+• Each element of the pWaitSemaphores member of VkPresentInfoKHR
+• Each element of the pSwapchains member of VkPresentInfoKHR
+1
+ See Valid Usage language for this token for details.
+In addition, there are some implicit parameters that need to be externally synchronized. For
+example, when a commandBuffer parameter needs to be externally synchronized, it implies that the
+commandPool from which that command buffer was allocated also needs to be externally
+synchronized. The implicit parameters and their associated object are listed below.
+Implicit Externally Synchronized Parameters
+• All VkPhysicalDevice objects enumerated from instance in vkDestroyInstance
+• All VkQueue objects created from device in vkDestroyDevice
+• All VkQueue objects created from device that are not created with
+VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR in
+vkDeviceWaitIdle
+• The VkCommandPool that commandBuffer was allocated from in vkBeginCommandBuffer
+• The VkCommandPool that commandBuffer was allocated from in vkEndCommandBuffer
+• The VkCommandPool that commandBuffer was allocated from in vkResetCommandBuffer
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdCopyBuffer
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdCopyImage
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdCopyBufferToImage
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdCopyImageToBuffer
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdUpdateBuffer
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdFillBuffer
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdPipelineBarrier
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBeginQuery
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdEndQuery
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdResetQueryPool
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdWriteTimestamp
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdCopyQueryPoolResults
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdExecuteCommands
+• Any VkDescriptorSet objects allocated from descriptorPool in vkResetDescriptorPool
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBindPipeline
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBindDescriptorSets
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdClearColorImage
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDispatch
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDispatchIndirect
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetEvent
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdResetEvent
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdWaitEvents
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdPushConstants
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetViewport
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetScissor
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetLineWidth
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetDepthBias
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetBlendConstants
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetDepthBounds
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetStencilCompareMask
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetStencilWriteMask
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetStencilReference
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBindIndexBuffer
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBindVertexBuffers
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDraw
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDrawIndexed
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDrawIndirect
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDrawIndexedIndirect
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBlitImage
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdClearDepthStencilImage
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdClearAttachments
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdResolveImage
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBeginRenderPass
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdNextSubpass
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdEndRenderPass
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetDeviceMask
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDispatchBase
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDrawIndirectCount
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDrawIndexedIndirectCount
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBeginRenderPass2
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdNextSubpass2
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdEndRenderPass2
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdPipelineBarrier2
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdWriteTimestamp2
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdCopyBuffer2
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdCopyImage2
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdCopyBufferToImage2
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdCopyImageToBuffer2
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetEvent2
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdResetEvent2
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdWaitEvents2
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBlitImage2
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdResolveImage2
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBeginRendering
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdEndRendering
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetCullMode
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetFrontFace
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetPrimitiveTopology
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetViewportWithCount
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetScissorWithCount
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBindVertexBuffers2
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetDepthTestEnable
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetDepthWriteEnable
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetDepthCompareOp
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetDepthBoundsTestEnable
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetStencilTestEnable
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetStencilOp
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetRasterizerDiscardEnable
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetDepthBiasEnable
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetPrimitiveRestartEnable
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdPushDescriptorSet
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdPushDescriptorSetWithTemplate
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBindDescriptorSets2
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdPushConstants2
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdPushDescriptorSet2
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdPushDescriptorSetWithTemplate2
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetLineStipple
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBindIndexBuffer2
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetRenderingAttachmentLocations
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetRenderingInputAttachmentIndices
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBeginVideoCodingKHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdEndVideoCodingKHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdControlVideoCodingKHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDecodeVideoKHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBeginRenderingKHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdEndRenderingKHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetDeviceMaskKHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDispatchBaseKHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdPushDescriptorSetKHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdPushDescriptorSetWithTemplateKHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBeginRenderPass2KHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdNextSubpass2KHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdEndRenderPass2KHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDrawIndirectCountKHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDrawIndexedIndirectCountKHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetFragmentShadingRateKHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetRenderingAttachmentLocationsKHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetRenderingInputAttachmentIndicesKHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdEncodeVideoKHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetEvent2KHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdResetEvent2KHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdWaitEvents2KHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdPipelineBarrier2KHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdWriteTimestamp2KHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBindIndexBuffer3KHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBindVertexBuffers3KHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDrawIndirect2KHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDrawIndexedIndirect2KHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDispatchIndirect2KHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdCopyMemoryKHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdCopyMemoryToImageKHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdCopyImageToMemoryKHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdUpdateMemoryKHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdFillMemoryKHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdCopyQueryPoolResultsToMemoryKHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDrawIndirectCount2KHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDrawIndexedIndirectCount2KHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBeginConditionalRendering2EXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBindTransformFeedbackBuffers2EXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBeginTransformFeedback2EXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdEndTransformFeedback2EXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDrawIndirectByteCount2EXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDrawMeshTasksIndirect2EXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDrawMeshTasksIndirectCount2EXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdWriteMarkerToMemoryAMD
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdCopyBuffer2KHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdCopyImage2KHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdCopyBufferToImage2KHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdCopyImageToBuffer2KHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBlitImage2KHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdResolveImage2KHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdTraceRaysIndirect2KHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBindIndexBuffer2KHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetLineStippleKHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBindDescriptorSets2KHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdPushConstants2KHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdPushDescriptorSet2KHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdPushDescriptorSetWithTemplate2KHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetDescriptorBufferOffsets2EXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBindDescriptorBufferEmbeddedSamplers2EXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdCopyMemoryIndirectKHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdCopyMemoryToImageIndirectKHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdEndRendering2KHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDebugMarkerBeginEXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDebugMarkerEndEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDebugMarkerInsertEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBindTransformFeedbackBuffersEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBeginTransformFeedbackEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdEndTransformFeedbackEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBeginQueryIndexedEXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdEndQueryIndexedEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDrawIndirectByteCountEXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdCuLaunchKernelNVX
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDrawIndirectCountAMD
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDrawIndexedIndirectCountAMD
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBeginConditionalRenderingEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdEndConditionalRenderingEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetViewportWScalingNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetDiscardRectangleEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetDiscardRectangleEnableEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetDiscardRectangleModeEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBeginDebugUtilsLabelEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdEndDebugUtilsLabelEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdInsertDebugUtilsLabelEXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBeginGpaSessionAMD
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdEndGpaSessionAMD
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBeginGpaSampleAMD
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdEndGpaSampleAMD
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdCopyGpaSessionResultsAMD
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdInitializeGraphScratchMemoryAMDX
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDispatchGraphAMDX
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDispatchGraphIndirectAMDX
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDispatchGraphIndirectCountAMDX
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBindSamplerHeapEXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBindResourceHeapEXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdPushDataEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetSampleLocationsEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBindShadingRateImageNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetViewportShadingRatePaletteNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetCoarseSampleOrderNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBuildAccelerationStructureNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdCopyAccelerationStructureNV
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdTraceRaysNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdWriteAccelerationStructuresPropertiesNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdWriteBufferMarkerAMD
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdWriteBufferMarker2AMD
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDrawMeshTasksNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDrawMeshTasksIndirectNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDrawMeshTasksIndirectCountNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetExclusiveScissorEnableNV
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetExclusiveScissorNV
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetCheckpointNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetPerformanceMarkerINTEL
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetPerformanceStreamMarkerINTEL
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetPerformanceOverrideINTEL
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetLineStippleEXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetCullModeEXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetFrontFaceEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetPrimitiveTopologyEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetViewportWithCountEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetScissorWithCountEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBindVertexBuffers2EXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetDepthTestEnableEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetDepthWriteEnableEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetDepthCompareOpEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetDepthBoundsTestEnableEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetStencilTestEnableEXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetStencilOpEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdPreprocessGeneratedCommandsNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdExecuteGeneratedCommandsNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBindPipelineShaderGroupNV
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetDepthBias2EXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdCudaLaunchKernelNV
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDispatchTileQCOM
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBeginPerTileExecutionQCOM
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdEndPerTileExecutionQCOM
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBindDescriptorBuffersEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetDescriptorBufferOffsetsEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBindDescriptorBufferEmbeddedSamplersEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetFragmentShadingRateEnumNV
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetVertexInputEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSubpassShadingHUAWEI
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBindInvocationMaskHUAWEI
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetPatchControlPointsEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetRasterizerDiscardEnableEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetDepthBiasEnableEXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetLogicOpEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetPrimitiveRestartEnableEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetColorWriteEnableEXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDrawMultiEXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDrawMultiIndexedEXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBuildMicromapsEXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdCopyMicromapEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdCopyMicromapToMemoryEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdCopyMemoryToMicromapEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdWriteMicromapsPropertiesEXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDrawClusterHUAWEI
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDrawClusterIndirectHUAWEI
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetDispatchParametersARM
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdCopyMemoryIndirectNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdCopyMemoryToImageIndirectNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDecompressMemoryNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDecompressMemoryIndirectCountNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdUpdatePipelineIndirectBufferNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetDepthClampEnableEXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetPolygonModeEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetRasterizationSamplesEXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetSampleMaskEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetAlphaToCoverageEnableEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetAlphaToOneEnableEXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetLogicOpEnableEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetColorBlendEnableEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetColorBlendEquationEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetColorWriteMaskEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetTessellationDomainOriginEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetRasterizationStreamEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetConservativeRasterizationModeEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetExtraPrimitiveOverestimationSizeEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetDepthClipEnableEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetSampleLocationsEnableEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetColorBlendAdvancedEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetProvokingVertexModeEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetLineRasterizationModeEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetLineStippleEnableEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetDepthClipNegativeOneToOneEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetViewportWScalingEnableNV
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdSetViewportSwizzleNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetCoverageToColorEnableNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetCoverageToColorLocationNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetCoverageModulationModeNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetCoverageModulationTableEnableNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetCoverageModulationTableNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetShadingRateImageEnableNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetRepresentativeFragmentTestEnableNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetCoverageReductionModeNV
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdCopyTensorARM
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdOpticalFlowExecuteNV
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBindShadersEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetDepthClampRangeEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdConvertCooperativeVectorMatrixNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDispatchDataGraphARM
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetAttachmentFeedbackLoopEnableEXT
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdBindTileMemoryQCOM
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDecompressMemoryEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDecompressMemoryIndirectCountEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBuildClusterAccelerationStructureIndirectNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBuildPartitionedAccelerationStructuresNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdPreprocessGeneratedCommandsEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdExecuteGeneratedCommandsEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBeginShaderInstrumentationARM
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdEndShaderInstrumentationARM
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdEndRendering2EXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBeginCustomResolveEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetComputeOccupancyPriorityNV
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetPrimitiveRestartIndexEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBuildAccelerationStructuresKHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdBuildAccelerationStructuresIndirectKHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdCopyAccelerationStructureKHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdCopyAccelerationStructureToMemoryKHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdCopyMemoryToAccelerationStructureKHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdWriteAccelerationStructuresPropertiesKHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdTraceRaysKHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdTraceRaysIndirectKHR
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdSetRayTracingPipelineStackSizeKHR
+• The VkCommandPool that commandBuffer was allocated from, in vkCmdDrawMeshTasksEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDrawMeshTasksIndirectEXT
+• The VkCommandPool that commandBuffer was allocated from, in
+vkCmdDrawMeshTasksIndirectCountEXT
+3.7. Valid Usage
+Valid usage defines a set of conditions which must be met in order to achieve well-defined runtime
+behavior in an application. These conditions depend only on Vulkan state, and the parameters or
+objects whose usage is constrained by the condition.
+The core layer assumes applications are using the API correctly. Except as documented elsewhere in
+the Specification, the behavior of the core layer to an application using the API incorrectly is
+undefined, and may include program termination. However, implementations must ensure that
+incorrect usage by an application does not affect the integrity of the operating system, the Vulkan
+implementation, or other applications in the system using Vulkan. In particular, any guarantees
+made by an operating system about whether memory from one process can be visible to another
+process or not must not be violated by a Vulkan implementation for any memory allocation .
+Vulkan implementations are not required to make additional security or integrity guarantees
+beyond those provided by the OS unless explicitly directed by the application’s use of a particular
+feature or extension.
+NOTE
+For instance, if an operating system guarantees that data in all its memory
+allocations are set to zero when newly allocated, the Vulkan implementation must
+make the same guarantees for any allocations it controls (e.g. VkDeviceMemory).
+Similarly, if an operating system guarantees that use-after-free of host allocations
+will not result in values written by another process becoming visible, the same
+guarantees must be made by the Vulkan implementation for device memory.
+If the protectedMemory feature is supported, the implementation provides additional guarantees
+when invalid usage occurs to prevent values in protected memory from being accessed or inferred
+outside of protected operations, as described in Protected Memory Access Rules.
+Some valid usage conditions have dependencies on runtime limits or feature availability. It is
+possible to validate these conditions against Vulkan’s minimum supported values for these limits
+and features, or some subset of other known values.
+Valid usage conditions do not cover conditions where well-defined behavior (including returning
+an error code) exists.
+Valid usage conditions should apply to the command or structure where complete information
+about the condition would be known during execution of an application. This is such that a
+validation layer or linter can be written directly against these statements at the point they are
+specified.
+NOTE
+This does lead to some non-obvious places for valid usage statements. For instance,
+the valid values for a structure might depend on a separate value in the calling
+command. In this case, the structure itself will not reference this valid usage as it is
+impossible to determine validity from the structure that it is invalid - instead this
+valid usage would be attached to the calling command.
+Another example is draw state - the state setters are independent, and can cause a
+legitimately invalid state configuration between draw calls; so the valid usage
+statements are attached to the place where all state needs to be valid - at the
+drawing command.
+Valid usage conditions are described in a block labeled “Valid Usage” following each command or
+structure they apply to.
+3.7.1. Usage Validation
+Vulkan is a layered API. The lowest layer is the core Vulkan layer, as defined by this Specification.
+The application can use additional layers above the core for debugging, validation, and other
+purposes.
+One of the core principles of Vulkan is that building and submitting command buffers should be
+highly efficient. Thus error checking and validation of state in the core layer is minimal, although
+more rigorous validation can be enabled through the use of layers.
+Validation of correct API usage is left to validation layers. Applications should be developed with
+validation layers enabled, to help catch and eliminate errors. Once validated, released applications
+should not enable validation layers by default.
+3.7.2. Implicit Valid Usage
+Some valid usage conditions apply to all commands and structures in the API, unless explicitly
+denoted otherwise for a specific command or structure. These conditions are considered implicit,
+and are described in a block labeled “Valid Usage (Implicit)” following each command or structure
+they apply to. Implicit valid usage conditions are described in detail below.
+Valid Usage for Object Handles
+Any input parameter to a command that is an object handle must be a valid object handle, unless
+otherwise specified. An object handle is valid if:
+• It has been created or allocated by a previous, successful call to the API. Such calls are noted in
+the Specification.
+• It has not been deleted or freed by a previous call to the API. Such calls are noted in the
+Specification.
+• Any objects used by that object, either as part of creation or execution, must also be valid.
+The reserved values VK_NULL_HANDLE and NULL can be used in place of valid non-dispatchable
+handles and dispatchable handles, respectively, when explicitly called out in the Specification . Any
+command that creates an object successfully must not return these values. It is valid to pass these
+values to vkDestroy* or vkFree* commands, which will silently ignore these values.
+Valid Usage for Pointers
+Any parameter that is a pointer must be a valid pointer only if it is explicitly called out by a Valid
+Usage statement.
+A pointer is “valid” if it points at memory containing values of the number and type(s) expected by
+the command, and all fundamental types accessed through the pointer (e.g. as elements of an array
+or as members of a structure) satisfy the alignment requirements of the host processor.
+Valid Usage for Strings
+Any parameter that is a pointer to char must be a finite sequence of values terminated by a null
+character, or if explicitly called out in the Specification, can be NULL.
+Strings specified as UTF-8 encoded must not contain invalid UTF-8 sequences. See String
+Representation for additional information about strings.
+Valid Usage for Enumerated Types
+Any parameter of an enumerated type must be a valid enumerant for that type. Use of an
+enumerant is valid if the following conditions are true:
+• The enumerant is defined as part of the enumerated type.
+• The enumerant is not a value suffixed with _MAX_ENUM.
+◦ This value exists only to ensure that C enum types are 32 bits in size and must not be used by
+applications.
+• If the enumerant is used in a function that has a VkInstance as its first parameter and either:
+◦ it was added by a core version that is supported (as reported by
+vkEnumerateInstanceVersion) and the value of VkApplicationInfo::apiVersion is greater
+than or equal to the version that added it; or
+◦ it was added by an instance extension that was enabled for the instance.
+• If the enumerant is used in a function that has a VkPhysicalDevice object as its first parameter
+and either:
+◦ it was added by a core version that is supported by that device (as reported by
+VkPhysicalDeviceProperties::apiVersion);
+◦ it was added by an instance extension that was enabled for the instance; or
+◦ it was added by a device extension that is supported by that device.
+• If the enumerant is used in a function that has any other dispatchable object as its first
+parameter and either:
+◦ it was added by a core version that is supported for the device (as reported by
+VkPhysicalDeviceProperties::apiVersion); or
+◦ it was added by a device extension that was enabled for the device.
+Additionally, if the maintenance5 feature is supported, any integer value representable in the range
+valid for the defined type is valid when used in a function that has a VkPhysicalDevice object as its
+first parameter. Physical device queries will either return results indicating lack of support, or
+ignore unsupported values when used as a bit flag in a Vk*Flags* parameter.
+Any enumerated type returned from a query command or otherwise output from Vulkan to the
+application must not have a reserved value. Reserved values are values not defined by any
+extension for that enumerated type.
+NOTE
+In some special cases, an enumerant is only meaningful if a feature defined by an
+extension is also enabled, as well as the extension itself. The global “valid
+enumerant” rule described here does not address such cases.
+NOTE
+This language is intended to accommodate cases such as “hidden” extensions
+known only to driver internals, or layers enabling extensions without knowledge of
+the application, without allowing return of values not defined by any extension.
+NOTE
+Application developers are encouraged to be careful when using switch statements
+with Vulkan API enums. This is because new extensions can add new values to
+existing enums. Using a default: statement within a switch may avoid future
+compilation issues.
+This is particularly true for enums such as VkDriverId, which may have values
+added that do not belong to a corresponding new extension.
+Valid Usage for Flags
+A collection of flags is represented by a bitmask using the type VkFlags:
+// Provided by VK_VERSION_1_0
+typedef uint32_t VkFlags;
+Bitmasks are passed to many commands and structures to compactly represent options, but
+VkFlags is not used directly in the API. Instead, a Vk*Flags type which is an alias of VkFlags, and
+whose name matches the corresponding Vk*FlagBits that are valid for that type, is used.
+Any Vk*Flags member or parameter used in the API as an input must be a valid combination of bit
+flags. A valid combination is either zero or the bitwise OR of valid bit flags.
+An individual bit flag is valid for a Vk*Flags type if it would be a valid enumerant when used with
+the equivalent Vk*FlagBits type, where the bits type is obtained by taking the flag type and
+replacing the trailing Flags with FlagBits. For example, a flag value of type VkColorComponentFlags
+must contain only bit flags defined by VkColorComponentFlagBits.
+Any Vk*Flags member or parameter returned from a query command or otherwise output from
+Vulkan to the application may contain bit flags undefined in its corresponding Vk*FlagBits type. An
+application cannot rely on the state of these unspecified bits.
+Only the low-order 31 bits (bit positions zero through 30) are available for use as flag bits.
+NOTE
+This restriction is due to poorly defined behavior by C compilers given a C
+enumerant value of 0x80000000. In some cases adding this enumerant value may
+increase the size of the underlying Vk*FlagBits type, breaking the ABI.
+A collection of 64-bit flags is represented by a bitmask using the type VkFlags64:
+// Provided by VK_VERSION_1_3, VK_KHR_synchronization2
+typedef uint64_t VkFlags64;
+When the 31 bits available in VkFlags are insufficient, the VkFlags64 type can be passed to
+commands and structures to represent up to 64 options. VkFlags64 is not used directly in the API.
+Instead, a Vk*Flags2 type which is an alias of VkFlags64, and whose name matches the
+corresponding Vk*FlagBits2 that are valid for that type, is used.
+Any Vk*Flags2 member or parameter used in the API as an input must be a valid combination of bit
+flags. A valid combination is either zero or the bitwise OR of valid bit flags.
+An individual bit flag is valid for a Vk*Flags2 type if it would be a valid enumerant when used with
+the equivalent Vk*FlagBits2 type, where the bits type is obtained by taking the flag type and
+replacing the trailing Flags2 with FlagBits2. For example, a flag value of type VkAccessFlags2 must
+contain only bit flags defined by VkAccessFlagBits2.
+Any Vk*Flags2 member or parameter returned from a query command or otherwise output from
+Vulkan to the application may contain bit flags undefined in its corresponding Vk*FlagBits2 type.
+An application cannot rely on the state of these unspecified bits.
+NOTE
+Both the Vk*FlagBits2 type, and the individual bits defined for that type, are defined
+as uint64_t integers in the C API. This is in contrast to the 32-bit types, where the
+Vk*FlagBits type is defined as a C enum and the individual bits as enumerants
+belonging to that enum. As a result, there is less compile time type checking possible
+for the 64-bit types. This is unavoidable since there is no sufficiently portable way to
+define a 64-bit enum type in C99.
+Effective Flags
+When the effective value of a bitmask command parameter or structure member is determined by
+an extending structure providing a 64-bit version of the bitflags, that effective value is used in all
+specification language, including valid usage statements, referring to the original parameter.
+Examples of such extending structures include (this list is not complete):
+• VkBufferUsageFlags2CreateInfo
+• 

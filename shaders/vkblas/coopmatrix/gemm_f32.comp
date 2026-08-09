@@ -1,0 +1,127 @@
+#version 450
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_cooperative_matrix : enable
+
+// Specialization constants
+layout(constant_id = 0) const uint TILE_M     = 16;
+layout(constant_id = 1) const uint TILE_N     = 16;
+layout(constant_id = 2) const uint CM_MSIZE   = 16;
+layout(constant_id = 3) const uint CM_NSIZE   = 16;
+layout(constant_id = 4) const uint CM_KSIZE   = 16;
+
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    float alpha;
+    float beta;
+    uint  lda;
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  _pad2;
+    uint  _pad3;
+} pc;
+
+layout(set = 0, binding = 0) restrict readonly buffer BufA { float data_A[]; };
+layout(set = 0, binding = 1) restrict readonly buffer BufB { float data_B[]; };
+layout(set = 0, binding = 2) restrict readonly buffer BufC { float data_C[]; };
+layout(set = 0, binding = 3) writeonly  buffer BufD { float data_D[]; };
+
+shared float As[TILE_M * CM_KSIZE];
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    uint row  = gl_LocalInvocationID.x;
+    uint col  = gl_LocalInvocationID.y;
+    uint lane = gl_SubgroupInvocationID;
+
+    uint grRow = gl_WorkGroupID.x;
+    uint grCol = gl_WorkGroupID.y;
+    uint batch = gl_WorkGroupID.z;
+
+    uint globalRow = grRow * TILE_M + row;
+    uint globalCol = grCol * TILE_N + col;
+
+    float acc = 0.0;
+    uint numTiles = (pc.k + CM_KSIZE - 1) / CM_KSIZE;
+
+    float b_reg = 0.0;
+
+    for (uint t = 0; t < numTiles; ++t) {
+        // ── Load A tile ─────────────────────────────────────────────────
+        // On RDNA4 with matrix cores, this loads a coopmat fragment directly
+        // via coopMatLoadKHR(data_A, row, col, lda). The subgroup algorithm
+        // below is the portable approximation.
+        for (uint a_col = col; a_col < CM_KSIZE; a_col += TILE_N) {
+            uint aRow, aCol;
+            if (pc.transA == 0) {
+                aRow = globalRow;
+                aCol = t * CM_KSIZE + a_col;
+            } else {
+                aRow = t * CM_KSIZE + a_col;
+                aCol = globalRow;
+            }
+            uint idx = aRow + uint(aCol) * pc.lda + batch * pc.strideA;
+            As[row * CM_KSIZE + a_col] = data_A[idx];
+        }
+
+        // ── Load B element into register ────────────────────────────────
+        {
+            uint bRow, bCol;
+            if (pc.transB == 0) {
+                bRow = t * CM_KSIZE + row;
+                bCol = globalCol;
+            } else {
+                bRow = globalCol;
+                bCol = t * CM_KSIZE + row;
+            }
+            uint idx = bRow + uint(bCol) * pc.ldb + batch * pc.strideB;
+            b_reg = data_B[idx];
+        }
+
+        subgroupBarrier();
+        subgroupMemoryBarrier();
+
+        // ── Compute ─────────────────────────────────────────────────────
+        // When GL_KHR_cooperative_matrix is fully supported:
+        //   coopmat<float, CM_MSIZE, CM_KSIZE, 1, 1> a_frag = ... ;
+        //   coopmat<float, CM_KSIZE, CM_NSIZE, 1, 1> b_frag = ... ;
+        //   coopmat<float, CM_MSIZE, CM_NSIZE, 1, 1> acc_frag =
+        //       coopMatMulAdd(a_frag, b_frag, zero);
+        //   float result = float(acc_frag);
+        //
+        // Fallback (subgroup shuffle):
+        for (uint kk = 0; kk < CM_KSIZE; ++kk) {
+            float a_val = As[kk * CM_KSIZE + row];
+            float b_val = subgroupShuffle(b_reg, kk);
+            acc += a_val * b_val;
+        }
+
+        subgroupBarrier();
+    }
+
+    // ── Scale and write ──────────────────────────────────────────────────
+    float result = pc.alpha * acc;
+
+    if (pc.beta_is_zero == 0) {
+        uint cIdx = globalRow + globalCol * pc.ldc + batch * pc.strideC;
+        result += pc.beta * data_C[cIdx];
+    }
+
+    uint dIdx = globalRow + globalCol * pc.ldd + batch * pc.strideD;
+    data_D[dIdx] = result;
+}

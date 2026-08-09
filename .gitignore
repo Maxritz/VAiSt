@@ -1,0 +1,41 @@
+# Build artifacts
+build/
+cmake-build-*/
+
+# SPIR-V binaries
+**/*.spv
+**/*.spv.a
+
+# Generated headers
+generated/
+
+# Vulkan runtime
+pipeline_cache.bin
+*.vspv
+
+# Compiled objects
+*.o
+*.obj
+*.exe
+*.lib
+*.dll
+*.so
+*.a
+
+# Editor
+.vs/
+*.vcxproj
+*.vcxproj.filters
+*.sln
+*.suo
+
+# Vulkan SDK downloaded artifacts
+third_party/vma/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.DS_Store?
+.env

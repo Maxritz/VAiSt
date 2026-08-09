@@ -1,0 +1,201 @@
+Cooperative Matrix Memory Access . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  6210
+Appendix C: Compressed Image Formats. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  6212
+Block-Compressed Image Formats . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  6213
+ETC Compressed Image Formats . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  6214
+ASTC Compressed Image Formats. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  6215
+PVRTC Compressed Image Formats. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  6218
+Appendix D: Core Revisions (Informative) . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  6219
+Vulkan Version 1.4. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  6219
+Vulkan Version 1.3. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  6228
+Vulkan Version 1.2. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  6237
+Vulkan Version 1.1. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  6245
+Vulkan Version 1.0. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  6257
+Appendix E: Layers & Extensions (Informative) . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  6272
+Extension Dependencies . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  6272
+Extension Interactions . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  6272
+List of Current Extensions . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  6273
+List of Provisional Extensions . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7287
+List of Deprecated Extensions . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7299
+Appendix F: Vulkan Roadmap Milestones . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7693
+Roadmap 2022 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7693
+Roadmap 2024 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7697
+Roadmap 2026 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7699
+Appendix G: Legacy and Superseded Functionality . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7702
+List of Legacy Functionality . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7703
+Appendix H: API Boilerplate . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7707
+Vulkan Header Files . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7707
+Window System-Specific Header Control (Informative) . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7711
+Provisional Extension Header Control (Informative). . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7713
+Video Std Headers . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7713
+Appendix I: Invariance . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7715
+Repeatability. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7715
+Multi-Pass Algorithms . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7715
+Invariance Rules . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7715
+Tessellation Invariance . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7717
+Appendix J: Lexicon. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7719
+Glossary . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7719
+Common Abbreviations . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7751
+Video-Specific Abbreviations . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7752
+Prefixes . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7754
+Appendix K: Credits (Informative). . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7755
+Working Group Contributors to Vulkan. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7755
+Other Credits. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  7767
+Chapter 1. Preamble
+Copyright 2014-2026 The Khronos Group Inc.
+This Specification is protected by copyright laws and contains material proprietary to Khronos.
+Except as described by these terms, it or any components may not be reproduced, republished,
+distributed, transmitted, displayed, broadcast or otherwise exploited in any manner without the
+express prior written permission of Khronos.
+Khronos grants a conditional copyright license to use and reproduce the unmodified Specification
+for any purpose, without fee or royalty, EXCEPT no licenses to any patent, trademark or other
+intellectual property rights are granted under these terms.
+Khronos makes no, and expressly disclaims any, representations or warranties, express or implied,
+regarding this Specification, including, without limitation: merchantability, fitness for a particular
+purpose, non-infringement of any intellectual property, correctness, accuracy, completeness,
+timeliness, and reliability. Under no circumstances will Khronos, or any of its Promoters,
+Contributors or Members, or their respective partners, officers, directors, employees, agents or
+representatives be liable for any damages, whether direct, indirect, special or consequential
+damages for lost revenues, lost profits, or otherwise, arising from or in connection with these
+materials.
+This document contains extensions which are not ratified by Khronos, and as such is not a ratified
+Specification, though it contains text from (and is a superset of) the ratified Specification.
+The ratified version of the Vulkan Specification can be found at https://registry.khronos.org/vulkan/
+specs/latest-ratified/pdf/vkspec.pdf (core with all ratified extensions).
+This Specification contains substantially unmodified functionality from, and is a successor to,
+Khronos specifications including OpenGL, OpenGL ES and OpenCL.
+The Khronos Intellectual Property Rights Policy defines the terms 'Scope', 'Compliant Portion', and
+'Necessary Patent Claims'.
+Some parts of this Specification are purely informative and so are EXCLUDED the Scope of this
+Specification. The Document Conventions section of the Introduction defines how these parts of the
+Specification are identified.
+Where this Specification uses technical terminology, defined in the Glossary or otherwise, that refer
+to enabling technologies that are not expressly set forth in this Specification, those enabling
+technologies are EXCLUDED from the Scope of this Specification. For clarity, enabling technologies
+not disclosed with particularity in this Specification (e.g. semiconductor manufacturing technology,
+hardware architecture, processor architecture or microarchitecture, memory architecture,
+compiler technology, object oriented technology, basic operating system technology, compression
+technology, algorithms, and so on) are NOT to be considered expressly set forth; only those
+application program interfaces and data structures disclosed with particularity are included in the
+Scope of this Specification.
+For purposes of the Khronos Intellectual Property Rights Policy as it relates to the definition of
+Necessary Patent Claims, all recommended or optional features, behaviors and functionality set
+forth in this Specification, if implemented, are considered to be included as Compliant Portions.
+Where this Specification identifies specific sections of external references, only those specifically
+identified sections define normative functionality. The Khronos Intellectual Property Rights Policy
+excludes external references to materials and associated enabling technology not created by
+Khronos from the Scope of this Specification, and any licenses that may be required to implement
+such referenced materials and associated technologies must be obtained separately and may
+involve royalty payments.
+Khronos and Vulkan are registered trademarks, and SPIR-V is a trademark of The Khronos Group
+Inc. OpenCL is a trademark of Apple Inc., used under license by Khronos. OpenGL is a registered
+trademark and the OpenGL ES logo is a trademark of Hewlett Packard Enterprise, used under
+license by Khronos. ASTC is a trademark of ARM Holdings PLC. All other product names,
+trademarks, and/or company names are used solely for identification and belong to their respective
+owners.
+Chapter 2. Introduction
+This document, referred to as the “Vulkan Specification” or just the “Specification” hereafter,
+describes the Vulkan Application Programming Interface (API). Vulkan is a C99 API designed for
+explicit control of low-level graphics and compute functionality.
+The canonical version of the Specification is available in the official Vulkan Registry 
+(https://registry.khronos.org/vulkan/). The source files used to generate the Vulkan specification are
+stored in the Vulkan Documentation Repository (https://github.com/KhronosGroup/Vulkan-Docs).
+The source repository additionally has a public issue tracker and allows the submission of pull
+requests that improve the specification.
+2.1. Document Conventions
+The Vulkan specification is intended for use by both implementors of the API and application
+developers seeking to make use of the API, forming a contract between these parties. Specification
+text may address either party; typically the intended audience can be inferred from context, though
+some sections are defined to address only one of these parties. (For example, Valid Usage sections
+only address application developers). Any requirements, prohibitions, recommendations, or
+options defined in specification text are imposed only on the audience of that text.
+2.1.1. Normative Requirements
+The Vulkan Specification uses a combination of normative terminology and normative descriptions
+to express the requirements that it imposes on applications and implementations. An application
+which complies with all normative requirements imposed on applications is said to make valid use
+of the API; failing to comply with such requirements results in undefined behavior, as discussed in
+the Valid Usage section below. In the context of this document, an implementation which complies
+with all normative requirements imposed on implementations is said to be conformant.
+NOTE
+The Khronos Group imposes additional requirements on implementors who wish to
+make public statements describing their Vulkan implementations as conformant.
+These include signing the Vulkan Adopter’s Agreement, paying the associated fee,
+and making a successful conformance test submission to the Khronos Conformance
+Process. For details see the Khronos Trademark Guidelines 
+(https://www.khronos.org/legal/khronos-trademark-guidelines).
+Normative Terminology
+Within this specification, the key words must, required, should, may, and optional are to be
+interpreted as described in RFC 2119 - Key words for use in RFCs to Indicate Requirement Levels 
+(https://www.ietf.org/rfc/rfc2119.txt). The additional key word optionally is an alternate form of
+optional, for use where grammatically appropriate. These key words are highlighted in the
+specification to indicate that they are being used in a specific technical sense.
+The additional key words can and cannot are to be interpreted as describing the capabilities of an
+application, as follows:
+can
+This word means that the application is able to perform the action described.
+cannot
+This word means that the API and/or the execution environment provide no mechanism through
+which the application can express or accomplish the action described.
+These key words are never used in text addressing implementors.
+NOTE
+There is an important distinction between cannot and must not , as used in this
+Specification. Cannot refers to something the API provides no way for the
+application to express or accomplish. Must not  describes something that the
+application is able to express, but that is not valid use of the API, and will have
+undefined and potentially unrecoverable consequences.
+Normative Descriptions
+In the Vulkan Specification, the normative term must is primarily used to describe application
+behavior, and in particular to constrain what inputs or commands issued by the application to the
+implementation are considered valid.
+To constrain implementation behavior, the specification sometimes uses must, but more often
+simply describes the behavior of the implementation in response to specified commands and
+inputs. Unless explicitly stated otherwise, such references to implementation behavior describe the
+behavior of conformant implementations, and express normative requirements which an
+implementation must satisfy in order to conform to the specification. For example, if the
+specification says “Under specified condition, the error code VK_ERROR_FEATURE_NOT_PRESENT
+is returned”, that behavior is a requirement of the specification, and an implementation which does
+not return that error code under that condition is not conformant.
+When the normative terms may, should, or optional are used to describe implementation
+behavior, they define alternative or optional behaviors which a conformant implementation may
+or may not exhibit. Such statements are also normative. For example, if the specification says
+“Under specified condition, the implementation should return A but may instead return B”, then
+an implementation that returns either A or B under that condition is conformant (assuming it does
+not violate other normative requirements), while an implementation that returns anything else is
+not.
+2.1.2. Normative References
+References to external documents are considered normative references if the Specification uses
+normative terminology or normative descriptions to refer to them or their requirements, either as
+a whole or in part.
+The following documents are referenced by normative sections of the specification:
+IEEE. August, 2008. IEEE Standard for Floating-Point Arithmetic . IEEE Std 754-2008.
+https://dx.doi.org/10.1109/IEEESTD.2008.4610935 .
+Andrew Garrard. Khronos Data Format Specification, version 1.3 .
+https://registry.khronos.org/DataFormat/specs/1.3/dataformat.1.3.html .
+John Kessenich. SPIR-V Extended Instructions for GLSL, Version 1.00  (February 10, 2016).
+https://registry.khronos.org/spir-v/ .
+John Kessenich, Boaz Ouriel, Raun Krisch, and Diego Novillo. SPIR-V Specification, Version 1.6.7,
+Revision 1, Unified (March, 2026). https://registry.khronos.org/spir-v/ .
+ITU-T. H.264 Advanced Video Coding for Generic Audiovisual Services  (August, 2021).
+https://www.itu.int/rec/T-REC-H.264-202108-I/ .
+ITU-T. H.265 High Efficiency Video Coding  (August, 2021). https://www.itu.int/rec/T-REC-H.265-
+202108-S/ .
+Google. VP9 Bitstream & Decoding Process Specification  (February 22, 2017).
+https://storage.googleapis.com/downloads.webmproject.org/docs/vp9/vp9-bitstream-specification-
+v0.7-20170222-draft.pdf .
+Alliance for Open Media. AV1 Bitstream & Decoding Process Specification  (January 8, 2019).
+https://aomediacodec.github.io/av1-spec/av1-spec.pdf .
+Jon Leech. The Khronos Vulkan API Registry  (February 26, 2023). https://registry.khronos.org/
+vulkan/specs/latest/registry.html .
+Jon Leech and Tobias Hector. Vulkan Documentation and Extensions: Procedures and Conventions 
+(February 26, 2023). https://registry.khronos.org/vulkan/specs/latest/styleguide.html .
+Architecture of the Vulkan Loader Interfaces  (October, 2021). https://github.com/KhronosGroup/
+Vulkan-Loader/blob/main/docs/LoaderInterfaceArchitecture.md .
+2.1.3. Informative Language
+Some language in the specification is purely informative, intended to provide background
+information or make suggestions to implementors or developers. Such language does not impose
+normative requirements on implementations or applications.
+All NOTEs are implicitly informative.
+If an entire chapter, section, or appendix contains only informative language, its title will be
+suffixed with “(Informative)”. Unless so noted in the title, all chapters, sections, and appendices in
+this document are normative.
+2.1.4. Technical Terminology
+The Vulkan Specification makes use of common engineering and graphics terms such as 
