@@ -66,5 +66,29 @@ Layout follows std140 packing rules. `int64_t` requires `shaderInt64` feature
 - `gemm_f16.comp` — half-precision GEMM
 - `gemm_bf16.comp` — bfloat16 GEMM
 - `gemm_i8.comp`  — int8 GEMM
+- `qgemm_q8_0.comp` — fused quantized GEMM, Q8_0 weights (dequant-in-matmul)
+- `qgemm_q4k.comp`  — fused quantized GEMM, Q4_K weights (dequant-in-matmul)
 
 Each variant exists in all three tier directories.
+
+## Fused quantized GEMM shaders (baseline only)
+
+`qgemm_q8_0.comp` / `qgemm_q4k.comp` reuse the gemm_f32 16x16 tiled structure
+(shared `As`/`Bs`, k-loop with zero-fill, m/n write-guard) but the A-tile load
+**dequantizes the quantized weight blocks into f32 shared memory** instead of
+loading f32. The dequant math is ported verbatim from the vkquant shaders:
+
+- **Q8_0**: 36 B/block (f32 `d` + 32 int8). `As = d * qs[i]`.
+- **Q4_K**: 144 B/block (ggml `block_q4_K`). Per-32-group
+  `get_scale_min_k4` decode; `out = d*sc*nib - dmin*mn`.
+
+Byte I/O uses `uint8_t`/`int8_t` scalar-layout SSBOs (requires
+`GL_EXT_shader_explicit_arithmetic_types` + `GL_EXT_scalar_block_layout`,
+plus the `storageBuffer8BitAccess`/`shaderInt8` device features — enabled by
+the test harness). The descriptor layout is unchanged from the plain GEMMs:
+binding 0 = Wq (bytes, read), 1 = x (read), 2 = y (read, beta term),
+3 = y (write).
+
+Push constants reuse the plain-GEMM block; the host maps `pc.m` = weight rows,
+`pc.n` = activation cols, `pc.lda` = weight row byte stride (ldw),
+`pc.ldb` = ldx, `pc.ldd` = ldy. The grid is ceil(n/16) x ceil(m/16).

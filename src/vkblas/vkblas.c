@@ -141,6 +141,12 @@ static const uint32_t* vkblas_select_spirv(VkBLASContext* ctx,
         case VKBLAS_DTYPE_F64:
             *out_size = vkblas_spv_baseline_gemm_f64_size;
             return vkblas_spv_baseline_gemm_f64;
+        case VKBLAS_DTYPE_QGEMM_Q8_0:
+            *out_size = vkblas_spv_baseline_qgemm_q8_0_size;
+            return vkblas_spv_baseline_qgemm_q8_0;
+        case VKBLAS_DTYPE_QGEMM_Q4K:
+            *out_size = vkblas_spv_baseline_qgemm_q4k_size;
+            return vkblas_spv_baseline_qgemm_q4k;
         default:
             return NULL;
         }
@@ -1074,4 +1080,139 @@ VkResult vkblas_gemm_ex_strided_batched(VkBLASContext* context, VkCommandBuffer 
                               elem_strideA, elem_strideB,
                               elem_strideC, elem_strideD,
                               batchCount, VK_TRUE);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════ *
+ * Fused quantized GEMM — dequant-in-matmul (Q8_0 / Q4_K weights)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* Resolve the dequant-in-matmul pipeline for a quantized weight format.
+   Mirrors vkblas_ensure_pipeline: the qgemm kernels only exist at the
+   baseline tier, so the fallback walk lands there regardless of the active
+   tier. The distinct VKBLAS_DTYPE_QGEMM_* codes keep the cache keys separate
+   from every plain GEMM. */
+static VkResult vkblas_qgemm_ensure_pipeline(VkBLASContext* ctx,
+                                             uint32_t kernel,
+                                             VkPipeline* out_pipeline)
+{
+    /* Only the two fused kernels have pipelines; anything else fails. */
+    uint32_t dtype;
+    if (kernel == VKBLAS_DTYPE_QGEMM_Q8_0) {
+        dtype = VKBLAS_DTYPE_QGEMM_Q8_0;
+    } else if (kernel == VKBLAS_DTYPE_QGEMM_Q4K) {
+        dtype = VKBLAS_DTYPE_QGEMM_Q4K;
+    } else {
+        return VK_ERROR_FEATURE_NOT_PRESENT;
+    }
+    return vkblas_ensure_pipeline(ctx, dtype, 0, 0, VK_FALSE, out_pipeline);
+}
+
+/* Shared dispatch for both fused quantized GEMMs.
+ *
+ * Layout contract (documented in vkblas.h):
+ *   - Wq is the weight matrix (n rows x k cols) stored as quantized blocks,
+ *     row-major per row: row r starts at byte offset r * ldw.
+ *       Q8_0: 36 B/block of 32 elems (f32 d + 32 int8). n*ceil(k/32) blocks.
+ *       Q4_K: 144 B/block of 256 elems (ggml).      n*ceil(k/256) blocks.
+ *   - x is f32 (k x m), column-major; y is f32 (n x m), column-major.
+ *
+ * Descriptor binding mirrors the plain GEMM 4-binding layout:
+ *   binding 0 = Wq (read), binding 1 = x (read), binding 2 = y (read for
+ *   the beta term), binding 3 = y (write). y is both C and D because the
+ *   API computes in place: y = alpha*(dequant(W)*x) + beta*y.
+ *
+ * Push constants reuse vkblas_push_constants_t; the shader names them as in
+ * gemm_f32.comp (pc.m = weight rows, pc.n = activation cols, pc.k = depth),
+ * so the host swaps m/n and maps ldw/ldx/ldy onto lda/ldb/ldc/ldd.
+ */
+static VkResult vkblas_qgemm_common(VkBLASContext* ctx,
+                                    VkCommandBuffer cmd,
+                                    int32_t m, int32_t n, int32_t k,
+                                    uint32_t kernel,
+                                    const float* alpha,
+                                    VkBuffer Wq, int32_t ldw,
+                                    VkBuffer x, int32_t ldx,
+                                    const float* beta,
+                                    VkBuffer y, int32_t ldy)
+{
+    /* Ensure pipeline exists */
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkResult r = vkblas_qgemm_ensure_pipeline(ctx, kernel, &pipeline);
+    if (r != VK_SUCCESS)
+        return r;
+
+    /* Allocate descriptor set */
+    VkDescriptorSet ds;
+    r = vkblas_alloc_descriptor_set(ctx, &ds);
+    if (r != VK_SUCCESS)
+        return r;
+
+    /* Wq -> binding 0, x -> binding 1, y -> binding 2 (beta read) and
+       binding 3 (write). The same buffer is both C and D: the API updates
+       y in place. */
+    vkblas_write_descriptor_set(ctx, ds, Wq, x, y, y);
+
+    /* Bind pipeline and descriptor set */
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            ctx->pipeline_layout, 0, 1, &ds, 0, NULL);
+
+    /* Push constants: shader sees pc.m = weight rows (= n), pc.n = act
+       cols (= m), pc.k = depth; strides map ldw/ldx/ldy -> lda/ldb/ldc/ldd. */
+    vkblas_push_constants_t pc = {0};
+    pc.m = (uint32_t)n;
+    pc.n = (uint32_t)m;
+    pc.k = (uint32_t)k;
+    pc.alpha = *alpha;
+    pc.beta  = *beta;
+    if (pc.beta == 0.0f)
+        pc.beta_is_zero = 1;
+    pc.lda = (uint32_t)ldw;
+    pc.ldb = (uint32_t)ldx;
+    pc.ldc = (uint32_t)ldy;
+    pc.ldd = (uint32_t)ldy;
+    pc.transA = 0;
+    pc.transB = 0;
+    vkblas_push_pc(cmd, ctx->pipeline_layout, &pc);
+
+    /* Compute grid: one workgroup per TILE_M x TILE_N output block of the
+       n x m result y. */
+    uint32_t gridX = (uint32_t)((n + VKBLAS_TILE_M - 1) / VKBLAS_TILE_M);
+    uint32_t gridY = (uint32_t)((m + VKBLAS_TILE_N - 1) / VKBLAS_TILE_N);
+
+    vkCmdDispatch(cmd, gridX, gridY, 1);
+
+    return VK_SUCCESS;
+}
+
+VkResult vkblas_qgemm_q8_0_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                               int32_t m, int32_t n, int32_t k,
+                               const float* alpha, VkBuffer Wq, int32_t ldw,
+                               VkBuffer x, int32_t ldx,
+                               const float* beta, VkBuffer y, int32_t ldy)
+{
+    if (!ctx || !cmd || !Wq || !x || !y || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m <= 0 || n <= 0 || k <= 0)
+        return VK_SUCCESS;  /* no-op for zero-size matrices */
+
+    return vkblas_qgemm_common(ctx, cmd, m, n, k,
+                               VKBLAS_DTYPE_QGEMM_Q8_0,
+                               alpha, Wq, ldw, x, ldx, beta, y, ldy);
+}
+
+VkResult vkblas_qgemm_q4k_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                              int32_t m, int32_t n, int32_t k,
+                              const float* alpha, VkBuffer Wq, int32_t ldw,
+                              VkBuffer x, int32_t ldx,
+                              const float* beta, VkBuffer y, int32_t ldy)
+{
+    if (!ctx || !cmd || !Wq || !x || !y || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m <= 0 || n <= 0 || k <= 0)
+        return VK_SUCCESS;  /* no-op for zero-size matrices */
+
+    return vkblas_qgemm_common(ctx, cmd, m, n, k,
+                               VKBLAS_DTYPE_QGEMM_Q4K,
+                               alpha, Wq, ldw, x, ldx, beta, y, ldy);
 }

@@ -171,6 +171,17 @@ typedef struct {
     VkDeviceSize off_readback;
 } gemm_buffers_t;
 
+/** Describes the buffers + regions backing one fused quantized-GEMM case. */
+typedef struct {
+    VkBuffer Wq;
+    VkBuffer x;
+    VkBuffer y;
+    VkDeviceSize off_Wq;
+    VkDeviceSize off_x;
+    VkDeviceSize off_y;
+    VkDeviceSize off_readback;
+} qgemm_buffers_t;
+
 /* ===========================================================================
  * Bootstrap helpers
  * ========================================================================== */
@@ -311,25 +322,30 @@ static VkResult create_device(VkPhysicalDevice physical_device,
     VkPhysicalDeviceCooperativeMatrixFeaturesKHR coop_supported;
     VkPhysicalDeviceVulkan12Features vk12_supported;
     VkPhysicalDeviceVulkan11Features vk11_supported;
+    VkPhysicalDevice8BitStorageFeatures eightbit_supported;
     memset(&coop_supported, 0, sizeof(coop_supported));
     coop_supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
     memset(&vk12_supported, 0, sizeof(vk12_supported));
     vk12_supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
     memset(&vk11_supported, 0, sizeof(vk11_supported));
     vk11_supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    memset(&eightbit_supported, 0, sizeof(eightbit_supported));
+    eightbit_supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES;
 
     VkPhysicalDeviceFeatures2 supported;
     memset(&supported, 0, sizeof(supported));
     supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    vk12_supported.pNext = &coop_supported;
+    eightbit_supported.pNext = &coop_supported;
+    vk12_supported.pNext = &eightbit_supported;
     vk11_supported.pNext = &vk12_supported;
     supported.pNext = &vk11_supported;
     vkGetPhysicalDeviceFeatures2(physical_device, &supported);
 
-    /* Build the enable chain (base -> vk11 -> vk12 -> coop matrix). */
+    /* Build the enable chain (base -> vk11 -> vk12 -> 8bit -> coop matrix). */
     VkPhysicalDeviceCooperativeMatrixFeaturesKHR coop_enable;
     VkPhysicalDeviceVulkan12Features vk12_enable;
     VkPhysicalDeviceVulkan11Features vk11_enable;
+    VkPhysicalDevice8BitStorageFeatures eightbit_enable;
     VkPhysicalDeviceFeatures2 features2;
     memset(&coop_enable, 0, sizeof(coop_enable));
     coop_enable.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
@@ -337,6 +353,8 @@ static VkResult create_device(VkPhysicalDevice physical_device,
     vk12_enable.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
     memset(&vk11_enable, 0, sizeof(vk11_enable));
     vk11_enable.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    memset(&eightbit_enable, 0, sizeof(eightbit_enable));
+    eightbit_enable.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES;
     memset(&features2, 0, sizeof(features2));
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 
@@ -347,7 +365,11 @@ static VkResult create_device(VkPhysicalDevice physical_device,
     vk11_enable.uniformAndStorageBuffer16BitAccess =
         vk11_supported.uniformAndStorageBuffer16BitAccess;
     vk12_enable.shaderFloat16 = vk12_supported.shaderFloat16;
+    vk12_enable.shaderInt8 = vk12_supported.shaderInt8;
     vk12_enable.scalarBlockLayout = vk12_supported.scalarBlockLayout;
+    eightbit_enable.storageBuffer8BitAccess = eightbit_supported.storageBuffer8BitAccess;
+    eightbit_enable.uniformAndStorageBuffer8BitAccess =
+        eightbit_supported.uniformAndStorageBuffer8BitAccess;
     if (coop_supported.cooperativeMatrix) {
         coop_enable.cooperativeMatrix = VK_TRUE;
         coop_enable.cooperativeMatrixRobustBufferAccess =
@@ -359,6 +381,8 @@ static VkResult create_device(VkPhysicalDevice physical_device,
         coop_enable.pNext = pNext;
         pNext = &coop_enable;
     }
+    eightbit_enable.pNext = pNext;
+    pNext = &eightbit_enable;
     vk12_enable.pNext = pNext;
     pNext = &vk12_enable;
     vk11_enable.pNext = pNext;
@@ -685,6 +709,187 @@ static int check_output_bf16(const char *name, const void *mapped,
 }
 
 /* ===========================================================================
+ * Fused quantized-GEMM helpers (test-side; mirror the vkquant/vkblas formats)
+ * ========================================================================== */
+
+/** Quantize `num_blocks` blocks of 32 f32 values into Q8_0 (36 B/block).
+    d = amax/127, q = round(x/d), clamped to [-127, 127]. */
+static void quantize_q8_0(const float *src, int32_t num_blocks, uint8_t *dst)
+{
+    for (int32_t b = 0; b < num_blocks; ++b) {
+        const float *xs = src + 32 * b;
+        uint8_t *blk = dst + 36 * b;
+
+        float amax = 0.0f;
+        for (int i = 0; i < 32; ++i) {
+            float a = fabsf(xs[i]);
+            if (a > amax) amax = a;
+        }
+        float d = amax / 127.0f;
+        memcpy(blk, &d, sizeof(d));  /* f32 scale at bytes 0..3 (LE host) */
+
+        int8_t *qs = (int8_t *)(blk + 4);
+        for (int i = 0; i < 32; ++i) {
+            int q = (d > 0.0f) ? (int)lroundf(xs[i] / d) : 0;
+            if (q > 127) q = 127;
+            if (q < -127) q = -127;
+            qs[i] = (int8_t)q;
+        }
+    }
+}
+
+/** Dequantize Q8_0 element `idx` (0..31) of block `blk` to f32 (reference). */
+static float dequant_q8_0(const uint8_t *blk, int idx)
+{
+    float d;
+    memcpy(&d, blk, sizeof(d));
+    return d * (float)((const int8_t *)(blk + 4))[idx];
+}
+
+/* ggml get_scale_min_k4: decode the 6-bit scale/min pair for 32-group j. */
+static void get_scale_min_k4(int j, const uint8_t *q, uint8_t *d, uint8_t *m)
+{
+    if (j < 4) {
+        *d = q[j] & 63;
+        *m = q[j + 4] & 63;
+    } else {
+        *d = (uint8_t)((q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4));
+        *m = (uint8_t)((q[j + 4] >> 4) | ((q[j] >> 6) << 4));
+    }
+}
+
+/* Port of ggml make_qkx1_quants: least-squares scale + min fit for a group.
+   Returns scale s, sets *the_min = -min, with x ~= s*L - the_min. */
+static float make_qkx1_quants(int n, int nmax, const float *x,
+                              uint8_t *L, float *the_min,
+                              int ntry, float alpha)
+{
+    float min = x[0], max = x[0];
+    for (int i = 1; i < n; ++i) {
+        if (x[i] < min) min = x[i];
+        if (x[i] > max) max = x[i];
+    }
+    if (max == min) {
+        for (int i = 0; i < n; ++i) L[i] = 0;
+        *the_min = 0;
+        return 0.0f;
+    }
+    if (min > 0) min = 0;
+    float iscale = (float)nmax / (max - min);
+    float scale = 1.0f / iscale;
+    for (int itry = 0; itry < ntry; ++itry) {
+        float sumlx = 0; int suml2 = 0; int did_change = 0;
+        for (int i = 0; i < n; ++i) {
+            int l = (int)lroundf(iscale * (x[i] - min));
+            if (l < 0) l = 0;
+            if (l > nmax) l = nmax;
+            if (l != L[i]) { L[i] = (uint8_t)l; did_change = 1; }
+            sumlx += (x[i] - min) * (float)l;
+            suml2 += l * l;
+        }
+        scale = suml2 ? sumlx / (float)suml2 : 0.0f;
+        float sum = 0;
+        for (int i = 0; i < n; ++i) sum += x[i] - scale * (float)L[i];
+        min = alpha * min + (1.0f - alpha) * sum / (float)n;
+        if (min > 0) min = 0;
+        iscale = (scale > 0.0f) ? 1.0f / scale : 0.0f;
+        if (!did_change) break;
+    }
+    *the_min = -min;
+    return scale;
+}
+
+/** Quantize 256 f32 values into one Q4_K block (144 B, ggml packing).
+    d, dmin as f16; scales[12] holds 6-bit scale/min pairs; qs[128] nibbles.
+    Dequant must round-trip through dequant_q4k_f32 (and the shader). */
+static void quantize_q4k_f32(const float *src, uint8_t *dst)
+{
+    enum { QK = 256 };
+    uint8_t L[QK];
+    float   mins[8], scales[8];
+
+    float max_scale = 0, max_min = 0;
+    for (int j = 0; j < 8; ++j) {
+        scales[j] = make_qkx1_quants(32, 15, src + 32 * j, L + 32 * j,
+                                     &mins[j], 9, 0.5f);
+        if (scales[j] > max_scale) max_scale = scales[j];
+        if (mins[j] > max_min)     max_min = mins[j];
+    }
+
+    float inv_scale = max_scale > 0.0f ? 63.0f / max_scale : 0.0f;
+    float inv_min   = max_min   > 0.0f ? 63.0f / max_min   : 0.0f;
+
+    uint8_t *sc = dst + 4;  /* scales[12] at bytes 4..15 */
+    memset(sc, 0, 12);
+    for (int j = 0; j < 8; ++j) {
+        uint8_t ls = (uint8_t)(int)(inv_scale * scales[j] + 0.5f);
+        uint8_t lm = (uint8_t)(int)(inv_min   * mins[j]   + 0.5f);
+        if (ls > 63) ls = 63;
+        if (lm > 63) lm = 63;
+        if (j < 4) {
+            sc[j] = ls;
+            sc[j + 4] = lm;
+        } else {
+            sc[j + 4] = (uint8_t)((ls & 0xF) | ((lm & 0xF) << 4));
+            sc[j - 4] |= (uint8_t)(((ls >> 4) & 0x3) << 6);
+            sc[j]     |= (uint8_t)(((lm >> 4) & 0x3) << 6);
+        }
+    }
+
+    uint16_t d16  = f32_to_f16(max_scale / 63.0f);
+    uint16_t dm16 = f32_to_f16(max_min   / 63.0f);
+    dst[0] = (uint8_t)(d16 & 0xFF);  dst[1] = (uint8_t)(d16 >> 8);
+    dst[2] = (uint8_t)(dm16 & 0xFF); dst[3] = (uint8_t)(dm16 >> 8);
+
+    /* Re-derive nibbles from the DECODED (sc, m) so the dequant round-trips. */
+    for (int j = 0; j < 8; ++j) {
+        uint8_t scs, mns;
+        get_scale_min_k4(j, sc, &scs, &mns);
+        float d = f16_to_f32(d16) * (float)scs;
+        if (d == 0.0f) continue;
+        float dm = f16_to_f32(dm16) * (float)mns;
+        for (int ii = 0; ii < 32; ++ii) {
+            int l = (int)lroundf((src[32 * j + ii] + dm) / d);
+            if (l < 0) l = 0;
+            if (l > 15) l = 15;
+            L[32 * j + ii] = (uint8_t)l;
+        }
+    }
+
+    /* Pack qs[128]: super-block s -> qs[32s..32s+31], low nibble first. */
+    uint8_t *q = dst + 16;
+    for (int j = 0; j < QK; j += 64) {
+        for (int l = 0; l < 32; ++l)
+            q[l] = (uint8_t)(L[j + l] | (L[j + l + 32] << 4));
+        q += 32;
+    }
+}
+
+/** Dequantize Q4_K element `idx` (0..255) of block `blk` to f32 (reference).
+    Mirrors the dequant math in shaders/vkquant/baseline/dequant_q4k_f32.comp. */
+static float dequant_q4k_f32(const uint8_t *blk, int idx)
+{
+    uint16_t d16  = (uint16_t)(blk[0] | (blk[1] << 8));
+    uint16_t dm16 = (uint16_t)(blk[2] | (blk[3] << 8));
+    float d  = f16_to_f32(d16);
+    float dm = f16_to_f32(dm16);
+
+    uint32_t super = (uint32_t)idx >> 6;
+    uint32_t off   = (uint32_t)idx & 63u;
+    uint32_t hi    = off >> 5;
+    uint32_t l     = off & 31u;
+    uint32_t is    = super * 2u + hi;
+
+    uint8_t scs, mns;
+    get_scale_min_k4((int)is, blk + 4, &scs, &mns);
+
+    uint8_t qbyte = blk[16 + super * 32 + l];
+    uint32_t nib  = (hi != 0u) ? (qbyte >> 4u) : (qbyte & 0xFu);
+
+    return d * (float)scs * (float)nib - dm * (float)mns;
+}
+
+/* ===========================================================================
  * main
  * ========================================================================== */
 
@@ -732,6 +937,10 @@ int main(void)
     gemm_buffers_t bt64b;
     double C64in[TEST_GEMM_M * TEST_GEMM_N];
     double Dbt_expected[TEST_GEMM_M * TEST_GEMM_N];
+    /* fused quantized GEMM cases: Q8_0 (k=32, k=64) and Q4_K (k=256) */
+    qgemm_buffers_t q8_32, q8_64, q4k;
+    /* CPU references for the three qgemm cases, filled in section 10b. */
+    static float qg_yexp[3][8 * 8];
 
     memset(&f32b, 0, sizeof(f32b));
     memset(&f16b, 0, sizeof(f16b));
@@ -743,6 +952,9 @@ int main(void)
     memset(&gex32b, 0, sizeof(gex32b));
     memset(&gex16b, 0, sizeof(gex16b));
     memset(&bt64b, 0, sizeof(bt64b));
+    memset(&q8_32, 0, sizeof(q8_32));
+    memset(&q8_64, 0, sizeof(q8_64));
+    memset(&q4k, 0, sizeof(q4k));
 
     int overall_pass = 1;
     VkResult r;
@@ -997,6 +1209,53 @@ int main(void)
                           m * n * sizeof(double), &bt64b.D);
     if (r != VK_SUCCESS) goto cleanup;
 
+    /* ── 9b. Fused quantized-GEMM regions + buffers ─────────────────────── */
+    /* Weight row count = output rows = 8; activation cols = 8. */
+    const uint32_t qgn = 8;
+    const uint32_t qgm = 8;
+    {
+        const VkDeviceSize q8_32_k = 32;  /* 1 Q8_0 block per row   */
+        const VkDeviceSize q8_64_k = 64;  /* 2 Q8_0 blocks per row  */
+        const VkDeviceSize q4k_k   = 256; /* 1 Q4_K block per row   */
+
+        /* Q8_0 k=32: ldw = 36, Wq = 8*36 B. */
+        q8_32.off_Wq = take_region(&h.cursor, h.align, qgn * 36);
+        q8_32.off_x  = take_region(&h.cursor, h.align, q8_32_k * qgm * sizeof(float));
+        q8_32.off_y  = take_region(&h.cursor, h.align, qgn * qgm * sizeof(float));
+        q8_32.off_readback = take_region(&h.cursor, h.align, qgn * qgm * sizeof(float));
+        /* Q8_0 k=64: ldw = 72, Wq = 8*72 B. */
+        q8_64.off_Wq = take_region(&h.cursor, h.align, qgn * 72);
+        q8_64.off_x  = take_region(&h.cursor, h.align, q8_64_k * qgm * sizeof(float));
+        q8_64.off_y  = take_region(&h.cursor, h.align, qgn * qgm * sizeof(float));
+        q8_64.off_readback = take_region(&h.cursor, h.align, qgn * qgm * sizeof(float));
+        /* Q4_K k=256: ldw = 144, Wq = 8*144 B. */
+        q4k.off_Wq = take_region(&h.cursor, h.align, qgn * 144);
+        q4k.off_x  = take_region(&h.cursor, h.align, q4k_k * qgm * sizeof(float));
+        q4k.off_y  = take_region(&h.cursor, h.align, qgn * qgm * sizeof(float));
+        q4k.off_readback = take_region(&h.cursor, h.align, qgn * qgm * sizeof(float));
+
+        r = create_sub_buffer(h.device, h.mem, q8_32.off_Wq, qgn * 36, &q8_32.Wq);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, q8_32.off_x, q8_32_k * qgm * sizeof(float), &q8_32.x);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, q8_32.off_y, qgn * qgm * sizeof(float), &q8_32.y);
+        if (r != VK_SUCCESS) goto cleanup;
+
+        r = create_sub_buffer(h.device, h.mem, q8_64.off_Wq, qgn * 72, &q8_64.Wq);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, q8_64.off_x, q8_64_k * qgm * sizeof(float), &q8_64.x);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, q8_64.off_y, qgn * qgm * sizeof(float), &q8_64.y);
+        if (r != VK_SUCCESS) goto cleanup;
+
+        r = create_sub_buffer(h.device, h.mem, q4k.off_Wq, qgn * 144, &q4k.Wq);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, q4k.off_x, q4k_k * qgm * sizeof(float), &q4k.x);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, q4k.off_y, qgn * qgm * sizeof(float), &q4k.y);
+        if (r != VK_SUCCESS) goto cleanup;
+    }
+
     /* ── 10. Fill inputs + references (column-major) ────────────────────── */
     /* Shared shape: A = all ones, B = ramp 1..64, so D = alpha * sum_k B.   */
     for (uint32_t row = 0; row < m; row++) {
@@ -1181,6 +1440,94 @@ int main(void)
         memcpy((char *)h.mapped + bt64b.off_A, C64in, m * n * sizeof(double));
     }
 
+    /* ── 10b. Fused quantized-GEMM inputs + references ──────────────────── */
+    {
+        /* Deterministic weight/activation data with mixed signs. */
+        static float W8_32[8 * 32], W8_64[8 * 64], W4k[8 * 256];
+        static float x32[32 * 8], x64[64 * 8], x256[256 * 8];
+        static float yinit[8 * 8];
+        static float yexp8_32[8 * 8], yexp8_64[8 * 8], yexp4k[8 * 8];
+        uint8_t Wq32[8 * 36], Wq64[8 * 72], Wq4k[8 * 144];
+
+        /* qgemm reference: y = alpha*(dequant(W)*x) + beta*y. Column-major. */
+        for (uint32_t r = 0; r < qgn; ++r) {
+            for (uint32_t t = 0; t < 32; ++t)
+                W8_32[r * 32 + t] = ((float)((r * 3 + t) % 17) - 8.0f) * 0.25f;
+            for (uint32_t t = 0; t < 64; ++t)
+                W8_64[r * 64 + t] = ((float)((r * 5 + t) % 29) - 14.0f) * 0.2f;
+            for (uint32_t t = 0; t < 256; ++t)
+                W4k[r * 256 + t] = ((float)((r * 7 + t * 3) % 37) - 18.0f) * 0.25f;
+        }
+        for (uint32_t t = 0; t < 32; ++t)
+            for (uint32_t c = 0; c < qgm; ++c)
+                x32[t + c * 32] = ((float)((t * 5 + c * 3) % 11) - 5.0f) * 0.5f;
+        for (uint32_t t = 0; t < 64; ++t)
+            for (uint32_t c = 0; c < qgm; ++c)
+                x64[t + c * 64] = ((float)((t * 5 + c * 3) % 11) - 5.0f) * 0.5f;
+        for (uint32_t t = 0; t < 256; ++t)
+            for (uint32_t c = 0; c < qgm; ++c)
+                x256[t + c * 256] = ((float)((t * 5 + c * 3) % 11) - 5.0f) * 0.5f;
+        for (uint32_t r = 0; r < qgn; ++r)
+            for (uint32_t c = 0; c < qgm; ++c)
+                yinit[r + c * 8] = 1.0f + 0.25f * (float)(r + 2 * (int)c);
+
+        /* Q8_0 k=32, alpha=1, beta=0. */
+        quantize_q8_0(W8_32, 8, Wq32);
+        for (uint32_t r = 0; r < qgn; ++r) {
+            for (uint32_t c = 0; c < qgm; ++c) {
+                double acc = 0.0;
+                for (uint32_t t = 0; t < 32; ++t) {
+                    float w = dequant_q8_0(Wq32 + r * 36 + ((t >> 5) * 36), (int)(t & 31u));
+                    acc += (double)w * (double)x32[t + c * 32];
+                }
+                yexp8_32[r + c * 8] = (float)acc;
+            }
+        }
+        memcpy((char *)h.mapped + q8_32.off_Wq, Wq32, sizeof(Wq32));
+        memcpy((char *)h.mapped + q8_32.off_x, x32, sizeof(x32));
+        memset((char *)h.mapped + q8_32.off_y, 0, qgn * qgm * sizeof(float));
+
+        /* Q8_0 k=64, alpha=0.75, beta=0.5 (exercises the beta/C read path). */
+        quantize_q8_0(W8_64, 16, Wq64);
+        for (uint32_t r = 0; r < qgn; ++r) {
+            for (uint32_t c = 0; c < qgm; ++c) {
+                double acc = 0.0;
+                for (uint32_t t = 0; t < 64; ++t) {
+                    uint32_t blk = t >> 5;
+                    float w = dequant_q8_0(Wq64 + r * 72 + blk * 36, (int)(t & 31u));
+                    acc += (double)w * (double)x64[t + c * 64];
+                }
+                yexp8_64[r + c * 8] =
+                    (float)(0.75 * acc + 0.5 * (double)yinit[r + c * 8]);
+            }
+        }
+        memcpy((char *)h.mapped + q8_64.off_Wq, Wq64, sizeof(Wq64));
+        memcpy((char *)h.mapped + q8_64.off_x, x64, sizeof(x64));
+        memcpy((char *)h.mapped + q8_64.off_y, yinit, sizeof(yinit));
+
+        /* Q4_K k=256, alpha=1, beta=0. */
+        for (uint32_t r = 0; r < qgn; ++r)
+            quantize_q4k_f32(W4k + r * 256, Wq4k + r * 144);
+        for (uint32_t r = 0; r < qgn; ++r) {
+            for (uint32_t c = 0; c < qgm; ++c) {
+                double acc = 0.0;
+                for (uint32_t t = 0; t < 256; ++t) {
+                    float w = dequant_q4k_f32(Wq4k + r * 144, (int)t);
+                    acc += (double)w * (double)x256[t + c * 256];
+                }
+                yexp4k[r + c * 8] = (float)acc;
+            }
+        }
+        memcpy((char *)h.mapped + q4k.off_Wq, Wq4k, sizeof(Wq4k));
+        memcpy((char *)h.mapped + q4k.off_x, x256, sizeof(x256));
+        memset((char *)h.mapped + q4k.off_y, 0, qgn * qgm * sizeof(float));
+
+        /* Store the references for the check phase. */
+        memcpy(qg_yexp[0], yexp8_32, sizeof(yexp8_32));
+        memcpy(qg_yexp[1], yexp8_64, sizeof(yexp8_64));
+        memcpy(qg_yexp[2], yexp4k,   sizeof(yexp4k));
+    }
+
     /* ── 11. Record all GEMM dispatches into one command buffer ─────────── */
     VkCommandBufferBeginInfo begin_info;
     memset(&begin_info, 0, sizeof(begin_info));
@@ -1334,6 +1681,33 @@ int main(void)
             "dgemm a/b pack");
     }
 
+    /* ── 11e. Fused quantized-GEMM dispatches ────────────────────────────── */
+    {
+        const float qa1 = 1.0f, qb0 = 0.0f;
+        const float qa2 = 0.75f, qb2 = 0.5f;
+
+        overall_pass &= record_dispatch(
+            vkblas_qgemm_q8_0_f32(h.blas_ctx, h.cmd,
+                                  (int32_t)qgm, (int32_t)qgn, 32,
+                                  &qa1, q8_32.Wq, 36, q8_32.x, 32,
+                                  &qb0, q8_32.y, 8),
+            "qgemm q8_0 k=32");
+
+        overall_pass &= record_dispatch(
+            vkblas_qgemm_q8_0_f32(h.blas_ctx, h.cmd,
+                                  (int32_t)qgm, (int32_t)qgn, 64,
+                                  &qa2, q8_64.Wq, 72, q8_64.x, 64,
+                                  &qb2, q8_64.y, 8),
+            "qgemm q8_0 k=64");
+
+        overall_pass &= record_dispatch(
+            vkblas_qgemm_q4k_f32(h.blas_ctx, h.cmd,
+                                 (int32_t)qgm, (int32_t)qgn, 256,
+                                 &qa1, q4k.Wq, 144, q4k.x, 256,
+                                 &qb0, q4k.y, 8),
+            "qgemm q4k k=256");
+    }
+
     /* ── 12. Make shader writes visible to the transfer readbacks ───────── */
     record_compute_to_transfer_barrier(h.cmd);
     record_copy_readback(h.cmd, f32b.D, h.staging, f32b.off_readback,
@@ -1363,6 +1737,12 @@ int main(void)
     if (h.test_f64)
         record_copy_readback(h.cmd, bt64b.D, h.staging, bt64b.off_readback,
                              m * n * sizeof(double));
+    record_copy_readback(h.cmd, q8_32.y, h.staging, q8_32.off_readback,
+                         8 * 8 * sizeof(float));
+    record_copy_readback(h.cmd, q8_64.y, h.staging, q8_64.off_readback,
+                         8 * 8 * sizeof(float));
+    record_copy_readback(h.cmd, q4k.y, h.staging, q4k.off_readback,
+                         8 * 8 * sizeof(float));
 
     r = vkEndCommandBuffer(h.cmd);
     if (r != VK_SUCCESS) {
@@ -1457,6 +1837,17 @@ int main(void)
     else
         printf("  %-18s : SKIP (f64 features absent)\n", "dgemm a/b pack");
 
+    /* fused quantized GEMM checks (64 outputs each). */
+    overall_pass &= check_output_f32("qgemm q8_0 k=32", h.mapped,
+                                     q8_32.off_readback, qg_yexp[0],
+                                     8 * 8, TEST_F32_TOLERANCE);
+    overall_pass &= check_output_f32("qgemm q8_0 k=64", h.mapped,
+                                     q8_64.off_readback, qg_yexp[1],
+                                     8 * 8, TEST_F32_TOLERANCE);
+    overall_pass &= check_output_f32("qgemm q4k k=256", h.mapped,
+                                     q4k.off_readback, qg_yexp[2],
+                                     8 * 8, 1e-2f);
+
 cleanup:
     if (h.blas_ctx) vkblas_destroy_context(h.blas_ctx);
     if (f32b.A) vkDestroyBuffer(h.device, f32b.A, NULL);
@@ -1484,6 +1875,15 @@ cleanup:
     if (gex16b.D) vkDestroyBuffer(h.device, gex16b.D, NULL);
     if (bt64b.A) vkDestroyBuffer(h.device, bt64b.A, NULL);
     if (bt64b.D) vkDestroyBuffer(h.device, bt64b.D, NULL);
+    if (q8_32.Wq) vkDestroyBuffer(h.device, q8_32.Wq, NULL);
+    if (q8_32.x) vkDestroyBuffer(h.device, q8_32.x, NULL);
+    if (q8_32.y) vkDestroyBuffer(h.device, q8_32.y, NULL);
+    if (q8_64.Wq) vkDestroyBuffer(h.device, q8_64.Wq, NULL);
+    if (q8_64.x) vkDestroyBuffer(h.device, q8_64.x, NULL);
+    if (q8_64.y) vkDestroyBuffer(h.device, q8_64.y, NULL);
+    if (q4k.Wq) vkDestroyBuffer(h.device, q4k.Wq, NULL);
+    if (q4k.x) vkDestroyBuffer(h.device, q4k.x, NULL);
+    if (q4k.y) vkDestroyBuffer(h.device, q4k.y, NULL);
     if (h.staging) vkDestroyBuffer(h.device, h.staging, NULL);
     if (h.mapped)  vkUnmapMemory(h.device, h.mem);
     if (h.mem != VK_NULL_HANDLE) vkFreeMemory(h.device, h.mem, NULL);

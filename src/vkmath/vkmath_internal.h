@@ -54,7 +54,21 @@ typedef char vkmath_pc_static_assert[sizeof(vkmath_push_constants_t) == 72 ? 1 :
 #define VKMATH_KERNEL_SCALE         8
 #define VKMATH_KERNEL_MAX_REDUCE    9
 #define VKMATH_KERNEL_SUM_REDUCE    10
-#define VKMATH_KERNEL_COUNT         11
+#define VKMATH_KERNEL_SOFTMAX       11
+#define VKMATH_KERNEL_RMS_NORM      12
+#define VKMATH_KERNEL_LAYERNORM     13
+#define VKMATH_KERNEL_ARGMAX        14
+#define VKMATH_KERNEL_ARGMIN        15
+#define VKMATH_KERNEL_CUMSUM        16
+#define VKMATH_KERNEL_CLIP          17
+#define VKMATH_KERNEL_ABS           18
+#define VKMATH_KERNEL_SIGN          19
+#define VKMATH_KERNEL_EXP           20
+#define VKMATH_KERNEL_LOG           21
+#define VKMATH_KERNEL_SQRT          22
+#define VKMATH_KERNEL_RSQRT         23
+#define VKMATH_KERNEL_POW           24
+#define VKMATH_KERNEL_COUNT         25
 
 /* ── Capability tiers ──────────────────────────────────────────────────── */
 

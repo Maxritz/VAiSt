@@ -39,6 +39,10 @@
 #define TEST_STAGING_SIZE  ((VkDeviceSize)(1u << 20))  /**< 1 MiB host buffer. */
 #define TEST_SCALE_ALPHA   2.5f  /**< Scale factor for vkmath_scale_f32.       */
 #define TEST_F32_TOLERANCE 1e-4f /**< f32 comparison tolerance.                */
+#define TEST_EPS           1e-6f /**< Epsilon for norm ops.                    */
+#define TEST_CLIP_LO       (-1.0f) /**< Lower clip bound.                      */
+#define TEST_CLIP_HI       1.0f   /**< Upper clip bound.                       */
+#define TEST_POW_EXP       1.5f   /**< Exponent for vkmath_pow_f32.            */
 
 /* ===========================================================================
  * Harness state
@@ -547,6 +551,38 @@ static int check_output(const char *name, const void *mapped,
     return pass;
 }
 
+/**
+ * \brief Compare a uint32 readback region against expected indices.
+ *
+ * \param name Op name for the report.
+ * \param mapped Host mapping of the staging memory.
+ * \param off_readback Byte offset of the readback region.
+ * \param expected CPU reference indices.
+ * \param count Number of uint32 values to compare.
+ * \return 1 when every element matches exactly, 0 otherwise.
+ */
+static int check_output_u32(const char *name, const void *mapped,
+                            VkDeviceSize off_readback,
+                            const uint32_t *expected, uint32_t count)
+{
+    const uint32_t *got = (const uint32_t *)((const char *)mapped + off_readback);
+    int pass = 1;
+    uint32_t mismatches = 0;
+
+    for (uint32_t i = 0; i < count; i++) {
+        if (got[i] != expected[i]) {
+            if (mismatches < 8) {
+                printf("    mismatch[%u]: got %u expected %u\n",
+                       i, got[i], expected[i]);
+            }
+            mismatches++;
+            pass = 0;
+        }
+    }
+    printf("  %-18s : %s\n", name, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
 /* ===========================================================================
  * main
  * ========================================================================== */
@@ -566,14 +602,46 @@ int main(void)
     memset(&op_max, 0, sizeof(op_max));
     memset(&op_silu, 0, sizeof(op_silu));
 
+    op_t op_softmax, op_rms, op_layernorm, op_argmax, op_argmin, op_cumsum;
+    op_t op_clip, op_abs, op_sign, op_exp, op_log, op_sqrt, op_rsqrt, op_pow;
+    memset(&op_softmax, 0, sizeof(op_softmax));
+    memset(&op_rms, 0, sizeof(op_rms));
+    memset(&op_layernorm, 0, sizeof(op_layernorm));
+    memset(&op_argmax, 0, sizeof(op_argmax));
+    memset(&op_argmin, 0, sizeof(op_argmin));
+    memset(&op_cumsum, 0, sizeof(op_cumsum));
+    memset(&op_clip, 0, sizeof(op_clip));
+    memset(&op_abs, 0, sizeof(op_abs));
+    memset(&op_sign, 0, sizeof(op_sign));
+    memset(&op_exp, 0, sizeof(op_exp));
+    memset(&op_log, 0, sizeof(op_log));
+    memset(&op_sqrt, 0, sizeof(op_sqrt));
+    memset(&op_rsqrt, 0, sizeof(op_rsqrt));
+    memset(&op_pow, 0, sizeof(op_pow));
+
     float in_a[TEST_NUM_ELEMENTS];
     float in_b[TEST_NUM_ELEMENTS];
+    float pos_a[TEST_NUM_ELEMENTS];
     float red[TEST_REDUCE_ROWS * TEST_REDUCE_COLS];
     float exp_relu[TEST_NUM_ELEMENTS];
     float exp_add[TEST_NUM_ELEMENTS];
     float exp_scale[TEST_NUM_ELEMENTS];
     float exp_max[TEST_REDUCE_ROWS];
     float exp_silu[TEST_NUM_ELEMENTS];
+    float exp_softmax[TEST_REDUCE_ROWS * TEST_REDUCE_COLS];
+    float exp_rms[TEST_REDUCE_ROWS * TEST_REDUCE_COLS];
+    float exp_layernorm[TEST_REDUCE_ROWS * TEST_REDUCE_COLS];
+    uint32_t exp_argmax[TEST_REDUCE_ROWS];
+    uint32_t exp_argmin[TEST_REDUCE_ROWS];
+    float exp_cumsum[TEST_REDUCE_ROWS * TEST_REDUCE_COLS];
+    float exp_clip[TEST_NUM_ELEMENTS];
+    float exp_abs[TEST_NUM_ELEMENTS];
+    float exp_sign[TEST_NUM_ELEMENTS];
+    float exp_exp[TEST_NUM_ELEMENTS];
+    float exp_log[TEST_NUM_ELEMENTS];
+    float exp_sqrt[TEST_NUM_ELEMENTS];
+    float exp_rsqrt[TEST_NUM_ELEMENTS];
+    float exp_pow[TEST_NUM_ELEMENTS];
 
     int overall_pass = 1;
     VkResult r;
@@ -663,11 +731,60 @@ int main(void)
     r = setup_op(h.device, h.mem, &h.cursor, h.align,
                  TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_FALSE, &op_silu);
     if (r != VK_SUCCESS) goto cleanup;
+    r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                 TEST_REDUCE_ROWS * TEST_REDUCE_COLS,
+                 TEST_REDUCE_ROWS * TEST_REDUCE_COLS, VK_FALSE, &op_softmax);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                 TEST_REDUCE_ROWS * TEST_REDUCE_COLS,
+                 TEST_REDUCE_ROWS * TEST_REDUCE_COLS, VK_FALSE, &op_rms);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                 TEST_REDUCE_ROWS * TEST_REDUCE_COLS,
+                 TEST_REDUCE_ROWS * TEST_REDUCE_COLS, VK_FALSE, &op_layernorm);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                 TEST_REDUCE_ROWS * TEST_REDUCE_COLS, TEST_REDUCE_ROWS,
+                 VK_FALSE, &op_argmax);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                 TEST_REDUCE_ROWS * TEST_REDUCE_COLS, TEST_REDUCE_ROWS,
+                 VK_FALSE, &op_argmin);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                 TEST_REDUCE_ROWS * TEST_REDUCE_COLS,
+                 TEST_REDUCE_ROWS * TEST_REDUCE_COLS, VK_FALSE, &op_cumsum);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                 TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_FALSE, &op_clip);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                 TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_FALSE, &op_abs);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                 TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_FALSE, &op_sign);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                 TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_FALSE, &op_exp);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                 TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_FALSE, &op_log);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                 TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_FALSE, &op_sqrt);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                 TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_FALSE, &op_rsqrt);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                 TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_FALSE, &op_pow);
+    if (r != VK_SUCCESS) goto cleanup;
 
     /* ── 10. Fill inputs with known values ──────────────────────────────── */
     for (uint32_t i = 0; i < TEST_NUM_ELEMENTS; i++) {
         in_a[i] = (float)((int)(i % 5) - 2);   /* -2,-1,0,1,2 repeating        */
         in_b[i] = 1.0f + 0.25f * (float)i;     /* 1.0 .. 8.75                  */
+        pos_a[i] = 0.25f + 0.25f * (float)i;   /* 0.25 .. 8.0 (positive)       */
     }
     for (uint32_t i = 0; i < TEST_REDUCE_ROWS * TEST_REDUCE_COLS; i++) {
         red[i] = (float)((int)((i * 7) % 13) - 6);  /* -6 .. 6                  */
@@ -679,6 +796,20 @@ int main(void)
     memcpy((char *)h.mapped + op_scale.off_in_a, in_a, sizeof(in_a));
     memcpy((char *)h.mapped + op_max.off_in_a, red, sizeof(red));
     memcpy((char *)h.mapped + op_silu.off_in_a, in_a, sizeof(in_a));
+    memcpy((char *)h.mapped + op_softmax.off_in_a, red, sizeof(red));
+    memcpy((char *)h.mapped + op_rms.off_in_a, red, sizeof(red));
+    memcpy((char *)h.mapped + op_layernorm.off_in_a, red, sizeof(red));
+    memcpy((char *)h.mapped + op_argmax.off_in_a, red, sizeof(red));
+    memcpy((char *)h.mapped + op_argmin.off_in_a, red, sizeof(red));
+    memcpy((char *)h.mapped + op_cumsum.off_in_a, red, sizeof(red));
+    memcpy((char *)h.mapped + op_clip.off_in_a, in_a, sizeof(in_a));
+    memcpy((char *)h.mapped + op_abs.off_in_a, in_a, sizeof(in_a));
+    memcpy((char *)h.mapped + op_sign.off_in_a, in_a, sizeof(in_a));
+    memcpy((char *)h.mapped + op_exp.off_in_a, in_a, sizeof(in_a));
+    memcpy((char *)h.mapped + op_log.off_in_a, pos_a, sizeof(pos_a));
+    memcpy((char *)h.mapped + op_sqrt.off_in_a, pos_a, sizeof(pos_a));
+    memcpy((char *)h.mapped + op_rsqrt.off_in_a, pos_a, sizeof(pos_a));
+    memcpy((char *)h.mapped + op_pow.off_in_a, pos_a, sizeof(pos_a));
 
     /* ── 11. CPU reference values ───────────────────────────────────────── */
     for (uint32_t i = 0; i < TEST_NUM_ELEMENTS; i++) {
@@ -696,6 +827,78 @@ int main(void)
         exp_max[row] = m;
     }
 
+    for (uint32_t row = 0; row < TEST_REDUCE_ROWS; row++) {
+        const float *rrow = &red[row * TEST_REDUCE_COLS];
+
+        /* softmax: max-subtract, exp, normalize */
+        float mx = rrow[0];
+        float sum = 0.0f;
+        for (uint32_t c = 0; c < TEST_REDUCE_COLS; c++) {
+            if (rrow[c] > mx) mx = rrow[c];
+        }
+        for (uint32_t c = 0; c < TEST_REDUCE_COLS; c++) {
+            sum += expf(rrow[c] - mx);
+        }
+        for (uint32_t c = 0; c < TEST_REDUCE_COLS; c++) {
+            exp_softmax[row * TEST_REDUCE_COLS + c] = expf(rrow[c] - mx) / sum;
+        }
+
+        /* rms_norm */
+        float ss = 0.0f;
+        for (uint32_t c = 0; c < TEST_REDUCE_COLS; c++) {
+            ss += rrow[c] * rrow[c];
+        }
+        float rscale = 1.0f / sqrtf(ss / (float)TEST_REDUCE_COLS + TEST_EPS);
+        for (uint32_t c = 0; c < TEST_REDUCE_COLS; c++) {
+            exp_rms[row * TEST_REDUCE_COLS + c] = rrow[c] * rscale;
+        }
+
+        /* layernorm */
+        float msum = 0.0f;
+        for (uint32_t c = 0; c < TEST_REDUCE_COLS; c++) {
+            msum += rrow[c];
+        }
+        float mean = msum / (float)TEST_REDUCE_COLS;
+        float var = 0.0f;
+        for (uint32_t c = 0; c < TEST_REDUCE_COLS; c++) {
+            var += (rrow[c] - mean) * (rrow[c] - mean);
+        }
+        var /= (float)TEST_REDUCE_COLS;
+        float inv_std = 1.0f / sqrtf(var + TEST_EPS);
+        for (uint32_t c = 0; c < TEST_REDUCE_COLS; c++) {
+            exp_layernorm[row * TEST_REDUCE_COLS + c] = (rrow[c] - mean) * inv_std;
+        }
+
+        /* argmax / argmin (first occurrence of tie) */
+        uint32_t ai = 0;
+        uint32_t ni = 0;
+        for (uint32_t c = 1; c < TEST_REDUCE_COLS; c++) {
+            if (rrow[c] > rrow[ai]) ai = c;
+            if (rrow[c] < rrow[ni]) ni = c;
+        }
+        exp_argmax[row] = ai;
+        exp_argmin[row] = ni;
+
+        /* cumsum */
+        float run = 0.0f;
+        for (uint32_t c = 0; c < TEST_REDUCE_COLS; c++) {
+            run += rrow[c];
+            exp_cumsum[row * TEST_REDUCE_COLS + c] = run;
+        }
+    }
+
+    for (uint32_t i = 0; i < TEST_NUM_ELEMENTS; i++) {
+        exp_clip[i] = in_a[i] < TEST_CLIP_LO ? TEST_CLIP_LO :
+                      (in_a[i] > TEST_CLIP_HI ? TEST_CLIP_HI : in_a[i]);
+        exp_abs[i]   = fabsf(in_a[i]);
+        exp_sign[i]  = in_a[i] > 0.0f ? 1.0f : (in_a[i] < 0.0f ? -1.0f : 0.0f);
+        exp_exp[i]   = expf(in_a[i]);
+        exp_log[i]   = logf(pos_a[i]);
+        exp_sqrt[i]  = sqrtf(pos_a[i]);
+        exp_rsqrt[i] = 1.0f / sqrtf(pos_a[i]);
+        exp_pow[i]   = powf(pos_a[i], TEST_POW_EXP);
+    }
+
     /* CPU reference values are also written into a mapped "second region"
        so the host-computed expected data is visible in the same memory.  */
     memcpy((char *)h.mapped + op_relu.off_expected, exp_relu, sizeof(exp_relu));
@@ -703,6 +906,20 @@ int main(void)
     memcpy((char *)h.mapped + op_scale.off_expected, exp_scale, sizeof(exp_scale));
     memcpy((char *)h.mapped + op_max.off_expected, exp_max, sizeof(exp_max));
     memcpy((char *)h.mapped + op_silu.off_expected, exp_silu, sizeof(exp_silu));
+    memcpy((char *)h.mapped + op_softmax.off_expected, exp_softmax, sizeof(exp_softmax));
+    memcpy((char *)h.mapped + op_rms.off_expected, exp_rms, sizeof(exp_rms));
+    memcpy((char *)h.mapped + op_layernorm.off_expected, exp_layernorm, sizeof(exp_layernorm));
+    memcpy((char *)h.mapped + op_argmax.off_expected, exp_argmax, sizeof(exp_argmax));
+    memcpy((char *)h.mapped + op_argmin.off_expected, exp_argmin, sizeof(exp_argmin));
+    memcpy((char *)h.mapped + op_cumsum.off_expected, exp_cumsum, sizeof(exp_cumsum));
+    memcpy((char *)h.mapped + op_clip.off_expected, exp_clip, sizeof(exp_clip));
+    memcpy((char *)h.mapped + op_abs.off_expected, exp_abs, sizeof(exp_abs));
+    memcpy((char *)h.mapped + op_sign.off_expected, exp_sign, sizeof(exp_sign));
+    memcpy((char *)h.mapped + op_exp.off_expected, exp_exp, sizeof(exp_exp));
+    memcpy((char *)h.mapped + op_log.off_expected, exp_log, sizeof(exp_log));
+    memcpy((char *)h.mapped + op_sqrt.off_expected, exp_sqrt, sizeof(exp_sqrt));
+    memcpy((char *)h.mapped + op_rsqrt.off_expected, exp_rsqrt, sizeof(exp_rsqrt));
+    memcpy((char *)h.mapped + op_pow.off_expected, exp_pow, sizeof(exp_pow));
 
     /* ── 12. Record all dispatches into one command buffer ──────────────── */
     VkCommandBufferBeginInfo begin_info;
@@ -743,6 +960,82 @@ int main(void)
                         op_silu.in_a, op_silu.out),
         "silu_f32");
 
+    overall_pass &= record_dispatch(
+        vkmath_softmax_f32(h.math_ctx, h.cmd,
+                           TEST_REDUCE_ROWS, TEST_REDUCE_COLS,
+                           op_softmax.in_a, op_softmax.out),
+        "softmax_f32");
+
+    overall_pass &= record_dispatch(
+        vkmath_rms_norm_f32(h.math_ctx, h.cmd,
+                            TEST_REDUCE_ROWS, TEST_REDUCE_COLS, TEST_EPS,
+                            op_rms.in_a, op_rms.out),
+        "rms_norm_f32");
+
+    overall_pass &= record_dispatch(
+        vkmath_layernorm_f32(h.math_ctx, h.cmd,
+                             TEST_REDUCE_ROWS, TEST_REDUCE_COLS, TEST_EPS,
+                             op_layernorm.in_a, op_layernorm.out),
+        "layernorm_f32");
+
+    overall_pass &= record_dispatch(
+        vkmath_argmax_f32(h.math_ctx, h.cmd,
+                          TEST_REDUCE_ROWS, TEST_REDUCE_COLS,
+                          op_argmax.in_a, op_argmax.out),
+        "argmax_f32");
+
+    overall_pass &= record_dispatch(
+        vkmath_argmin_f32(h.math_ctx, h.cmd,
+                          TEST_REDUCE_ROWS, TEST_REDUCE_COLS,
+                          op_argmin.in_a, op_argmin.out),
+        "argmin_f32");
+
+    overall_pass &= record_dispatch(
+        vkmath_cumsum_f32(h.math_ctx, h.cmd,
+                          TEST_REDUCE_ROWS, TEST_REDUCE_COLS,
+                          op_cumsum.in_a, op_cumsum.out),
+        "cumsum_f32");
+
+    overall_pass &= record_dispatch(
+        vkmath_clip_f32(h.math_ctx, h.cmd, TEST_NUM_ELEMENTS,
+                        TEST_CLIP_LO, TEST_CLIP_HI, op_clip.in_a, op_clip.out),
+        "clip_f32");
+
+    overall_pass &= record_dispatch(
+        vkmath_abs_f32(h.math_ctx, h.cmd, TEST_NUM_ELEMENTS,
+                       op_abs.in_a, op_abs.out),
+        "abs_f32");
+
+    overall_pass &= record_dispatch(
+        vkmath_sign_f32(h.math_ctx, h.cmd, TEST_NUM_ELEMENTS,
+                        op_sign.in_a, op_sign.out),
+        "sign_f32");
+
+    overall_pass &= record_dispatch(
+        vkmath_exp_f32(h.math_ctx, h.cmd, TEST_NUM_ELEMENTS,
+                       op_exp.in_a, op_exp.out),
+        "exp_f32");
+
+    overall_pass &= record_dispatch(
+        vkmath_log_f32(h.math_ctx, h.cmd, TEST_NUM_ELEMENTS,
+                       op_log.in_a, op_log.out),
+        "log_f32");
+
+    overall_pass &= record_dispatch(
+        vkmath_sqrt_f32(h.math_ctx, h.cmd, TEST_NUM_ELEMENTS,
+                        op_sqrt.in_a, op_sqrt.out),
+        "sqrt_f32");
+
+    overall_pass &= record_dispatch(
+        vkmath_rsqrt_f32(h.math_ctx, h.cmd, TEST_NUM_ELEMENTS,
+                         op_rsqrt.in_a, op_rsqrt.out),
+        "rsqrt_f32");
+
+    overall_pass &= record_dispatch(
+        vkmath_pow_f32(h.math_ctx, h.cmd, TEST_NUM_ELEMENTS, TEST_POW_EXP,
+                       op_pow.in_a, op_pow.out),
+        "pow_f32");
+
     /* Make the shader writes visible to the transfer readback copies.      */
     record_compute_to_transfer_barrier(h.cmd);
 
@@ -756,6 +1049,38 @@ int main(void)
                          op_max.off_readback, TEST_REDUCE_ROWS * sizeof(float));
     record_copy_readback(h.cmd, op_silu.out, h.staging,
                          op_silu.off_readback, TEST_NUM_ELEMENTS * sizeof(float));
+    record_copy_readback(h.cmd, op_softmax.out, h.staging,
+                         op_softmax.off_readback,
+                         TEST_REDUCE_ROWS * TEST_REDUCE_COLS * sizeof(float));
+    record_copy_readback(h.cmd, op_rms.out, h.staging,
+                         op_rms.off_readback,
+                         TEST_REDUCE_ROWS * TEST_REDUCE_COLS * sizeof(float));
+    record_copy_readback(h.cmd, op_layernorm.out, h.staging,
+                         op_layernorm.off_readback,
+                         TEST_REDUCE_ROWS * TEST_REDUCE_COLS * sizeof(float));
+    record_copy_readback(h.cmd, op_argmax.out, h.staging,
+                         op_argmax.off_readback, TEST_REDUCE_ROWS * sizeof(uint32_t));
+    record_copy_readback(h.cmd, op_argmin.out, h.staging,
+                         op_argmin.off_readback, TEST_REDUCE_ROWS * sizeof(uint32_t));
+    record_copy_readback(h.cmd, op_cumsum.out, h.staging,
+                         op_cumsum.off_readback,
+                         TEST_REDUCE_ROWS * TEST_REDUCE_COLS * sizeof(float));
+    record_copy_readback(h.cmd, op_clip.out, h.staging,
+                         op_clip.off_readback, TEST_NUM_ELEMENTS * sizeof(float));
+    record_copy_readback(h.cmd, op_abs.out, h.staging,
+                         op_abs.off_readback, TEST_NUM_ELEMENTS * sizeof(float));
+    record_copy_readback(h.cmd, op_sign.out, h.staging,
+                         op_sign.off_readback, TEST_NUM_ELEMENTS * sizeof(float));
+    record_copy_readback(h.cmd, op_exp.out, h.staging,
+                         op_exp.off_readback, TEST_NUM_ELEMENTS * sizeof(float));
+    record_copy_readback(h.cmd, op_log.out, h.staging,
+                         op_log.off_readback, TEST_NUM_ELEMENTS * sizeof(float));
+    record_copy_readback(h.cmd, op_sqrt.out, h.staging,
+                         op_sqrt.off_readback, TEST_NUM_ELEMENTS * sizeof(float));
+    record_copy_readback(h.cmd, op_rsqrt.out, h.staging,
+                         op_rsqrt.off_readback, TEST_NUM_ELEMENTS * sizeof(float));
+    record_copy_readback(h.cmd, op_pow.out, h.staging,
+                         op_pow.off_readback, TEST_NUM_ELEMENTS * sizeof(float));
 
     r = vkEndCommandBuffer(h.cmd);
     if (r != VK_SUCCESS) {
@@ -802,6 +1127,38 @@ int main(void)
                                  exp_max, TEST_REDUCE_ROWS, TEST_F32_TOLERANCE);
     overall_pass &= check_output("silu_f32", h.mapped, op_silu.off_readback,
                                  exp_silu, TEST_NUM_ELEMENTS, TEST_F32_TOLERANCE);
+    overall_pass &= check_output("softmax_f32", h.mapped, op_softmax.off_readback,
+                                 exp_softmax, TEST_REDUCE_ROWS * TEST_REDUCE_COLS,
+                                 TEST_F32_TOLERANCE);
+    overall_pass &= check_output("rms_norm_f32", h.mapped, op_rms.off_readback,
+                                 exp_rms, TEST_REDUCE_ROWS * TEST_REDUCE_COLS,
+                                 TEST_F32_TOLERANCE);
+    overall_pass &= check_output("layernorm_f32", h.mapped, op_layernorm.off_readback,
+                                 exp_layernorm, TEST_REDUCE_ROWS * TEST_REDUCE_COLS,
+                                 TEST_F32_TOLERANCE);
+    overall_pass &= check_output_u32("argmax_f32", h.mapped, op_argmax.off_readback,
+                                     exp_argmax, TEST_REDUCE_ROWS);
+    overall_pass &= check_output_u32("argmin_f32", h.mapped, op_argmin.off_readback,
+                                     exp_argmin, TEST_REDUCE_ROWS);
+    overall_pass &= check_output("cumsum_f32", h.mapped, op_cumsum.off_readback,
+                                 exp_cumsum, TEST_REDUCE_ROWS * TEST_REDUCE_COLS,
+                                 TEST_F32_TOLERANCE);
+    overall_pass &= check_output("clip_f32", h.mapped, op_clip.off_readback,
+                                 exp_clip, TEST_NUM_ELEMENTS, TEST_F32_TOLERANCE);
+    overall_pass &= check_output("abs_f32", h.mapped, op_abs.off_readback,
+                                 exp_abs, TEST_NUM_ELEMENTS, TEST_F32_TOLERANCE);
+    overall_pass &= check_output("sign_f32", h.mapped, op_sign.off_readback,
+                                 exp_sign, TEST_NUM_ELEMENTS, TEST_F32_TOLERANCE);
+    overall_pass &= check_output("exp_f32", h.mapped, op_exp.off_readback,
+                                 exp_exp, TEST_NUM_ELEMENTS, TEST_F32_TOLERANCE);
+    overall_pass &= check_output("log_f32", h.mapped, op_log.off_readback,
+                                 exp_log, TEST_NUM_ELEMENTS, TEST_F32_TOLERANCE);
+    overall_pass &= check_output("sqrt_f32", h.mapped, op_sqrt.off_readback,
+                                 exp_sqrt, TEST_NUM_ELEMENTS, TEST_F32_TOLERANCE);
+    overall_pass &= check_output("rsqrt_f32", h.mapped, op_rsqrt.off_readback,
+                                 exp_rsqrt, TEST_NUM_ELEMENTS, TEST_F32_TOLERANCE);
+    overall_pass &= check_output("pow_f32", h.mapped, op_pow.off_readback,
+                                 exp_pow, TEST_NUM_ELEMENTS, TEST_F32_TOLERANCE);
 
 cleanup:
     if (h.math_ctx) vkmath_destroy_context(h.math_ctx);
@@ -816,6 +1173,34 @@ cleanup:
     if (op_max.out)    vkDestroyBuffer(h.device, op_max.out, NULL);
     if (op_silu.in_a)  vkDestroyBuffer(h.device, op_silu.in_a, NULL);
     if (op_silu.out)   vkDestroyBuffer(h.device, op_silu.out, NULL);
+    if (op_softmax.in_a) vkDestroyBuffer(h.device, op_softmax.in_a, NULL);
+    if (op_softmax.out)  vkDestroyBuffer(h.device, op_softmax.out, NULL);
+    if (op_rms.in_a)     vkDestroyBuffer(h.device, op_rms.in_a, NULL);
+    if (op_rms.out)      vkDestroyBuffer(h.device, op_rms.out, NULL);
+    if (op_layernorm.in_a) vkDestroyBuffer(h.device, op_layernorm.in_a, NULL);
+    if (op_layernorm.out)  vkDestroyBuffer(h.device, op_layernorm.out, NULL);
+    if (op_argmax.in_a)  vkDestroyBuffer(h.device, op_argmax.in_a, NULL);
+    if (op_argmax.out)   vkDestroyBuffer(h.device, op_argmax.out, NULL);
+    if (op_argmin.in_a)  vkDestroyBuffer(h.device, op_argmin.in_a, NULL);
+    if (op_argmin.out)   vkDestroyBuffer(h.device, op_argmin.out, NULL);
+    if (op_cumsum.in_a)  vkDestroyBuffer(h.device, op_cumsum.in_a, NULL);
+    if (op_cumsum.out)   vkDestroyBuffer(h.device, op_cumsum.out, NULL);
+    if (op_clip.in_a)    vkDestroyBuffer(h.device, op_clip.in_a, NULL);
+    if (op_clip.out)     vkDestroyBuffer(h.device, op_clip.out, NULL);
+    if (op_abs.in_a)     vkDestroyBuffer(h.device, op_abs.in_a, NULL);
+    if (op_abs.out)      vkDestroyBuffer(h.device, op_abs.out, NULL);
+    if (op_sign.in_a)    vkDestroyBuffer(h.device, op_sign.in_a, NULL);
+    if (op_sign.out)     vkDestroyBuffer(h.device, op_sign.out, NULL);
+    if (op_exp.in_a)     vkDestroyBuffer(h.device, op_exp.in_a, NULL);
+    if (op_exp.out)      vkDestroyBuffer(h.device, op_exp.out, NULL);
+    if (op_log.in_a)     vkDestroyBuffer(h.device, op_log.in_a, NULL);
+    if (op_log.out)      vkDestroyBuffer(h.device, op_log.out, NULL);
+    if (op_sqrt.in_a)    vkDestroyBuffer(h.device, op_sqrt.in_a, NULL);
+    if (op_sqrt.out)     vkDestroyBuffer(h.device, op_sqrt.out, NULL);
+    if (op_rsqrt.in_a)   vkDestroyBuffer(h.device, op_rsqrt.in_a, NULL);
+    if (op_rsqrt.out)    vkDestroyBuffer(h.device, op_rsqrt.out, NULL);
+    if (op_pow.in_a)     vkDestroyBuffer(h.device, op_pow.in_a, NULL);
+    if (op_pow.out)      vkDestroyBuffer(h.device, op_pow.out, NULL);
     if (h.staging)     vkDestroyBuffer(h.device, h.staging, NULL);
     if (h.mapped)      vkUnmapMemory(h.device, h.mem);
     if (h.mem != VK_NULL_HANDLE) vkFreeMemory(h.device, h.mem, NULL);

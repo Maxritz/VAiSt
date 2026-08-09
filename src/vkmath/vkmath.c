@@ -46,6 +46,20 @@ static const shader_blob_t s_shader_table[] = {
     {VKMATH_KERNEL_SCALE,      VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_scale_f32,        vkmath_spv_baseline_scale_f32_size},
     {VKMATH_KERNEL_MAX_REDUCE, VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_max_reduce_dim_f32, vkmath_spv_baseline_max_reduce_dim_f32_size},
     {VKMATH_KERNEL_SUM_REDUCE, VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_sum_reduce_dim_f32, vkmath_spv_baseline_sum_reduce_dim_f32_size},
+    {VKMATH_KERNEL_SOFTMAX,    VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_softmax_f32,         vkmath_spv_baseline_softmax_f32_size},
+    {VKMATH_KERNEL_RMS_NORM,   VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_rms_norm_f32,        vkmath_spv_baseline_rms_norm_f32_size},
+    {VKMATH_KERNEL_LAYERNORM,  VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_layernorm_f32,       vkmath_spv_baseline_layernorm_f32_size},
+    {VKMATH_KERNEL_ARGMAX,     VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_argmax_f32,          vkmath_spv_baseline_argmax_f32_size},
+    {VKMATH_KERNEL_ARGMIN,     VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_argmin_f32,          vkmath_spv_baseline_argmin_f32_size},
+    {VKMATH_KERNEL_CUMSUM,     VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_cumsum_f32,          vkmath_spv_baseline_cumsum_f32_size},
+    {VKMATH_KERNEL_CLIP,       VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_clip_f32,            vkmath_spv_baseline_clip_f32_size},
+    {VKMATH_KERNEL_ABS,        VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_abs_f32,             vkmath_spv_baseline_abs_f32_size},
+    {VKMATH_KERNEL_SIGN,       VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_sign_f32,            vkmath_spv_baseline_sign_f32_size},
+    {VKMATH_KERNEL_EXP,        VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_exp_f32,             vkmath_spv_baseline_exp_f32_size},
+    {VKMATH_KERNEL_LOG,        VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_log_f32,             vkmath_spv_baseline_log_f32_size},
+    {VKMATH_KERNEL_SQRT,       VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_sqrt_f32,            vkmath_spv_baseline_sqrt_f32_size},
+    {VKMATH_KERNEL_RSQRT,      VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_rsqrt_f32,           vkmath_spv_baseline_rsqrt_f32_size},
+    {VKMATH_KERNEL_POW,        VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_pow_f32,             vkmath_spv_baseline_pow_f32_size},
     /* subgroup tier — only kernels with subgroup .comp files */
     {VKMATH_KERNEL_SILU,       VKMATH_DTYPE_F32, VKMATH_TIER_SUBGROUP, vkmath_spv_subgroup_silu_f32,          vkmath_spv_subgroup_silu_f32_size},
     {VKMATH_KERNEL_SILU,       VKMATH_DTYPE_F16, VKMATH_TIER_SUBGROUP, vkmath_spv_subgroup_silu_f16,          vkmath_spv_subgroup_silu_f16_size},
@@ -691,5 +705,178 @@ VkResult vkmath_sum_reduce_dim_f32(VkMathContext *ctx, VkCommandBuffer cmd,
     pc.num_elements = num_rows * num_cols;
     return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_SUM_REDUCE, VKMATH_DTYPE_F32,
         &pc, num_rows ? num_rows : 1, 1, 1,
+        input, VK_NULL_HANDLE, output, 1);
+}
+
+/* ── Public API: reductions / normalizations (f32) ──────────────────────── */
+
+VkResult vkmath_softmax_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                            uint32_t num_rows, uint32_t num_cols,
+                            VkBuffer input, VkBuffer output) {
+    vkmath_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_rows = num_rows;
+    pc.num_cols = num_cols;
+    pc.num_elements = num_rows * num_cols;
+    return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_SOFTMAX, VKMATH_DTYPE_F32,
+        &pc, num_rows ? num_rows : 1, 1, 1,
+        input, VK_NULL_HANDLE, output, 1);
+}
+
+VkResult vkmath_rms_norm_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                             uint32_t num_rows, uint32_t num_cols,
+                             float eps, VkBuffer input, VkBuffer output) {
+    vkmath_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_rows = num_rows;
+    pc.num_cols = num_cols;
+    pc.num_elements = num_rows * num_cols;
+    pc.alpha = eps;
+    return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_RMS_NORM, VKMATH_DTYPE_F32,
+        &pc, num_rows ? num_rows : 1, 1, 1,
+        input, VK_NULL_HANDLE, output, 1);
+}
+
+VkResult vkmath_layernorm_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                              uint32_t num_rows, uint32_t num_cols,
+                              float eps, VkBuffer input, VkBuffer output) {
+    vkmath_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_rows = num_rows;
+    pc.num_cols = num_cols;
+    pc.num_elements = num_rows * num_cols;
+    pc.alpha = eps;
+    return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_LAYERNORM, VKMATH_DTYPE_F32,
+        &pc, num_rows ? num_rows : 1, 1, 1,
+        input, VK_NULL_HANDLE, output, 1);
+}
+
+/* ── Public API: index reductions (f32) ─────────────────────────────────── */
+
+VkResult vkmath_argmax_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                           uint32_t num_rows, uint32_t num_cols,
+                           VkBuffer input, VkBuffer output) {
+    vkmath_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_rows = num_rows;
+    pc.num_cols = num_cols;
+    pc.num_elements = num_rows * num_cols;
+    return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_ARGMAX, VKMATH_DTYPE_F32,
+        &pc, num_rows ? num_rows : 1, 1, 1,
+        input, VK_NULL_HANDLE, output, 1);
+}
+
+VkResult vkmath_argmin_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                           uint32_t num_rows, uint32_t num_cols,
+                           VkBuffer input, VkBuffer output) {
+    vkmath_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_rows = num_rows;
+    pc.num_cols = num_cols;
+    pc.num_elements = num_rows * num_cols;
+    return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_ARGMIN, VKMATH_DTYPE_F32,
+        &pc, num_rows ? num_rows : 1, 1, 1,
+        input, VK_NULL_HANDLE, output, 1);
+}
+
+/* ── Public API: prefix sum (f32) ───────────────────────────────────────── */
+
+VkResult vkmath_cumsum_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                           uint32_t num_rows, uint32_t num_cols,
+                           VkBuffer input, VkBuffer output) {
+    vkmath_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_rows = num_rows;
+    pc.num_cols = num_cols;
+    pc.num_elements = num_rows * num_cols;
+    return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_CUMSUM, VKMATH_DTYPE_F32,
+        &pc, num_rows ? num_rows : 1, 1, 1,
+        input, VK_NULL_HANDLE, output, 1);
+}
+
+/* ── Public API: elementwise math (f32) ─────────────────────────────────── */
+
+VkResult vkmath_clip_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                         uint32_t num_elements, float lo, float hi,
+                         VkBuffer input, VkBuffer output) {
+    vkmath_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_elements = num_elements;
+    pc.alpha = lo;
+    pc.beta = hi;
+    return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_CLIP, VKMATH_DTYPE_F32,
+        &pc, elem_to_groups(num_elements), 1, 1,
+        input, VK_NULL_HANDLE, output, 1);
+}
+
+VkResult vkmath_abs_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                        uint32_t num_elements, VkBuffer input, VkBuffer output) {
+    vkmath_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_elements = num_elements;
+    return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_ABS, VKMATH_DTYPE_F32,
+        &pc, elem_to_groups(num_elements), 1, 1,
+        input, VK_NULL_HANDLE, output, 1);
+}
+
+VkResult vkmath_sign_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                         uint32_t num_elements, VkBuffer input, VkBuffer output) {
+    vkmath_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_elements = num_elements;
+    return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_SIGN, VKMATH_DTYPE_F32,
+        &pc, elem_to_groups(num_elements), 1, 1,
+        input, VK_NULL_HANDLE, output, 1);
+}
+
+VkResult vkmath_exp_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                        uint32_t num_elements, VkBuffer input, VkBuffer output) {
+    vkmath_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_elements = num_elements;
+    return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_EXP, VKMATH_DTYPE_F32,
+        &pc, elem_to_groups(num_elements), 1, 1,
+        input, VK_NULL_HANDLE, output, 1);
+}
+
+VkResult vkmath_log_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                        uint32_t num_elements, VkBuffer input, VkBuffer output) {
+    vkmath_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_elements = num_elements;
+    return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_LOG, VKMATH_DTYPE_F32,
+        &pc, elem_to_groups(num_elements), 1, 1,
+        input, VK_NULL_HANDLE, output, 1);
+}
+
+VkResult vkmath_sqrt_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                         uint32_t num_elements, VkBuffer input, VkBuffer output) {
+    vkmath_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_elements = num_elements;
+    return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_SQRT, VKMATH_DTYPE_F32,
+        &pc, elem_to_groups(num_elements), 1, 1,
+        input, VK_NULL_HANDLE, output, 1);
+}
+
+VkResult vkmath_rsqrt_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                          uint32_t num_elements, VkBuffer input, VkBuffer output) {
+    vkmath_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_elements = num_elements;
+    return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_RSQRT, VKMATH_DTYPE_F32,
+        &pc, elem_to_groups(num_elements), 1, 1,
+        input, VK_NULL_HANDLE, output, 1);
+}
+
+VkResult vkmath_pow_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                        uint32_t num_elements, float exponent,
+                        VkBuffer input, VkBuffer output) {
+    vkmath_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_elements = num_elements;
+    pc.alpha = exponent;
+    return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_POW, VKMATH_DTYPE_F32,
+        &pc, elem_to_groups(num_elements), 1, 1,
         input, VK_NULL_HANDLE, output, 1);
 }

@@ -286,12 +286,196 @@ VkResult vkmath_max_reduce_dim_f32(VkMathContext* ctx,
  * \brief Sum reduction along rows: for each row of num_cols elements,
  *        produce the sum. Input is [num_rows * num_cols], output is [num_rows].
  */
-VkResult vkmath_sum_reduce_dim_f32(VkMathContext* ctx,
+VkResult vkmath_sum_reduce_dim_f32(VkMathContext *ctx,
                                    VkCommandBuffer cmd,
                                    uint32_t num_rows,
                                    uint32_t num_cols,
                                    VkBuffer input,
                                    VkBuffer output);
+
+/* ===========================================================================
+ * Reductions / normalizations (f32)
+ * Input is [num_rows x num_cols], row-major. Output shape noted per op.
+ * f16 variants are not yet provided for these ops.
+ * ========================================================================== */
+
+/**
+ * \brief Softmax over each row (numerically stable: max-subtract then exp).
+ *
+ * Input is [num_rows * num_cols], output is [num_rows * num_cols].
+ * Each workgroup processes one row.
+ */
+VkResult vkmath_softmax_f32(VkMathContext *ctx,
+                            VkCommandBuffer cmd,
+                            uint32_t num_rows,
+                            uint32_t num_cols,
+                            VkBuffer input,
+                            VkBuffer output);
+
+/**
+ * \brief RMS normalization: out[r][c] = in[r][c] * rsqrt(mean_c(in[r][c]^2) + eps).
+ *
+ * Input is [num_rows * num_cols], output is [num_rows * num_cols].
+ * Each workgroup processes one row.
+ *
+ * \param eps Epsilon added inside the square root.
+ */
+VkResult vkmath_rms_norm_f32(VkMathContext *ctx,
+                             VkCommandBuffer cmd,
+                             uint32_t num_rows,
+                             uint32_t num_cols,
+                             float eps,
+                             VkBuffer input,
+                             VkBuffer output);
+
+/**
+ * \brief Layer normalization: out[r][c] = (in[r][c] - mean_r) / sqrt(var_r + eps).
+ *
+ * Input is [num_rows * num_cols], output is [num_rows * num_cols].
+ * Each workgroup processes one row.
+ *
+ * \param eps Epsilon added inside the square root.
+ */
+VkResult vkmath_layernorm_f32(VkMathContext *ctx,
+                              VkCommandBuffer cmd,
+                              uint32_t num_rows,
+                              uint32_t num_cols,
+                              float eps,
+                              VkBuffer input,
+                              VkBuffer output);
+
+/* ===========================================================================
+ * Index reductions (f32)
+ * Input is [num_rows x num_cols] floats; output is [num_rows] uint32_t.
+ * Ties resolve to the lowest column index.
+ * ========================================================================== */
+
+/**
+ * \brief Argmax along rows: output[r] = column index of the maximum value.
+ *
+ * Input is [num_rows * num_cols] (float), output is [num_rows] (uint32).
+ */
+VkResult vkmath_argmax_f32(VkMathContext *ctx,
+                           VkCommandBuffer cmd,
+                           uint32_t num_rows,
+                           uint32_t num_cols,
+                           VkBuffer input,
+                           VkBuffer output);
+
+/**
+ * \brief Argmin along rows: output[r] = column index of the minimum value.
+ *
+ * Input is [num_rows * num_cols] (float), output is [num_rows] (uint32).
+ */
+VkResult vkmath_argmin_f32(VkMathContext *ctx,
+                           VkCommandBuffer cmd,
+                           uint32_t num_rows,
+                           uint32_t num_cols,
+                           VkBuffer input,
+                           VkBuffer output);
+
+/* ===========================================================================
+ * Prefix sum (f32)
+ * Input is [num_rows x num_cols] row-major; output has the same shape.
+ * ========================================================================== */
+
+/**
+ * \brief Inclusive prefix sum along the column dimension.
+ *
+ * out[r][c] = sum_{i<=c} in[r][i]. Input is [num_rows * num_cols], output
+ * is [num_rows * num_cols]. Each workgroup scans one row (Hillis-Steele
+ * in shared memory; rows longer than 256 columns are handled by a stride
+ * loop with a running block offset).
+ */
+VkResult vkmath_cumsum_f32(VkMathContext *ctx,
+                           VkCommandBuffer cmd,
+                           uint32_t num_rows,
+                           uint32_t num_cols,
+                           VkBuffer input,
+                           VkBuffer output);
+
+/* ===========================================================================
+ * Elementwise math (f32)
+ * Same signature shape as vkmath_relu_f32. f16 variants are not yet
+ * provided for these ops.
+ * ========================================================================== */
+
+/**
+ * \brief Clip: out = min(max(in, lo), hi)
+ */
+VkResult vkmath_clip_f32(VkMathContext *ctx,
+                         VkCommandBuffer cmd,
+                         uint32_t num_elements,
+                         float lo,
+                         float hi,
+                         VkBuffer input,
+                         VkBuffer output);
+
+/**
+ * \brief Absolute value: out = |in|
+ */
+VkResult vkmath_abs_f32(VkMathContext *ctx,
+                        VkCommandBuffer cmd,
+                        uint32_t num_elements,
+                        VkBuffer input,
+                        VkBuffer output);
+
+/**
+ * \brief Sign: out = 1.0 if in > 0, -1.0 if in < 0, else 0.0
+ */
+VkResult vkmath_sign_f32(VkMathContext *ctx,
+                         VkCommandBuffer cmd,
+                         uint32_t num_elements,
+                         VkBuffer input,
+                         VkBuffer output);
+
+/**
+ * \brief Natural exponential: out = exp(in)
+ */
+VkResult vkmath_exp_f32(VkMathContext *ctx,
+                        VkCommandBuffer cmd,
+                        uint32_t num_elements,
+                        VkBuffer input,
+                        VkBuffer output);
+
+/**
+ * \brief Natural logarithm: out = log(in). Inputs must be positive.
+ */
+VkResult vkmath_log_f32(VkMathContext *ctx,
+                        VkCommandBuffer cmd,
+                        uint32_t num_elements,
+                        VkBuffer input,
+                        VkBuffer output);
+
+/**
+ * \brief Square root: out = sqrt(in). Inputs must be non-negative.
+ */
+VkResult vkmath_sqrt_f32(VkMathContext *ctx,
+                         VkCommandBuffer cmd,
+                         uint32_t num_elements,
+                         VkBuffer input,
+                         VkBuffer output);
+
+/**
+ * \brief Reciprocal square root: out = rsqrt(in) = 1/sqrt(in).
+ */
+VkResult vkmath_rsqrt_f32(VkMathContext *ctx,
+                          VkCommandBuffer cmd,
+                          uint32_t num_elements,
+                          VkBuffer input,
+                          VkBuffer output);
+
+/**
+ * \brief Elementwise power: out = pow(in, exponent).
+ *
+ * \param exponent Fixed exponent applied to every element.
+ */
+VkResult vkmath_pow_f32(VkMathContext *ctx,
+                        VkCommandBuffer cmd,
+                        uint32_t num_elements,
+                        float exponent,
+                        VkBuffer input,
+                        VkBuffer output);
 
 /* ===========================================================================
  * Utility

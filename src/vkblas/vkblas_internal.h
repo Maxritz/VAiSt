@@ -19,6 +19,13 @@
 #define VKBLAS_DTYPE_I8   3
 #define VKBLAS_DTYPE_F64  4
 
+/* ── Fused quantized-GEMM kernel codes ──────────────────────────────────── *
+ * Distinct from every plain-GEMM data type so pipeline-cache hash keys
+ * never collide with the f32/f16/bf16/i8/f64 GEMMs. The output of both
+ * kernels is f32; the code only selects the dequant-in-matmul shader. */
+#define VKBLAS_DTYPE_QGEMM_Q8_0 5
+#define VKBLAS_DTYPE_QGEMM_Q4K  6
+
 /* ── Push constant block (must match GLSL push_constant layout, std140) ── */
 
 typedef struct {

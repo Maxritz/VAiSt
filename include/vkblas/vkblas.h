@@ -484,6 +484,97 @@ VkResult vkblas_gemm_ex_strided_batched(VkBLASContext*       context,
                                         VkBLASGemmFlags_t    flags);
 
 /* ===========================================================================
+ * GEMM — fused quantized (dequant-in-matmul): Q8_0 / Q4_K weights
+ * ========================================================================== */
+
+/**
+ * \brief Fused Q8_0 quantized GEMM: y = alpha * (dequant(Wq) * x) + beta * y.
+ *
+ * The weight matrix is dequantized *inside* the matmul kernel: quantized
+ * blocks are read from Wq, decoded to f32 in shared memory, and accumulated
+ * against the f32 activation x. No separate dequant pass is required.
+ *
+ * \par Weight layout (Wq)
+ * W is n rows x k columns, stored row-major in blocks of 32 elements.
+ * A Q8_0 block is 36 bytes: an f32 scale `d` (bytes 0..3) followed by 32
+ * int8 values `qs` (bytes 4..35);  dequant(i) = d * qs[i].
+ * Row r occupies byte offset r * ldw; its blocks are contiguous, so a row
+ * needs ceil(k/32) blocks. ldw is the byte stride between rows
+ * (>= ceil(k/32) * 36, i.e. a multiple of 4).
+ *
+ * \par Activation / output layout
+ * x is (k x m) f32 column-major (x[col*ldx + row]); y is (n x m) f32
+ * column-major (y[col*ldy + row]) and is read for the beta term and written
+ * in place.
+ *
+ * \param ctx   Valid VkBLASContext.
+ * \param cmd   Command buffer to record into (recording state).
+ * \param m     Columns of x and y (activation/batch dimension).
+ * \param n     Rows of W and y (output dimension).
+ * \param k     Columns of W, rows of x (contraction dimension).
+ * \param alpha Host pointer to scalar alpha.
+ * \param Wq    VkBuffer holding the Q8_0-quantized weight matrix.
+ * \param ldw   Byte stride between weight rows.
+ * \param x     VkBuffer holding activation x (k x m f32).
+ * \param ldx   Leading dimension of x (>= k).
+ * \param beta  Host pointer to scalar beta.
+ * \param y     VkBuffer holding output y (n x m f32); read + written.
+ * \param ldy   Leading dimension of y (>= n).
+ * \retval VK_SUCCESS On success.
+ */
+VkResult vkblas_qgemm_q8_0_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                               int32_t m, int32_t n, int32_t k,
+                               const float* alpha, VkBuffer Wq, int32_t ldw,
+                               VkBuffer x, int32_t ldx,
+                               const float* beta, VkBuffer y, int32_t ldy);
+
+/**
+ * \brief Fused Q4_K quantized GEMM: y = alpha * (dequant(Wq) * x) + beta * y.
+ *
+ * Weight matrix dequantized *inside* the matmul kernel using the canonical
+ * ggml Q4_K block format (see below). Same dispatch semantics as
+ * vkblas_qgemm_q8_0_f32.
+ *
+ * \par Weight layout (Wq)
+ * W is n rows x k columns, stored row-major in blocks of 256 elements.
+ * A Q4_K block is 144 bytes in ggml block_q4_K order:
+ *   bytes   0..1   f16 d
+ *   bytes   2..3   f16 dmin
+ *   bytes   4..15  uint8 scales[12]
+ *   bytes  16..143 uint8 qs[128]  (packed 4-bit nibbles)
+ * Row r occupies byte offset r * ldw; its blocks are contiguous, so a row
+ * needs ceil(k/256) blocks. ldw is the byte stride between rows
+ * (>= ceil(k/256) * 144, a multiple of 4).
+ *
+ * Per-32-element-group dequant (canonical ggml get_scale_min_k4), where
+ * `is` is the group index (0..7) and `nib` the element nibble (0..15):
+ *   is<4:  sc = scales[is]&63,        mn = scales[is+4]&63
+ *   else:  sc = (scales[is+4]&0xF)|((scales[is-4]>>6)<<4)
+ *          mn = (scales[is+4]>>4)   |((scales[is]>>6)<<4)
+ *   out = d*sc*nib - dmin*mn
+ *
+ * \param ctx   Valid VkBLASContext.
+ * \param cmd   Command buffer to record into (recording state).
+ * \param m     Columns of x and y (activation/batch dimension).
+ * \param n     Rows of W and y (output dimension).
+ * \param k     Columns of W, rows of x (contraction dimension).
+ * \param alpha Host pointer to scalar alpha.
+ * \param Wq    VkBuffer holding the Q4_K-quantized weight matrix.
+ * \param ldw   Byte stride between weight rows.
+ * \param x     VkBuffer holding activation x (k x m f32).
+ * \param ldx   Leading dimension of x (>= k).
+ * \param beta  Host pointer to scalar beta.
+ * \param y     VkBuffer holding output y (n x m f32); read + written.
+ * \param ldy   Leading dimension of y (>= n).
+ * \retval VK_SUCCESS On success.
+ */
+VkResult vkblas_qgemm_q4k_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                              int32_t m, int32_t n, int32_t k,
+                              const float* alpha, VkBuffer Wq, int32_t ldw,
+                              VkBuffer x, int32_t ldx,
+                              const float* beta, VkBuffer y, int32_t ldy);
+
+/* ===========================================================================
  * Pointer mode control
  * ========================================================================== */
 

@@ -15,6 +15,10 @@ Child of root `AGENTS.md`. Governs the public API surface under `include/vkblas/
 - Type-precision suffixes: `s`=f32, `d`=f64, `h`=f16, `bf`=bf16, `c`=complex-f32, `z`=complex-f64, `i8`=int8
 - `gemm`, `gemm_strided_batched`, `gemm_batched`, `gemm_ex` — exact parameter order mirrors `hipblasSgemm`
 - `VkBLASOperation_t` mirrors `hipblasOperation_t` (NONE=0, T=1, C=2)
+- Fused quantized GEMM: `vkblas_qgemm_q8_0_f32` / `vkblas_qgemm_q4k_f32`
+  (`y = alpha*(dequant(W)*x) + beta*y`, in place). The weight layout contract
+  (Q8_0: 36 B/block of 32 elems; Q4_K: ggml 144 B/block of 256 elems; row r at
+  byte offset `r*ldw`) is documented on each function in `vkblas.h`.
 
 ### No heap allocation in hot paths
 - All dispatch functions take pointers, never allocate

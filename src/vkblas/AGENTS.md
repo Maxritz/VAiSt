@@ -9,6 +9,11 @@ Child of root `AGENTS.md` and `include/vkblas/AGENTS.md`.
 - Cache: open-addressing hashmap, power-of-two, linear probing
 - Hash key: (data_type, transA, transB, is_strided, tier_index, tile_m, tile_n, tile_k)
 - No malloc per lookup; fixed-size cache array
+- Fused quantized GEMMs use dedicated `data_type` codes
+  (`VKBLAS_DTYPE_QGEMM_Q8_0` / `VKBLAS_DTYPE_QGEMM_Q4K` in `vkblas_internal.h`)
+  so their cache keys never collide with the plain f32/f16/bf16/i8/f64 GEMMs.
+  Only the baseline tier ships qgemm blobs; the `ensure_pipeline` fallback walk
+  resolves them there.
 
 ### Capability detection at context creation
 Delegated to VKRuntime's `vkr_detect_capabilities()` (see `src/vkruntime/`):
@@ -46,6 +51,35 @@ Total: 104 bytes (fits in minPushConstantsSize = 128)
 | 3       | SSBO       | write    | compute |
 | 4       | Uniform    | read     | compute |
 *(binding 4 reserved for future UBO; currently all push constants)*
+
+### Fused quantized GEMM (dequant-in-matmul)
+`vkblas_qgemm_q8_0_f32` / `vkblas_qgemm_q4k_f32` dequantize the weight matrix
+*inside* the matmul kernel (see `shaders/vkblas/AGENTS.md` for the shaders).
+Dispatch mirrors `vkblas_gemm_common` (lazy pipeline, descriptor set,
+push constants, tiled grid) with these differences:
+
+- **Weight buffer (binding 0)** is raw quantized bytes read via
+  `uint8_t`/`int8_t` scalar-layout SSBO (same style as the vkquant dequant
+  shaders). The set layout is unchanged (4 SSBO bindings).
+- **Binding map:** Wq -> 0, x -> 1, y -> 2 (beta read), y -> 3 (write). y is
+  both C and D because the API computes in place.
+- **Push constants** reuse `vkblas_push_constants_t`. The host swaps m/n:
+  `pc.m` = weight rows (= API n), `pc.n` = activation cols (= API m),
+  `pc.k` = depth. `pc.lda` = weight row byte stride (ldw), `pc.ldb` = ldx,
+  `pc.ldc` = `pc.ldd` = ldy. `transA = transB = 0`.
+- **Grid:** ceil(n/16) x ceil(m/16) (one workgroup per 16x16 output block).
+
+#### Weight layout (authoritative)
+- W is n rows x k columns, stored row-major in blocks. Row r starts at byte
+  offset `r * ldw`; `ldw` must be a multiple of 4.
+- **Q8_0** (`qgemm_q8_0_f32`): 36 B/block of 32 elems — f32 `d` (bytes 0..3)
+  + 32 x int8 `qs` (bytes 4..35). `dequant(i) = d * qs[i]`. Row needs
+  `ceil(k/32)` blocks.
+- **Q4_K** (`qgemm_q4k_f32`): 144 B/block of 256 elems, canonical ggml
+  `block_q4_K` — f16 `d` (0..1), f16 `dmin` (2..3), `scales[12]` (4..15),
+  `qs[128]` nibbles (16..143). Per-32-group `get_scale_min_k4` decode:
+  `out = d*sc*nib - dmin*mn` (see shader/header for the bit math). Row needs
+  `ceil(k/256)` blocks.
 
 ## Files
 
