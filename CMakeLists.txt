@@ -74,4 +74,58 @@ if(BUILD_TESTING)
     )
     target_link_libraries(test_vkblas PRIVATE vkblas Vulkan::Vulkan)
     add_test(NAME test_vkblas COMMAND test_vkblas)
+
+    # ── VKQuant library ──────────────────────────────────────────────────
+    add_library(vkquant STATIC src/vkquant/vkquant.c)
+    target_include_directories(vkquant PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkquant
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkquant
+    )
+    target_link_libraries(vkquant PUBLIC Vulkan::Vulkan)
+    target_compile_options(vkquant PRIVATE -Wall -Wextra)
+
+    add_executable(test_vkquant tests/test_vkquant.c)
+    target_include_directories(test_vkquant PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkquant
+    )
+    target_link_libraries(test_vkquant PRIVATE vkquant Vulkan::Vulkan)
+    add_test(NAME test_vkquant COMMAND test_vkquant)
+
+    # ── VKRAND library ───────────────────────────────────────────────────
+    add_library(vkrand STATIC src/vkrand/vkrand.c)
+    target_include_directories(vkrand PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkrand
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkrand
+    )
+    target_link_libraries(vkrand PUBLIC Vulkan::Vulkan)
+    target_compile_options(vkrand PRIVATE -Wall -Wextra)
+
+    add_executable(test_vkrand tests/test_vkrand.c)
+    target_include_directories(test_vkrand PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkrand
+    )
+    target_link_libraries(test_vkrand PRIVATE vkrand Vulkan::Vulkan)
+    add_test(NAME test_vkrand COMMAND test_vkrand)
+
+    # ── VKFFT library ────────────────────────────────────────────────────
+    add_library(vkfft STATIC src/vkfft/vkfft.c)
+    target_include_directories(vkfft PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkfft
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkfft
+    )
+    target_link_libraries(vkfft PUBLIC Vulkan::Vulkan)
+    target_compile_options(vkfft PRIVATE -Wall -Wextra)
+
+    add_executable(test_vkfft tests/test_vkfft.c)
+    target_include_directories(test_vkfft PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkfft
+    )
+    target_link_libraries(test_vkfft PRIVATE vkfft Vulkan::Vulkan)
+    add_test(NAME test_vkfft COMMAND test_vkfft)
 endif()

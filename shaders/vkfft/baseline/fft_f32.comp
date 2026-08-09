@@ -1,0 +1,82 @@
+#version 450
+
+// Forward radix-2 complex FFT (f32), baseline tier.
+//
+// One workgroup of 256 threads per FFT; n threads are active (n = power of
+// two, n <= 256). Buffer layout is interleaved (Re, Im) pairs: element j lives
+// at in[2j], in[2j+1] and out[2j], out[2j+1].
+//
+// Algorithm (shared-memory Cooley-Tukey DIT):
+//   1. Load input into shared memory with a bit-reversal permutation.
+//   2. log2(n) radix-2 butterfly stages; workgroup barrier() between stages.
+//   3. Write shared memory back to the output buffer.
+//
+// Barrier rule: every thread in the workgroup (all 256) executes every
+// barrier() the same number of times. Memory operations are guarded by
+// (idx < pc.n); barriers are kept outside any conditional.
+
+layout(push_constant) uniform PC {
+    uint n;        // FFT size (power of two, <= 256)
+    uint log2n;    // log2(n)
+    uint _pad0;
+    uint _pad1;
+} pc;
+
+layout(set = 0, binding = 0) restrict readonly buffer BufIn  { vec2 in_data[]; };
+layout(set = 0, binding = 2) writeonly           buffer BufOut { vec2 out_data[]; };
+
+shared vec2 s[256];
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+uint bit_reverse(uint x, uint bits) {
+    uint r = 0u;
+    for (uint i = 0u; i < bits; i++) {
+        r = (r << 1u) | (x & 1u);
+        x >>= 1u;
+    }
+    return r;
+}
+
+// Complex multiply: a * b with Re/Im in vec2 (.x = Re, .y = Im).
+vec2 cmul(vec2 a, vec2 b) {
+    return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+void main() {
+    uint idx = gl_LocalInvocationID.x;
+
+    // Load with bit-reversal permutation. s[rev] = in[idx] for idx < n.
+    if (idx < pc.n) {
+        s[bit_reverse(idx, pc.log2n)] = in_data[idx];
+    }
+    barrier();
+
+    // log2(n) radix-2 stages. Twiddles are exp(-2*pi*i*j/m), computed on the
+    // fly with cos/sin (correctness over speed). In stage m, threads whose
+    // bit (idx & half) == 0 form the "top" of butterfly (idx, idx|half);
+    // bottom-half threads idle this stage.
+    for (uint m = 2u; m <= pc.n; m <<= 1u) {
+        uint hs = m >> 1u;  /* half of the stage size */
+        if ((idx < pc.n) && ((idx & hs) == 0u)) {
+            uint j  = idx & (hs - 1u);
+            uint lo = idx;
+            uint hi = idx | hs;
+
+            float angle = -6.283185307179586 * float(j) / float(m);
+            vec2  w     = vec2(cos(angle), sin(angle));
+
+            vec2 u = s[lo];
+            vec2 v = cmul(s[hi], w);
+
+            s[lo] = u + v;
+            s[hi] = u - v;
+        }
+        barrier();
+    }
+
+    // Write result: thread j writes out[2j], out[2j+1].
+    if (idx < pc.n) {
+        out_data[idx] = s[idx];
+    }
+}

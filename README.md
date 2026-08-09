@@ -116,17 +116,44 @@ All work records into a caller-supplied `VkCommandBuffer`; pipelines are
 created lazily and cached. Descriptor binding uses push descriptors when
 available, otherwise a context-owned descriptor pool.
 
+### VKQuant (implemented)
+
+Block dequantization of quantized LLM weights to f32, using the same
+context/pipeline-cache pattern as VKMath.
+
+| Function | Description |
+|----------|-------------|
+| `vkquant_dequant_q8_0_f32` | Q8_0 blocks (f32 scale + 32×int8) → 32 f32 each |
+| `vkquant_dequant_q4_0_f32` | Q4_0 blocks (f32 scale + 16 packed nibbles) → 32 f32 each |
+
+### VKRAND (implemented)
+
+Stateless counter-based PRNG using the Philox4x32-10 algorithm, verified
+against the Random123 known-answer vectors.
+
+| Function | Description |
+|----------|-------------|
+| `vkrand_uniform_f32` | `count` uniform floats in [0,1) from a `(seed, count)` pair |
+
+### VKFFT (implemented)
+
+1D forward radix-2 complex FFT (f32, interleaved Re/Im), n = power of two
+≤ 256, shared-memory Cooley-Tukey, plan-based API.
+
+| Function | Description |
+|----------|-------------|
+| `vkfft_create_plan` / `vkfft_destroy_plan` | Create/destroy an FFT plan for size n |
+| `vkfft_execute_f32` | Forward FFT of `2n` floats (interleaved complex) |
+
 ### In Progress
 
 The following components are scaffolded but not yet implemented:
 
-- **VKFFT** — Plan-based FFT for multiple precisions
-- **VKRAND** — PRNG generators (Philox, ThreeFry) and distribution sampling
-- **VKQuant** — Q4_K, Q6_K, Q8_0, IQ4_XS dequantization shaders
 - **VKBLAS non-f32 GEMMs** — f16/bf16/f64/int8 GEMM shaders (public API
   stubs return `VK_ERROR_FEATURE_NOT_PRESENT` until the shaders land)
 - **LLM engine integration** — Transformer layer pipeline, KV caching,
-  token sampling
+  token sampling (rms_norm, attn_*, ffn_*, lm_head shaders per
+  `specs/SHADER-INVENTORY.md`)
 
 ---
 
