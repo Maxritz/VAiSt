@@ -1,4 +1,4 @@
-# VAiSt — Vulkan AI Stack
+# VAiSt - Vulkan AI Stack
 
 A ground-up Vulkan compute AI stack that implements BLAS, FFT, RNG, and math
 primitives for AMD RDNA2 (gfx103x) and RDNA4 (gfx1201) GPUs — and any GPU
