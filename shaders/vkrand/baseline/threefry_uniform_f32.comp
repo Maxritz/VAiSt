@@ -1,0 +1,90 @@
+#version 450
+
+// ThreeFry2x32-20 counter-based PRNG -> uniform f32 in [0,1).
+// Stateless like the Philox generator: thread i derives the counter from the
+// global invocation index and the caller seed, so the same (seed, count)
+// pair always produces identical output bits.
+//
+// Algorithm: the Random123 threefry2x32_R(20, ...) block cipher.
+//   - Parity word:      ks2 = SKEIN_KS_PARITY32 ^ k0 ^ k1  (0x1BD11BDA)
+//   - Rotations (32x2): {13, 15, 26, 6, 17, 29, 16, 24}, repeating each 8
+//     rounds (matches R_32x2_*_0 from Random123).
+//   - Key injection every 4 rounds; key words cycle (ks0,ks1)->(ks1,ks2)->
+//     (ks2,ks0)->... and X1 += injection index (1,2,3,4).
+// Counter: X0 = thread index, X1 = seed hash; key: k0 = seed, k1 = W0 ^ seed.
+// Mapping: float(X0 & 0xFFFFFF) / 16777216.0 (24-bit mantissa -> [0,1)).
+// Validated against the Random123 threefry2x32x20 known-answer vectors:
+//   ctr={0,0},  key={0,0}       -> 6b200159 99ba4efe
+//   ctr={ffffffff,ffffffff}, key={ffffffff,ffffffff} -> 1cb996fc bb002be7
+//   ctr=pi digits, key=pi digits-> c4923a9c 483df7a0
+
+layout(push_constant) uniform PC {
+    uint count;
+    uint seed;
+    uint _pad0;
+    uint _pad1;
+} pc;
+
+layout(set = 0, binding = 2) writeonly buffer BufOut { float data_out[]; };
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#define THREEFRY_PARITY 0x1BD11BDAu
+#define THREEFRY_W0     0x9E3779B9u
+
+uint rotl32(uint x, uint n) {
+    return (x << n) | (x >> (32u - n));
+}
+
+// Murmur3 finalizer (fmix32) — must match the CPU reference exactly.
+uint threefry_seed_hash(uint s) {
+    s ^= s >> 16;
+    s *= 0x85EBCA6Bu;
+    s ^= s >> 13;
+    s *= 0xC2B2AE35u;
+    s ^= s >> 16;
+    return s;
+}
+
+// ThreeFry2x32 with 20 rounds (matches Random123 threefry2x32_R(20, in, k)).
+void threefry2x32(inout uint X0, inout uint X1, in uint k0, in uint k1) {
+    uint ks[3] = uint[3](k0, k1, THREEFRY_PARITY ^ k0 ^ k1);
+    uint rot[8] = uint[8](13u, 15u, 26u, 6u, 17u, 29u, 16u, 24u);
+
+    X0 += ks[0];
+    X1 += ks[1];
+
+    // 20 rounds = 5 groups of 4; Random123 injects the key AFTER every
+    // 4-round group, INCLUDING the final group (guarded by Nrounds>19),
+    // so the output includes the r=5 injection.
+    uint inj = 0u;
+    uint kp = 0u;
+    for (int g = 0; g < 5; g++) {
+        for (int r = 0; r < 4; r++) {
+            int rr = g * 4 + r;
+            X0 += X1;
+            X1 = rotl32(X1, rot[rr % 8]);
+            X1 ^= X0;
+        }
+        inj += 1u;
+        kp += 1u;
+        if (kp == 3u) kp = 0u;
+        uint kp1 = kp + 1u;
+        if (kp1 == 3u) kp1 = 0u;
+        X0 += ks[kp];
+        X1 += ks[kp1];
+        X1 += inj;
+    }
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.count) { return; }
+
+    uint X0 = idx;
+    uint X1 = threefry_seed_hash(pc.seed);
+    threefry2x32(X0, X1, pc.seed, THREEFRY_W0 ^ pc.seed);
+
+    // [0,1) via 24-bit mantissa mapping (exact f32 division by 2^24).
+    data_out[idx] = float(X0 & 0xFFFFFFu) / 16777216.0f;
+}

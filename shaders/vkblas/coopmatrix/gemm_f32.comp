@@ -2,6 +2,29 @@
 
 #extension GL_KHR_cooperative_matrix : enable
 
+// ────────────────────────────────────────────────────────────────────────────
+// Tier 2 f32 GEMM.
+//
+// NOTE ON THE REAL COOP-MATRIX PATH: A genuine GL_KHR_cooperative_matrix
+// implementation (coopmat<float,16,16,16,use> fragments via coopMatLoadKHR /
+// coopMatMulAddKHR / coopMatStoreKHR, 16x16x16 f32 fragments, staged through
+// per-subgroup shared memory, subgroup-tiled workgroups) was written, and it
+// compiles cleanly with glslangValidator to SPIR-V carrying the
+// CooperativeMatrixKHR capability. However, the AMD Windows driver 26.7.1 on
+// RDNA2 (RX 6700 XT) CRASHES the process (0xE06D7363) inside
+// vkCreateComputePipelines when compiling ANY shader module that contains the
+// coopMatMulAddKHR instruction, despite advertising VK_KHR_cooperative_matrix
+// rev 2 + a f32 16x16x16 fragment. This is a driver-side failure that cannot
+// be caught with a VkResult, so the real path cannot be shipped without
+// breaking the GPU it runs on.
+//
+// Per root AGENTS.md ("every feature must have a Vulkan approximation") the
+// coopmatrix tier keeps the portable shared-memory fallback below. The kernel
+// is numerically identical to the baseline/subgroup tiers; only the tier name
+// differs. When a driver that actually executes coopMatMulAddKHR is available
+// (e.g. RDNA4 with a fixed driver), re-enable the real fragment path.
+// ────────────────────────────────────────────────────────────────────────────
+
 // Specialization constants
 layout(constant_id = 0) const uint TILE_M     = 16;
 layout(constant_id = 1) const uint TILE_N     = 16;
@@ -58,10 +81,7 @@ void main() {
     uint numTiles = (pc.k + CM_KSIZE - 1) / CM_KSIZE;
 
     for (uint t = 0; t < numTiles; ++t) {
-        // ── Load A tile ─────────────────────────────────────────────────
-        // On RDNA4 with matrix cores, this loads a coopmat fragment directly
-        // via coopMatLoadKHR(data_A, row, col, lda). The shared-memory
-        // algorithm below is the portable approximation.
+        // ── Load A tile (TILE_M rows x CM_KSIZE cols) into shared memory ──
         for (uint a_col = col; a_col < CM_KSIZE; a_col += TILE_N) {
             uint aRow, aCol;
             if (pc.transA == 0) {
@@ -76,7 +96,7 @@ void main() {
             As[row * CM_KSIZE + a_col] = in_k ? data_A[idx] : 0.0f;
         }
 
-        // ── Load B tile (CM_KSIZE rows x TILE_N cols) into shared memory ─
+        // ── Load B tile (CM_KSIZE rows x TILE_N cols) into shared memory ──
         for (uint b_row = row; b_row < CM_KSIZE; b_row += TILE_M) {
             uint bRow, bCol;
             if (pc.transB == 0) {
@@ -93,15 +113,7 @@ void main() {
 
         barrier();
 
-        // ── Compute: acc += sum_k As[row,kk] * Bs[kk,col] ───────────────
-        // When GL_KHR_cooperative_matrix is fully supported:
-        //   coopmat<float, CM_MSIZE, CM_KSIZE, 1, 1> a_frag = ... ;
-        //   coopmat<float, CM_KSIZE, CM_NSIZE, 1, 1> b_frag = ... ;
-        //   coopmat<float, CM_MSIZE, CM_NSIZE, 1, 1> acc_frag =
-        //       coopMatMulAdd(a_frag, b_frag, zero);
-        //   float result = float(acc_frag);
-        //
-        // Fallback (shared memory):
+        // ── Compute: acc += sum_k As[row,kk] * Bs[kk,col] ────────────────
         for (uint kk = 0; kk < CM_KSIZE; ++kk) {
             float a_val = As[row * CM_KSIZE + kk];
             float b_val = Bs[kk * TILE_N + col];

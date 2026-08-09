@@ -7,7 +7,7 @@ Child of root `AGENTS.md` and `include/vkrand/AGENTS.md`.
 ### Pipeline caching
 - Pipelines created lazily on first dispatch call
 - Cache: open-addressing hashmap, power-of-two (256), linear probing
-- Hash key: (tier_index) — RNG has a single kernel, see `vkrand_hash_key()`
+- Hash key: (kernel, tier) — see `vkrand_hash_key()`
 - No malloc per lookup; fixed-size cache array in context struct
 
 ### Capability detection at context creation
@@ -34,13 +34,23 @@ Must match the GLSL push_constant block exactly. uint32/float only — no
 
 Binding 2 = output uniform floats.
 
-## Algorithm
+## Algorithms
 
-Philox4x32-10 counter-based PRNG. Stateless: thread i derives the counter
-from `i` and `seed`, runs 10 rounds (M0=0xD2511F53, M1=0xCD9E8D57,
-W0=0x9E3779B9, W1=0xBB67AE85), maps c0 to [0,1) via
-`float(c0 & 0xFFFFFF) / 16777216.0`. Verified against the Random123
-known-answer vectors.
+| Kernel | Generator | Mapping |
+|--------|-----------|---------|
+| `VKRAND_KERNEL_UNIFORM_F32` | Philox4x32-10 (stateless) | `float(c0 & 0xFFFFFF) / 16777216.0` |
+| `VKRAND_KERNEL_THREEFRY_F32` | ThreeFry2x32-20 (stateless) | `float(X0 & 0xFFFFFF) / 16777216.0` |
+| `VKRAND_KERNEL_NORMAL_F32` | Philox4x32-10 Box-Muller | N(0,1): `sqrt(-2 ln u0) * cos(2*pi*u1)` |
+| `VKRAND_KERNEL_UNIFORM_UINT32` | Philox4x32-10 (stateless) | raw `c0` word (uint32) |
+
+All stateless: thread i derives the counter from `i` and `seed`. Philox runs 10
+rounds (M0=0xD2511F53, M1=0xCD9E8D57, W0=0x9E3779B9, W1=0xBB67AE85) and is
+verified against the Random123 philox4x32-10 known-answer vectors. ThreeFry2x32
+runs 20 rounds with the {13,15,26,6,17,29,16,24} rotation schedule, parity
+0x1BD11BDA, and key injection after every 4-round group INCLUDING the last
+(so the output includes the r=5 injection); verified against the Random123
+threefry2x32x20 known-answer vectors. Normal draws two consecutive uniform
+counters (2*i, 2*i+1) and applies Box-Muller.
 
 ## Files
 

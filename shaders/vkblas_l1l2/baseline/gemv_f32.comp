@@ -1,0 +1,56 @@
+#version 450
+
+// BLAS Level 2 gemv:  y = alpha * op(A) * x + beta * y   (in-place y)
+// Column-major A with leading dimension lda.  One thread per output row.
+//   transA==N:  y[i] = alpha*sum_j A[i + j*lda]*x[j*incx] + beta*y[i*incy]
+//   transA==T:  y[i] = alpha*sum_j A[j + i*lda]*x[j*incx] + beta*y[i*incy]
+// m = pc.m, n = pc.n, incx = pc.ldb, incy = pc.ldd.
+// binding 0 = A (read),  binding 1 = x (read),  binding 3 = y (read-write).
+
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    float alpha;
+    float beta;
+    uint  lda;
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  _pad2;
+    uint  _pad3;
+} pc;
+
+layout(set = 0, binding = 0) restrict readonly buffer BufA { float A[]; };
+layout(set = 0, binding = 1) restrict readonly buffer BufX { float x[]; };
+layout(set = 0, binding = 3)          buffer BufY { float y[]; };
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    if (row >= pc.m) { return; }
+
+    float acc = 0.0;
+    if (pc.transA == 0) {
+        for (uint j = 0u; j < pc.n; j++) {
+            acc += A[row + j * pc.lda] * x[j * pc.ldb];
+        }
+    } else {
+        for (uint j = 0u; j < pc.n; j++) {
+            acc += A[j + row * pc.lda] * x[j * pc.ldb];
+        }
+    }
+
+    y[row * pc.ldd] = pc.alpha * acc + pc.beta * y[row * pc.ldd];
+}

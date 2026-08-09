@@ -3,17 +3,23 @@
  * \brief Public-API test harness for the VKRAND library.
  *
  * Bootstraps a minimal Vulkan instance + physical/logical device, creates a
- * VkRandContext via vkrand_create_context(), records one
- * vkrand_uniform_f32() dispatch (seed=42, count=1024) into a single command
- * buffer, submits once, and validates the GPU output against a CPU reference
- * computed with the SAME Philox4x32-10 algorithm and [0,1) mapping.
+ * VkRandContext via vkrand_create_context(), and validates each generator:
+ *
+ *   1. uniform_f32       — Philox4x32-10 -> [0,1). Range + bit-exact match
+ *                          against a CPU reference validated against the
+ *                          Random123 philox4x32-10 known-answer vectors.
+ *   2. threefry_uniform_f32 — ThreeFry2x32-20 -> [0,1). Range + bit-exact
+ *                          match against a CPU reference validated against
+ *                          the Random123 threefry2x32x20 known-answer
+ *                          vectors.
+ *   3. normal_f32        — Philox-based Box-Muller N(0,1). Statistical
+ *                          sanity (mean ~0, stddev ~1), all values finite,
+ *                          and determinism (two runs byte-identical).
+ *   4. uniform_uint32    — Raw Philox c0 words. Bit-exact vs CPU philox
+ *                          counter output and determinism.
  *
  * This is a header-only test: it includes only <vulkan/vulkan.h> and the
  * public vkrand.h header (relative include). No internal headers are pulled.
- *
- * The CPU reference is validated against the official Random123 known-answer
- * vectors for philox4x32-10, so the algorithm is proven correct independent
- * of the GPU result.
  *
  * Exit status: 0 when all checks pass. Returns 1 on any real failure.
  */
@@ -30,11 +36,11 @@
  * ========================================================================== */
 
 #define TEST_SEED        42u            /**< Deterministic generator seed.      */
-#define TEST_COUNT       1024u          /**< Number of f32 values to generate.  */
+#define TEST_COUNT       1024u          /**< Number of values to generate.     */
 #define TEST_STAGING_SIZE ((VkDeviceSize)(1u << 20))  /**< 1 MiB host buffer.   */
 
 /* ===========================================================================
- * CPU reference (must mirror the shader bit-for-bit)
+ * CPU references (must mirror the shaders bit-for-bit)
  * ========================================================================== */
 
 #define PHILOX_M0 0xD2511F53u
@@ -42,13 +48,15 @@
 #define PHILOX_W0 0x9E3779B9u
 #define PHILOX_W1 0xBB67AE85u
 
+#define THREEFRY_PARITY 0x1BD11BDAu
+
 /** \brief High 32 bits of the unsigned 64-bit product a*b. */
 static uint32_t mulhi32(uint32_t a, uint32_t b)
 {
     return (uint32_t)(((uint64_t)a * b) >> 32);
 }
 
-/** \brief Murmur3 finalizer (fmix32) — must match the shader exactly. */
+/** \brief Murmur3 finalizer (fmix32) — must match the shaders exactly. */
 static uint32_t philox_seed_hash(uint32_t s)
 {
     s ^= s >> 16;
@@ -59,14 +67,19 @@ static uint32_t philox_seed_hash(uint32_t s)
     return s;
 }
 
+/** \brief Left rotate of a 32-bit word. */
+static uint32_t rotl32(uint32_t x, uint32_t n)
+{
+    return (x << n) | (x >> (32u - n));
+}
+
 /**
- * \brief CPU reference: Philox4x32-10 uniform f32 for thread index i.
+ * \brief CPU reference: the c0 word of Philox4x32-10 for counter i.
  *
  * Counter c0 = i, c1 = seed hash, c2 = W0, c3 = W1; key k0 = seed,
  * k1 = W0 ^ seed. Ten rounds with the key bumped by (W0, W1) after each.
- * Maps float(c0 & 0xFFFFFF) / 2^24 into [0,1).
  */
-static float cpu_uniform_f32(uint32_t i, uint32_t seed)
+static uint32_t cpu_philox_c0(uint32_t i, uint32_t seed)
 {
     uint32_t c[4], k[2];
     c[0] = i;
@@ -88,12 +101,74 @@ static float cpu_uniform_f32(uint32_t i, uint32_t seed)
         k[0] += PHILOX_W0;
         k[1] += PHILOX_W1;
     }
-    return (float)(c[0] & 0xFFFFFFu) / 16777216.0f;
+    return c[0];
 }
 
 /**
- * \brief Self-check the CPU reference against the Random123 known-answer
- *        vectors for philox4x32-10. Returns 1 on match.
+ * \brief CPU reference: Philox4x32-10 uniform f32 for thread index i.
+ * Maps float(c0 & 0xFFFFFF) / 2^24 into [0,1).
+ */
+static float cpu_uniform_f32(uint32_t i, uint32_t seed)
+{
+    return (float)(cpu_philox_c0(i, seed) & 0xFFFFFFu) / 16777216.0f;
+}
+
+/**
+ * \brief CPU reference: ThreeFry2x32-20 for counter (x0, x1), key (k0, k1).
+ *
+ * Mirrors Random123 threefry2x32_R(20, ...): parity word, rotation schedule
+ * {13,15,26,6,17,29,16,24}, key injection every 4 rounds cycling
+ * (ks0,ks1)->(ks1,ks2)->(ks2,ks0)->... with X1 += injection index.
+ */
+static void cpu_threefry2x32(uint32_t *x0, uint32_t *x1,
+                             uint32_t k0, uint32_t k1)
+{
+    uint32_t ks[3];
+    ks[0] = k0;
+    ks[1] = k1;
+    ks[2] = THREEFRY_PARITY ^ k0 ^ k1;
+    static const uint32_t rot[8] = {13u, 15u, 26u, 6u, 17u, 29u, 16u, 24u};
+
+    *x0 += ks[0];
+    *x1 += ks[1];
+
+    /* 20 rounds = 5 groups of 4; Random123 injects the key AFTER every
+       4-round group, INCLUDING the final group (guarded by Nrounds>19),
+       so the output includes the r=5 injection. */
+    uint32_t inj = 0u;
+    uint32_t kp = 0u;
+    for (int g = 0; g < 5; g++) {
+        for (int r = 0; r < 4; r++) {
+            int rr = g * 4 + r;
+            *x0 += *x1;
+            *x1 = rotl32(*x1, rot[rr % 8]);
+            *x1 ^= *x0;
+        }
+        inj += 1u;
+        kp = (kp + 1u) % 3u;
+        *x0 += ks[kp];
+        *x1 += ks[(kp + 1u) % 3u];
+        *x1 += inj;
+    }
+}
+
+/**
+ * \brief CPU reference: ThreeFry2x32-20 uniform f32 for thread index i.
+ *
+ * Counter X0 = i, X1 = seed hash; key k0 = seed, k1 = W0 ^ seed.
+ * Maps float(X0 & 0xFFFFFF) / 2^24 into [0,1).
+ */
+static float cpu_threefry_uniform_f32(uint32_t i, uint32_t seed)
+{
+    uint32_t x0 = i;
+    uint32_t x1 = philox_seed_hash(seed);
+    cpu_threefry2x32(&x0, &x1, seed, PHILOX_W0 ^ seed);
+    return (float)(x0 & 0xFFFFFFu) / 16777216.0f;
+}
+
+/**
+ * \brief Self-check the CPU Philox reference against the Random123
+ *        known-answer vectors for philox4x32-10. Returns 1 on match.
  */
 static int verify_cpu_reference_against_random123(void)
 {
@@ -137,6 +212,36 @@ static int verify_cpu_reference_against_random123(void)
             c[2] == 0xA20BC7C6u && c[3] == 0x6D5451FDu) ? 1 : 0;
 }
 
+/**
+ * \brief Self-check the CPU ThreeFry2x32-20 reference against the Random123
+ *        known-answer vectors for threefry2x32x20. Returns 1 on match.
+ */
+static int verify_threefry_against_random123(void)
+{
+    /* ctr={0,0}, key={0,0} -> 6b200159 99ba4efe */
+    uint32_t x0 = 0, x1 = 0;
+    cpu_threefry2x32(&x0, &x1, 0, 0);
+    if (x0 != 0x6B200159u || x1 != 0x99BA4EFEu) {
+        printf("    threefry KAT[0,0] got %08x %08x\n", x0, x1);
+        return 0;
+    }
+    /* ctr={ffffffff,ffffffff}, key={ffffffff,ffffffff} -> 1cb996fc bb002be7 */
+    x0 = 0xFFFFFFFFu; x1 = 0xFFFFFFFFu;
+    cpu_threefry2x32(&x0, &x1, 0xFFFFFFFFu, 0xFFFFFFFFu);
+    if (x0 != 0x1CB996FCu || x1 != 0xBB002BE7u) {
+        printf("    threefry KAT[ff..] got %08x %08x\n", x0, x1);
+        return 0;
+    }
+    /* ctr={243f6a88,85a308d3}, key={13198a2e,03707344} -> c4923a9c 483df7a0 */
+    x0 = 0x243F6A88u; x1 = 0x85A308D3u;
+    cpu_threefry2x32(&x0, &x1, 0x13198A2Eu, 0x03707344u);
+    if (x0 != 0xC4923A9Cu || x1 != 0x483DF7A0u) {
+        printf("    threefry KAT[pi] got %08x %08x\n", x0, x1);
+        return 0;
+    }
+    return 1;
+}
+
 /* ===========================================================================
  * Harness state
  * ========================================================================== */
@@ -153,8 +258,16 @@ typedef struct {
     void *mapped;               /**< Host mapping of mem.                     */
     VkDeviceSize align;         /**< Buffer memory alignment for sub-buffers. */
     VkDeviceSize cursor;        /**< Sub-allocation cursor into mem.          */
-    VkBuffer out;               /**< Output buffer receiving the uniforms.    */
-    VkDeviceSize off_out;       /**< Offset of the output buffer in mem.      */
+    VkBuffer out_uniform;       /**< Philox uniform f32 output.               */
+    VkDeviceSize off_uniform;
+    VkBuffer out_threefry;      /**< ThreeFry uniform f32 output.             */
+    VkDeviceSize off_threefry;
+    VkBuffer out_normal_a;      /**< Normal f32 output (determinism run A).   */
+    VkDeviceSize off_normal_a;
+    VkBuffer out_normal_b;      /**< Normal f32 output (determinism run B).   */
+    VkDeviceSize off_normal_b;
+    VkBuffer out_u32;           /**< Raw uint32 Philox output.                */
+    VkDeviceSize off_u32;
     VkFence fence;
     uint32_t subgroup_size;
     VkRandContext *rand_ctx;
@@ -378,6 +491,21 @@ static VkDeviceSize align_up(VkDeviceSize value, VkDeviceSize align)
     return (value + align - 1) & ~(align - 1);
 }
 
+/**
+ * \brief Sub-allocate a VkBuffer out of the shared host-visible memory block.
+ *        Advances the cursor so successive sub-buffers never overlap.
+ */
+static VkResult sub_alloc(harness_t *h, VkDeviceSize size,
+                          VkBuffer *out_buf, VkDeviceSize *out_off)
+{
+    VkDeviceSize off = align_up(h->cursor, h->align);
+    VkResult r = create_sub_buffer(h->device, h->mem, off, size, out_buf);
+    if (r != VK_SUCCESS) return r;
+    *out_off = off;
+    h->cursor = off + align_up(size, h->align);
+    return VK_SUCCESS;
+}
+
 /* ===========================================================================
  * Checks
  * ========================================================================== */
@@ -440,6 +568,154 @@ static int check_stats(const float *got, uint32_t count)
     return mean_ok && stddev_ok;
 }
 
+/**
+ * \brief Normal distribution sanity: all values finite, mean in [-0.1,0.1],
+ *        stddev in [0.9,1.1]. Returns 1 when all pass.
+ */
+static int check_normal_stats(const float *got, uint32_t count)
+{
+    int finite_ok = 1;
+    uint32_t bad = 0;
+    double sum = 0.0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (!isfinite(got[i])) {
+            if (bad < 8) printf("    non-finite[%u]: got %.9f\n", i, got[i]);
+            bad++;
+            finite_ok = 0;
+        }
+        sum += (double)got[i];
+    }
+    double mean = sum / (double)count;
+
+    double var = 0.0;
+    for (uint32_t i = 0; i < count; i++) {
+        double d = (double)got[i] - mean;
+        var += d * d;
+    }
+    var /= (double)count;
+    double stddev = sqrt(var);
+
+    int mean_ok   = (mean >= -0.1 && mean <= 0.1);
+    int stddev_ok = (stddev >= 0.9 && stddev <= 1.1);
+    printf("  finite            : %s (%u bad)\n", finite_ok ? "PASS" : "FAIL", bad);
+    printf("  mean/stddev N(0,1): %s (mean=%.4f stddev=%.4f)\n",
+           (mean_ok && stddev_ok) ? "PASS" : "FAIL", mean, stddev);
+    return finite_ok && mean_ok && stddev_ok;
+}
+
+/**
+ * \brief Bit-exact comparison of two uint32 buffers (determinism check).
+ */
+static int check_u32_identical(const uint32_t *a, const uint32_t *b,
+                               uint32_t count)
+{
+    uint32_t bad = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (a[i] != b[i]) {
+            if (bad < 8)
+                printf("    determinism[%u]: runA 0x%08x runB 0x%08x\n",
+                       i, a[i], b[i]);
+            bad++;
+        }
+    }
+    printf("  two runs identical : %s (%u bad)\n", bad == 0 ? "PASS" : "FAIL", bad);
+    return bad == 0;
+}
+
+/**
+ * \brief Bit-exact comparison of uint32 buffer vs CPU Philox counter output.
+ */
+static int check_u32_values(const uint32_t *got, const uint32_t *expected,
+                            uint32_t count)
+{
+    uint32_t bad = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (got[i] != expected[i]) {
+            if (bad < 8)
+                printf("    mismatch[%u]: got 0x%08x expected 0x%08x\n",
+                       i, got[i], expected[i]);
+            bad++;
+        }
+    }
+    printf("  exact CPU match    : %s (%u bad)\n", bad == 0 ? "PASS" : "FAIL", bad);
+    return bad == 0;
+}
+
+/**
+ * \brief Bit-exact float comparison of two buffers (determinism check).
+ */
+static int check_identical(const float *a, const float *b, uint32_t count)
+{
+    uint32_t bad = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (a[i] != b[i]) {
+            if (bad < 8)
+                printf("    determinism[%u]: runA %.9f (0x%08x) runB %.9f (0x%08x)\n",
+                       i, a[i], *(const uint32_t *)&a[i],
+                       b[i], *(const uint32_t *)&b[i]);
+            bad++;
+        }
+    }
+    printf("  two runs identical : %s (%u bad)\n", bad == 0 ? "PASS" : "FAIL", bad);
+    return bad == 0;
+}
+
+/* ===========================================================================
+ * Record + submit helper
+ * ========================================================================== */
+
+typedef VkResult (*vkr_op_fn)(VkRandContext *, VkCommandBuffer,
+                              uint32_t, uint32_t, VkBuffer);
+
+/**
+ * \brief Record a single generator dispatch into the harness command buffer,
+ *        submit it, and wait for completion. The command buffer is implicitly
+ *        reset by vkBeginCommandBuffer (pool has RESET_COMMAND_BUFFER_BIT).
+ *
+ * \return 1 on successful record + submit, 0 otherwise.
+ */
+static int run_single(harness_t *h, const char *name, vkr_op_fn op,
+                      uint32_t seed, uint32_t count, VkBuffer out)
+{
+    VkCommandBufferBeginInfo begin_info;
+    memset(&begin_info, 0, sizeof(begin_info));
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    VkResult r = vkBeginCommandBuffer(h->cmd, &begin_info);
+    if (r != VK_SUCCESS) {
+        printf("  %s : FAIL (begin %d)\n", name, (int)r);
+        return 0;
+    }
+    r = op(h->rand_ctx, h->cmd, seed, count, out);
+    if (r != VK_SUCCESS) {
+        printf("  %s : FAIL (record, VkResult=%d)\n", name, (int)r);
+        vkEndCommandBuffer(h->cmd);
+        return 0;
+    }
+    r = vkEndCommandBuffer(h->cmd);
+    if (r != VK_SUCCESS) {
+        printf("  %s : FAIL (end %d)\n", name, (int)r);
+        return 0;
+    }
+
+    vkResetFences(h->device, 1, &h->fence);
+    VkSubmitInfo submit_info;
+    memset(&submit_info, 0, sizeof(submit_info));
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &h->cmd;
+
+    r = vkQueueSubmit(h->queue, 1, &submit_info, h->fence);
+    if (r != VK_SUCCESS) {
+        printf("  %s : FAIL (submit %d)\n", name, (int)r);
+        return 0;
+    }
+    vkWaitForFences(h->device, 1, &h->fence, VK_TRUE, UINT64_MAX);
+    vkQueueWaitIdle(h->queue);
+    return 1;
+}
+
 /* ===========================================================================
  * main
  * ========================================================================== */
@@ -450,12 +726,14 @@ int main(void)
     memset(&h, 0, sizeof(h));
     h.mem = VK_NULL_HANDLE;
     h.staging = VK_NULL_HANDLE;
-    h.out = VK_NULL_HANDLE;
     h.fence = VK_NULL_HANDLE;
 
     float *expected = (float *)malloc(TEST_COUNT * sizeof(float));
-    if (!expected) {
+    float *expected_tf = (float *)malloc(TEST_COUNT * sizeof(float));
+    uint32_t *expected_u32 = (uint32_t *)malloc(TEST_COUNT * sizeof(uint32_t));
+    if (!expected || !expected_tf || !expected_u32) {
         fprintf(stderr, "test_vkrand: host allocation failed\n");
+        free(expected); free(expected_tf); free(expected_u32);
         return 1;
     }
 
@@ -466,7 +744,7 @@ int main(void)
     r = create_instance("test_vkrand", &h.instance);
     if (r != VK_SUCCESS) {
         fprintf(stderr, "test_vkrand: vkCreateInstance failed (%d)\n", (int)r);
-        free(expected);
+        free(expected); free(expected_tf); free(expected_u32);
         return 1;
     }
 
@@ -475,7 +753,7 @@ int main(void)
     if (r != VK_SUCCESS) {
         printf("test_vkrand: SKIP (no physical device found)\n");
         vkDestroyInstance(h.instance, NULL);
-        free(expected);
+        free(expected); free(expected_tf); free(expected_u32);
         return 0;
     }
 
@@ -483,7 +761,7 @@ int main(void)
     if (query_shader_int64(h.physical_device) == VK_FALSE) {
         printf("test_vkrand: SKIP (shaderInt64 not supported)\n");
         vkDestroyInstance(h.instance, NULL);
-        free(expected);
+        free(expected); free(expected_tf); free(expected_u32);
         return 0;
     }
     h.subgroup_size = query_subgroup_size(h.physical_device);
@@ -492,7 +770,7 @@ int main(void)
     if (queue_family_supports_compute(h.physical_device, 0) == VK_FALSE) {
         printf("test_vkrand: SKIP (queue family 0 lacks compute)\n");
         vkDestroyInstance(h.instance, NULL);
-        free(expected);
+        free(expected); free(expected_tf); free(expected_u32);
         return 0;
     }
 
@@ -511,7 +789,7 @@ int main(void)
         goto cleanup;
     }
 
-    /* ── 7. 1 MiB host-visible/host-coherent memory + output sub-buffer ─── */
+    /* ── 7. 1 MiB host-visible/host-coherent memory + sub-buffers ───────── */
     r = allocate_staging_memory(h.physical_device, h.device, TEST_STAGING_SIZE,
                                 &h.mem, &h.staging, &h.align);
     if (r != VK_SUCCESS) {
@@ -524,24 +802,40 @@ int main(void)
         goto cleanup;
     }
 
-    h.off_out = align_up(h.cursor, h.align);
-    h.cursor = h.off_out + TEST_COUNT * sizeof(float);
-    r = create_sub_buffer(h.device, h.mem, h.off_out,
-                          TEST_COUNT * sizeof(float), &h.out);
-    if (r != VK_SUCCESS) {
-        fprintf(stderr, "test_vkrand: output buffer failed (%d)\n", (int)r);
-        goto cleanup;
-    }
+    VkDeviceSize elem_bytes = TEST_COUNT * sizeof(float);
+    r = sub_alloc(&h, elem_bytes, &h.out_uniform, &h.off_uniform);
+    if (r != VK_SUCCESS) goto buf_fail;
+    r = sub_alloc(&h, elem_bytes, &h.out_threefry, &h.off_threefry);
+    if (r != VK_SUCCESS) goto buf_fail;
+    r = sub_alloc(&h, elem_bytes, &h.out_normal_a, &h.off_normal_a);
+    if (r != VK_SUCCESS) goto buf_fail;
+    r = sub_alloc(&h, elem_bytes, &h.out_normal_b, &h.off_normal_b);
+    if (r != VK_SUCCESS) goto buf_fail;
+    r = sub_alloc(&h, elem_bytes, &h.out_u32, &h.off_u32);
+    if (r != VK_SUCCESS) goto buf_fail;
+    goto buffers_ok;
+buf_fail:
+    fprintf(stderr, "test_vkrand: sub-buffer allocation failed (%d)\n", (int)r);
+    goto cleanup;
+buffers_ok:
 
     /* ── 8. CPU reference values ────────────────────────────────────────── */
     if (!verify_cpu_reference_against_random123()) {
-        fprintf(stderr, "test_vkrand: CPU reference FAILED Random123 vectors\n");
+        fprintf(stderr, "test_vkrand: CPU Philox reference FAILED Random123 vectors\n");
+        overall_pass = 0;
+        goto cleanup;
+    }
+    if (!verify_threefry_against_random123()) {
+        fprintf(stderr, "test_vkrand: CPU ThreeFry reference FAILED Random123 vectors\n");
         overall_pass = 0;
         goto cleanup;
     }
     for (uint32_t i = 0; i < TEST_COUNT; i++) {
         expected[i] = cpu_uniform_f32(i, TEST_SEED);
+        expected_tf[i] = cpu_threefry_uniform_f32(i, TEST_SEED);
+        expected_u32[i] = cpu_philox_c0(i, TEST_SEED);
     }
+    printf("test_vkrand: CPU references validated against Random123 KATs\n");
 
     /* ── 9. Context ─────────────────────────────────────────────────────── */
     r = vkrand_create_context(h.physical_device, h.device, &h.rand_ctx);
@@ -553,35 +847,7 @@ int main(void)
            vkrand_get_arch_name(h.rand_ctx), vkrand_get_arch_index(h.rand_ctx),
            (unsigned)h.subgroup_size, (unsigned)TEST_STAGING_SIZE);
 
-    /* ── 10. Record the dispatch into the single command buffer ─────────── */
-    VkCommandBufferBeginInfo begin_info;
-    memset(&begin_info, 0, sizeof(begin_info));
-    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-    r = vkBeginCommandBuffer(h.cmd, &begin_info);
-    if (r != VK_SUCCESS) {
-        fprintf(stderr, "test_vkrand: vkBeginCommandBuffer failed (%d)\n", (int)r);
-        overall_pass = 0;
-        goto cleanup;
-    }
-
-    r = vkrand_uniform_f32(h.rand_ctx, h.cmd, TEST_SEED, TEST_COUNT, h.out);
-    if (r != VK_SUCCESS) {
-        printf("  uniform_f32 : FAIL (record, VkResult=%d)\n", (int)r);
-        overall_pass = 0;
-    } else {
-        printf("  uniform_f32 : recorded\n");
-    }
-
-    r = vkEndCommandBuffer(h.cmd);
-    if (r != VK_SUCCESS) {
-        fprintf(stderr, "test_vkrand: vkEndCommandBuffer failed (%d)\n", (int)r);
-        overall_pass = 0;
-        goto cleanup;
-    }
-
-    /* ── 11. One submit, one fence, device idle ─────────────────────────── */
+    /* ── 10. Fence (reused for every submit) ────────────────────────────── */
     VkFenceCreateInfo fence_info;
     memset(&fence_info, 0, sizeof(fence_info));
     fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -592,29 +858,69 @@ int main(void)
         goto cleanup;
     }
 
-    VkSubmitInfo submit_info;
-    memset(&submit_info, 0, sizeof(submit_info));
-    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit_info.commandBufferCount = 1;
-    submit_info.pCommandBuffers = &h.cmd;
-
-    r = vkQueueSubmit(h.queue, 1, &submit_info, h.fence);
-    if (r != VK_SUCCESS) {
-        fprintf(stderr, "test_vkrand: vkQueueSubmit failed (%d)\n", (int)r);
+    /* ══ TEST 1: uniform_f32 (Philox4x32-10 -> [0,1)) ═════════════════════ */
+    printf("[uniform_f32: philox4x32-10]\n");
+    if (!run_single(&h, "uniform_f32", vkrand_uniform_f32,
+                    TEST_SEED, TEST_COUNT, h.out_uniform)) {
         overall_pass = 0;
-        goto cleanup;
+    } else {
+        const float *got =
+            (const float *)((const char *)h.mapped + h.off_uniform);
+        overall_pass &= check_values(got, expected, TEST_COUNT);
+        overall_pass &= check_stats(got, TEST_COUNT);
     }
-    vkWaitForFences(h.device, 1, &h.fence, VK_TRUE, UINT64_MAX);
-    vkQueueWaitIdle(h.queue);
 
-    /* ── 12. Compare GPU results against the CPU reference ──────────────── */
-    const float *got = (const float *)((const char *)h.mapped + h.off_out);
-    overall_pass &= check_values(got, expected, TEST_COUNT);
-    overall_pass &= check_stats(got, TEST_COUNT);
+    /* ══ TEST 2: threefry_uniform_f32 (ThreeFry2x32-20 -> [0,1)) ═════════ */
+    printf("[threefry_uniform_f32: threefry2x32-20]\n");
+    if (!run_single(&h, "threefry_uniform_f32", vkrand_threefry_uniform_f32,
+                    TEST_SEED, TEST_COUNT, h.out_threefry)) {
+        overall_pass = 0;
+    } else {
+        const float *got =
+            (const float *)((const char *)h.mapped + h.off_threefry);
+        overall_pass &= check_values(got, expected_tf, TEST_COUNT);
+        overall_pass &= check_stats(got, TEST_COUNT);
+    }
+
+    /* ══ TEST 3: normal_f32 (Box-Muller N(0,1) from Philox) ═══════════════ */
+    printf("[normal_f32: N(0,1)]\n");
+    int ok_a = run_single(&h, "normal_f32(runA)", vkrand_normal_f32,
+                          TEST_SEED, TEST_COUNT, h.out_normal_a);
+    int ok_b = run_single(&h, "normal_f32(runB)", vkrand_normal_f32,
+                          TEST_SEED, TEST_COUNT, h.out_normal_b);
+    if (!ok_a || !ok_b) {
+        overall_pass = 0;
+    } else {
+        const float *a = (const float *)((const char *)h.mapped + h.off_normal_a);
+        const float *b = (const float *)((const char *)h.mapped + h.off_normal_b);
+        overall_pass &= check_normal_stats(a, TEST_COUNT);
+        overall_pass &= check_identical(a, b, TEST_COUNT);
+    }
+
+    /* ══ TEST 4: uniform_uint32 (raw Philox c0 words) ═════════════════════ */
+    printf("[uniform_uint32: raw philox c0]\n");
+    int ok1 = run_single(&h, "uniform_uint32(runA)", vkrand_uniform_uint32,
+                         TEST_SEED, TEST_COUNT, h.out_u32);
+    int ok2 = run_single(&h, "uniform_uint32(runB)", vkrand_uniform_uint32,
+                         TEST_SEED, TEST_COUNT, h.out_u32);
+    if (!ok1 || !ok2) {
+        overall_pass = 0;
+    } else {
+        const uint32_t *got_a =
+            (const uint32_t *)((const char *)h.mapped + h.off_u32);
+        const uint32_t *got_b =
+            (const uint32_t *)((const char *)h.mapped + h.off_u32);
+        overall_pass &= check_u32_values(got_a, expected_u32, TEST_COUNT);
+        overall_pass &= check_u32_identical(got_a, got_b, TEST_COUNT);
+    }
 
 cleanup:
     if (h.rand_ctx) vkrand_destroy_context(h.rand_ctx);
-    if (h.out != VK_NULL_HANDLE) vkDestroyBuffer(h.device, h.out, NULL);
+    if (h.out_uniform != VK_NULL_HANDLE) vkDestroyBuffer(h.device, h.out_uniform, NULL);
+    if (h.out_threefry != VK_NULL_HANDLE) vkDestroyBuffer(h.device, h.out_threefry, NULL);
+    if (h.out_normal_a != VK_NULL_HANDLE) vkDestroyBuffer(h.device, h.out_normal_a, NULL);
+    if (h.out_normal_b != VK_NULL_HANDLE) vkDestroyBuffer(h.device, h.out_normal_b, NULL);
+    if (h.out_u32 != VK_NULL_HANDLE) vkDestroyBuffer(h.device, h.out_u32, NULL);
     if (h.staging) vkDestroyBuffer(h.device, h.staging, NULL);
     if (h.mapped) vkUnmapMemory(h.device, h.mem);
     if (h.mem != VK_NULL_HANDLE) vkFreeMemory(h.device, h.mem, NULL);
@@ -627,6 +933,8 @@ cleanup:
     if (h.instance != VK_NULL_HANDLE) vkDestroyInstance(h.instance, NULL);
 
     free(expected);
+    free(expected_tf);
+    free(expected_u32);
 
     printf("test_vkrand: %s\n", overall_pass ? "PASS" : "FAIL");
     return overall_pass ? 0 : 1;

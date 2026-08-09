@@ -18,10 +18,10 @@
 /* ── Push constant block (std140, 16 bytes, must match GLSL exactly) ────── */
 
 typedef struct {
-    uint32_t n;        /* offset  0: FFT size (power of two, <= 256)       */
-    uint32_t log2n;    /* offset  4: log2(n)                                */
-    uint32_t _pad0;    /* offset  8: padding (no uint64_t in push constants) */
-    uint32_t _pad1;    /* offset 12: padding                                */
+    uint32_t n;         /* offset  0: FFT size (power of two, 2..1024)       */
+    uint32_t log2n;     /* offset  4: log2(n)                                */
+    uint32_t direction; /* offset  8: VKFFT_DIR_FORWARD (0) or INVERSE (1)   */
+    uint32_t _pad;      /* offset 12: padding (no uint64_t in push constants)*/
 } vkfft_push_constants_t;
 
 /* Static assert (C99-compatible): struct must be exactly 16 bytes */
@@ -30,11 +30,12 @@ typedef char vkfft_pc_static_assert[sizeof(vkfft_push_constants_t) == 16 ? 1 : -
 /* ── Data types ────────────────────────────────────────────────────────── */
 
 #define VKFFT_DTYPE_F32 0
+#define VKFFT_DTYPE_F16 1
 
 /* ── Kernel types ──────────────────────────────────────────────────────── */
 
-#define VKFFT_KERNEL_FFT_F32 0
-#define VKFFT_KERNEL_COUNT   1
+#define VKFFT_KERNEL_FFT   0
+#define VKFFT_KERNEL_COUNT 1
 
 /* ── Capability tiers ──────────────────────────────────────────────────── */
 

@@ -18,10 +18,14 @@ shaders/vkrand/
 | Kernel           | Baseline |
 |------------------|----------|
 | uniform_f32      | yes      |
+| threefry_uniform_f32 | yes  |
+| normal_f32       | yes      |
+| uniform_uint32   | yes      |
 
-Only the baseline shader exists today; `active_tier` is clamped to baseline.
+Only the baseline tier shaders exist today; `active_tier` is clamped to
+baseline.
 
-## Philox4x32-10 contract
+## Philox4x32-10 contract (uniform_f32, normal_f32, uniform_uint32)
 
 - **Counter init**: `c0 = gl_GlobalInvocationID.x` (global thread index),
   `c1 = philox_seed_hash(seed)`, `c2 = 0x9E3779B9`, `c3 = 0xBB67AE85`.
@@ -30,9 +34,28 @@ Only the baseline shader exists today; `active_tier` is clamped to baseline.
   `M0 = 0xD2511F53`, `M1 = 0xCD9E8D57`; hi-word product via `umulExtended`.
 - **10 rounds**, key bumped by `(0x9E3779B9, 0xBB67AE85)` after each round.
 - **Mapping**: `float(c0 & 0xFFFFFFu) / 16777216.0f` (24-bit mantissa -> [0,1)).
+  `uniform_uint32` writes the raw `c0` word instead. `normal_f32` draws
+  counters `2*i` and `2*i+1` and applies Box-Muller (see below).
 
-The CPU test reference must use the SAME algorithm and mapping, validated
-against the Random123 known-answer vectors (see `include/vkrand/AGENTS.md`).
+## ThreeFry2x32-20 contract
+
+- **Counter init**: `X0 = gl_GlobalInvocationID.x` (global thread index),
+  `X1 = threefry_seed_hash(seed)` (fmix32). Key: `k0 = seed`,
+  `k1 = 0x9E3779B9 ^ seed`.
+- **Round**: `X0 += X1; X1 = rotl(X1, rot[rr % 8]); X1 ^= X0;` with
+  rotations `{13, 15, 26, 6, 17, 29, 16, 24}` (Random123 R_32x2_*_0).
+- **Key schedule**: `ks = {k0, k1, 0x1BD11BDA ^ k0 ^ k1}`. Key injected after
+  every 4-round group cycling (ks0,ks1)->(ks1,ks2)->(ks2,ks0)->... with
+  `X1 += injection_index`. **The injection after the final (5th) group runs**
+  (Random123 guards with `Nrounds>19`), so 20 rounds = 5 injections.
+- **20 rounds**, mapping `float(X0 & 0xFFFFFFu) / 16777216.0f`.
+
+## Normal N(0,1) contract
+
+- Philox4x32-10 counter init at `2*i` and `2*i+1` (two consecutive uniform
+  draws), Box-Muller `z = sqrt(-2 ln u0) * cos(2*pi*u1)`.
+- `u0` clamped to `1e-30` minimum so `-2 ln(u0)` stays finite.
+- Mapping inputs use the standard 24-bit mantissa uniform.
 
 ## Hard rules
 

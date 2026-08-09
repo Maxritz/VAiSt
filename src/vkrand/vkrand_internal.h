@@ -29,8 +29,11 @@ typedef char vkrand_pc_static_assert[sizeof(vkrand_push_constants_t) == 16 ? 1 :
 
 /* ── Kernel types ──────────────────────────────────────────────────────── */
 
-#define VKRAND_KERNEL_UNIFORM_F32 0
-#define VKRAND_KERNEL_COUNT       1
+#define VKRAND_KERNEL_UNIFORM_F32        0
+#define VKRAND_KERNEL_THREEFRY_F32       1
+#define VKRAND_KERNEL_NORMAL_F32         2
+#define VKRAND_KERNEL_UNIFORM_UINT32     3
+#define VKRAND_KERNEL_COUNT              4
 
 /* ── Capability tiers ──────────────────────────────────────────────────── */
 

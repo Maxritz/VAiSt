@@ -1,27 +1,24 @@
 #version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
 
-// Forward/inverse radix-2 complex FFT (f32), baseline tier.
+// Forward/inverse radix-2 complex FFT (f16 I/O), baseline tier.
+//
+// Same shared-memory Cooley-Tukey DIT structure as fft_f32.comp, but the
+// input/output buffers are interleaved float16_t (Re, Im) pairs (element j
+// lives at in[2j], in[2j+1]) while all internal compute and shared memory is
+// f32 (matches the f16 elementwise shader strategy in vkmath: f32 internal
+// compute, f16 I/O). GL_EXT_scalar_block_layout keeps the float16_t arrays
+// tightly packed.
 //
 // One workgroup of 256 threads per FFT; n active elements (n = power of two,
-// 2 <= n <= 1024). Each thread strides over up to n/256 elements via a strided
-// loop, so a single 256-thread workgroup covers the whole FFT regardless of n.
-// Buffer layout is interleaved (Re, Im) pairs: element j lives at
-// in[2j], in[2j+1] and out[2j], out[2j+1].
-//
-// Algorithm (shared-memory Cooley-Tukey DIT):
-//   1. Load input into shared memory with a bit-reversal permutation.
-//   2. log2(n) radix-2 butterfly stages; workgroup barrier() between stages.
-//   3. Write shared memory back to the output buffer.
-//
-// Direction: pc.direction == 0 (VKFFT_DIR_FORWARD) uses exp(-2*pi*i*j/m)
-// twiddles; pc.direction == 1 (VKFFT_DIR_INVERSE) conjugates them
-// (exp(+2*pi*i*j/m)). The inverse is unnormalized (matches the rocfft
-// default), so forward-then-inverse recovers the original signal scaled by n.
+// 2 <= n <= 1024) covered by a strided loop. Direction semantics match
+// fft_f32.comp: pc.direction == 0 forward (exp(-2*pi*i*j/m)), == 1 inverse
+// (exp(+2*pi*i*j/m)), unnormalized.
 //
 // Barrier rule: every thread in the workgroup (all 256) executes every
-// barrier() the same number of times. The strided-loop trip count iters is
-// derived from pc.n, which is uniform across the workgroup, so all threads
-// run the same number of iterations. Memory ops are guarded by (idx < pc.n);
+// barrier() the same number of times; the strided-loop trip count iters is
+// uniform (derived from pc.n). Memory ops are guarded by (idx < pc.n);
 // barriers are kept outside any conditional.
 
 layout(push_constant) uniform PC {
@@ -31,8 +28,8 @@ layout(push_constant) uniform PC {
     uint _pad;
 } pc;
 
-layout(set = 0, binding = 0) restrict readonly buffer BufIn  { vec2 in_data[]; };
-layout(set = 0, binding = 2) writeonly           buffer BufOut { vec2 out_data[]; };
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn  { float16_t in_data[]; };
+layout(scalar, set = 0, binding = 2) writeonly           buffer BufOut { float16_t out_data[]; };
 
 shared vec2 s[1024];
 
@@ -56,11 +53,14 @@ void main() {
     uint tid = gl_LocalInvocationID.x;
     uint iters = (pc.n + 255u) / 256u;
 
-    // Load with bit-reversal permutation. s[rev] = in[idx] for idx < n.
+    // Load with bit-reversal permutation (f16 -> f32, interleaved Re/Im).
     for (uint e = 0u; e < iters; e++) {
         uint idx = tid + e * 256u;
         if (idx < pc.n) {
-            s[bit_reverse(idx, pc.log2n)] = in_data[idx];
+            uint base = 2u * idx;
+            s[bit_reverse(idx, pc.log2n)] = vec2(
+                float(in_data[base]),
+                float(in_data[base + 1u]));
         }
     }
     barrier();
@@ -68,9 +68,6 @@ void main() {
     // Twiddle sign: forward = -2*pi*i*j/m, inverse = +2*pi*i*j/m.
     float dir = (pc.direction == 0u) ? -1.0 : 1.0;
 
-    // log2(n) radix-2 stages. In stage m, threads whose bit (idx & half) == 0
-    // form the "top" of butterfly (idx, idx|half); bottom-half threads idle
-    // this stage.
     for (uint m = 2u; m <= pc.n; m <<= 1u) {
         uint hs = m >> 1u;  /* half of the stage size */
         for (uint e = 0u; e < iters; e++) {
@@ -93,11 +90,13 @@ void main() {
         barrier();
     }
 
-    // Write result: element j goes to out[2j], out[2j+1].
+    // Write result (f32 -> f16, interleaved Re/Im).
     for (uint e = 0u; e < iters; e++) {
         uint idx = tid + e * 256u;
         if (idx < pc.n) {
-            out_data[idx] = s[idx];
+            uint base = 2u * idx;
+            out_data[base]      = float16_t(s[idx].x);
+            out_data[base + 1u] = float16_t(s[idx].y);
         }
     }
 }

@@ -27,8 +27,11 @@ typedef struct {
 } shader_blob_t;
 
 static const shader_blob_t s_shader_table[] = {
-    /* baseline tier — the only FFT shader compiled today */
-    {VKFFT_KERNEL_FFT_F32, VKFFT_DTYPE_F32, VKFFT_TIER_BASELINE, vkfft_spv_baseline_fft_f32, vkfft_spv_baseline_fft_f32_size},
+    /* baseline tier — the only FFT shaders compiled today. Direction is
+       carried in the push constants (pc.direction), so each precision has a
+       single shader serving both forward and inverse. */
+    {VKFFT_KERNEL_FFT, VKFFT_DTYPE_F32, VKFFT_TIER_BASELINE, vkfft_spv_baseline_fft_f32, vkfft_spv_baseline_fft_f32_size},
+    {VKFFT_KERNEL_FFT, VKFFT_DTYPE_F16, VKFFT_TIER_BASELINE, vkfft_spv_baseline_fft_f16, vkfft_spv_baseline_fft_f16_size},
 };
 #define SHADER_TABLE_COUNT (sizeof(s_shader_table) / sizeof(s_shader_table[0]))
 
@@ -310,8 +313,11 @@ VkResult vkfft_create_plan(VkPhysicalDevice pd, VkDevice device, uint32_t n,
                            VkFFTPlan **pp_plan) {
     if (!pp_plan) return VK_ERROR_INITIALIZATION_FAILED;
 
-    /* Validate n: power of two in [2, 256] */
-    if (n < 2u || n > 256u || (n & (n - 1u)) != 0u) {
+    /* Validate n: power of two in [2, 1024]. The shader covers the whole FFT
+       with a single 256-thread workgroup via a strided loop, so n is bounded
+       by the shared-memory array (1024 elements = 8 KiB, well inside the
+       workgroup LDS limit), not by maxComputeWorkGroupInvocations. */
+    if (n < 2u || n > 1024u || (n & (n - 1u)) != 0u) {
         return VKFFT_ERROR_INVALID_ARGUMENT;
     }
 
@@ -470,16 +476,45 @@ uint32_t vkfft_get_size(VkFFTPlan *plan) {
 
 /* ── Public API: execute ─────────────────────────────────────────────────── */
 
-VkResult vkfft_execute_f32(VkFFTPlan *plan, VkCommandBuffer cmd,
-                           VkBuffer input, VkBuffer output) {
+/*
+ * Shared dispatch path: builds the push constants for the given direction and
+ * records one workgroup (256 threads, n active) per FFT; batch = 1.
+ */
+static VkResult vkfft_execute_dir(VkFFTPlan *plan, VkCommandBuffer cmd,
+                                  uint32_t data_type, uint32_t direction,
+                                  VkBuffer input, VkBuffer output) {
     if (!plan) return VK_ERROR_INITIALIZATION_FAILED;
 
     vkfft_push_constants_t pc;
     memset(&pc, 0, sizeof(pc));
     pc.n = plan->n;
     pc.log2n = plan->log2n;
+    pc.direction = direction;
 
-    /* One workgroup (256 threads, n active) per FFT; batch = 1. */
-    return vkfft_cmd_dispatch(plan, cmd, VKFFT_KERNEL_FFT_F32, VKFFT_DTYPE_F32,
+    return vkfft_cmd_dispatch(plan, cmd, VKFFT_KERNEL_FFT, data_type,
         &pc, 1, 1, 1, input, output);
+}
+
+VkResult vkfft_execute_f32(VkFFTPlan *plan, VkCommandBuffer cmd,
+                           VkBuffer input, VkBuffer output) {
+    return vkfft_execute_dir(plan, cmd, VKFFT_DTYPE_F32, VKFFT_DIR_FORWARD,
+                             input, output);
+}
+
+VkResult vkfft_execute_inverse_f32(VkFFTPlan *plan, VkCommandBuffer cmd,
+                                   VkBuffer input, VkBuffer output) {
+    return vkfft_execute_dir(plan, cmd, VKFFT_DTYPE_F32, VKFFT_DIR_INVERSE,
+                             input, output);
+}
+
+VkResult vkfft_execute_f16(VkFFTPlan *plan, VkCommandBuffer cmd,
+                           VkBuffer input, VkBuffer output) {
+    return vkfft_execute_dir(plan, cmd, VKFFT_DTYPE_F16, VKFFT_DIR_FORWARD,
+                             input, output);
+}
+
+VkResult vkfft_execute_inverse_f16(VkFFTPlan *plan, VkCommandBuffer cmd,
+                                   VkBuffer input, VkBuffer output) {
+    return vkfft_execute_dir(plan, cmd, VKFFT_DTYPE_F16, VKFFT_DIR_INVERSE,
+                             input, output);
 }

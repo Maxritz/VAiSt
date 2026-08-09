@@ -1,0 +1,78 @@
+#version 450
+
+// BLAS Level 1 scal (f16):  x = alpha * x   (in-place)
+// Halfs stored one-per-uint32 (low 16 bits).  alpha is an f32 host scalar.
+// binding 0 = x (read-write, uint).
+
+uint f16_pack(float f) {
+    uint fbits = floatBitsToUint(f);
+    uint sign  = (fbits >> 16u) & 0x8000u;
+    uint e32   = (fbits >> 23u) & 0xFFu;
+    uint m32   = fbits & 0x7FFFFFu;
+
+    if (e32 == 255u) { return sign | 0x7C00u; }
+    int e16 = int(e32) - 127 + 15;
+    if (e16 >= 31) { return sign | 0x7C00u; }
+    if (e16 <= 0) {
+        if (e16 < -10) { return sign; }
+        uint m = m32 | 0x800000u;
+        m = m >> uint(1 - e16);
+        uint h = (m + 0x1000u) >> 13u;
+        return sign | (h & 0x3FFu);
+    }
+    uint h = (uint(e16) << 10u) | (m32 >> 13u);
+    uint rem = m32 & 0x1FFFu;
+    if (rem > 0x1000u) { h += 1u; }
+    else if (rem == 0x1000u && ((h & 1u) == 1u)) { h += 1u; }
+    return sign | h;
+}
+
+float f16_unpack(uint u) {
+    u &= 0xFFFFu;
+    uint sign = (u >> 15u) & 1u;
+    uint expo = (u >> 10u) & 0x1Fu;
+    uint man  = u & 0x3FFu;
+    float mag;
+    if (expo == 0u) {
+        mag = float(man) * (1.0 / 16777216.0);
+    } else if (expo == 31u) {
+        mag = 1.0e30;
+    } else {
+        mag = (1.0 + float(man) / 1024.0) * exp2(float(int(expo)) - 15.0);
+    }
+    return sign != 0u ? -mag : mag;
+}
+
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    float alpha;
+    float beta;
+    uint  lda;
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  _pad2;
+    uint  _pad3;
+} pc;
+
+layout(set = 0, binding = 0) buffer BufX { uint x[]; };
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) { return; }
+    x[i * pc.lda] = f16_pack(pc.alpha * f16_unpack(x[i * pc.lda]));
+}

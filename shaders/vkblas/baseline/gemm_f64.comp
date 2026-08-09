@@ -1,0 +1,119 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : enable
+
+// Specialization constants
+layout(constant_id = 0) const uint TILE_M = 16;
+layout(constant_id = 1) const uint TILE_N = 16;
+layout(constant_id = 2) const uint TILE_K = 16;
+
+// The scalar alpha/beta are doubles; their 8 raw bytes are packed into the
+// C-side push-constant slots at the matching offsets:
+//   alpha  -> offsets 12..19 (C fields alpha/beta)
+//   beta   -> offsets 76..83 (C fields _pad2/_pad3)
+// The host writes them as raw uint32 words; here they are recombined with
+// packDouble2x32 for full double precision.
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    uint  alpha_lo;
+    uint  alpha_hi;
+    uint  lda;
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  beta_lo;
+    uint  beta_hi;
+} pc;
+
+layout(set = 0, binding = 0) restrict readonly buffer BufA { float64_t data_A[]; };
+layout(set = 0, binding = 1) restrict readonly buffer BufB { float64_t data_B[]; };
+layout(set = 0, binding = 2) restrict readonly buffer BufC { float64_t data_C[]; };
+layout(set = 0, binding = 3) writeonly  buffer BufD { float64_t data_D[]; };
+
+shared double As[TILE_M * TILE_K];
+shared double Bs[TILE_K * TILE_N];
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    uint row = gl_LocalInvocationID.x;
+    uint col = gl_LocalInvocationID.y;
+
+    uint grRow = gl_WorkGroupID.x;
+    uint grCol = gl_WorkGroupID.y;
+    uint batch = gl_WorkGroupID.z;
+
+    uint globalRow = grRow * TILE_M + row;
+    uint globalCol = grCol * TILE_N + col;
+
+    double alpha = packDouble2x32(uvec2(pc.alpha_lo, pc.alpha_hi));
+    double beta  = packDouble2x32(uvec2(pc.beta_lo, pc.beta_hi));
+
+    double acc = 0.0LF;
+    uint numTiles = (pc.k + TILE_K - 1) / TILE_K;
+
+    for (uint t = 0; t < numTiles; ++t) {
+        // ── Load A tile (TILE_M rows × TILE_K cols) ─────────────────────
+        for (uint a_col = col; a_col < TILE_K; a_col += TILE_N) {
+            uint aRow, aCol;
+            if (pc.transA == 0) {
+                aRow = globalRow;
+                aCol = t * TILE_K + a_col;
+            } else {
+                aRow = t * TILE_K + a_col;
+                aCol = globalRow;
+            }
+            uint idx = aRow + aCol * pc.lda + batch * pc.strideA;
+            bool in_k = (pc.transA == 0) ? (aCol < pc.k) : (aRow < pc.k);
+            As[row * TILE_K + a_col] = in_k ? data_A[idx] : 0.0LF;
+        }
+
+        // ── Load B tile (TILE_K rows × TILE_N cols) ─────────────────────
+        for (uint b_row = row; b_row < TILE_K; b_row += TILE_M) {
+            uint bRow, bCol;
+            if (pc.transB == 0) {
+                bRow = t * TILE_K + b_row;
+                bCol = globalCol;
+            } else {
+                bRow = globalCol;
+                bCol = t * TILE_K + b_row;
+            }
+            uint idx = bRow + bCol * pc.ldb + batch * pc.strideB;
+            bool in_k = (pc.transB == 0) ? (bRow < pc.k) : (bCol < pc.k);
+            Bs[b_row * TILE_N + col] = in_k ? data_B[idx] : 0.0LF;
+        }
+
+        barrier();
+
+        // ── Compute: acc += sum_k As[row, kk] * Bs[kk, col] (f64) ───────
+        for (uint kk = 0; kk < TILE_K; ++kk) {
+            acc += As[row * TILE_K + kk] * Bs[kk * TILE_N + col];
+        }
+
+        barrier();
+    }
+
+    // ── Scale and write (guard tiles that overhang m/n) ──────────────────
+    if (globalRow >= pc.m || globalCol >= pc.n) { return; }
+
+    double result = alpha * acc;
+
+    if (pc.beta_is_zero == 0) {
+        uint cIdx = globalRow + globalCol * pc.ldc + batch * pc.strideC;
+        result += beta * data_C[cIdx];
+    }
+
+    uint dIdx = globalRow + globalCol * pc.ldd + batch * pc.strideD;
+    data_D[dIdx] = result;
+}

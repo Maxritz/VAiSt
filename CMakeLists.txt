@@ -128,4 +128,43 @@ if(BUILD_TESTING)
     )
     target_link_libraries(test_vkfft PRIVATE vkfft Vulkan::Vulkan)
     add_test(NAME test_vkfft COMMAND test_vkfft)
+
+    # ── VKRuntime library ─────────────────────────────────────────────────
+    add_library(vkruntime STATIC src/vkruntime/vkruntime.c)
+    target_include_directories(vkruntime PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkruntime
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
+    )
+    target_link_libraries(vkruntime PUBLIC Vulkan::Vulkan)
+    target_compile_options(vkruntime PRIVATE -Wall -Wextra)
+
+    add_executable(test_vkruntime tests/test_vkruntime.c)
+    target_include_directories(test_vkruntime PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkruntime
+    )
+    target_link_libraries(test_vkruntime PRIVATE vkruntime Vulkan::Vulkan)
+    add_test(NAME test_vkruntime COMMAND test_vkruntime)
+
+    # ── VKBLAS L1/L2 library (reuses VkBLASContext, links vkblas) ────────
+    add_library(vkblas_l1l2 STATIC src/vkblas_l1l2/vkblas_l1l2.c)
+    target_include_directories(vkblas_l1l2 PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkblas
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkblas
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkblas_l1l2
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkblas_l1l2
+    )
+    target_link_libraries(vkblas_l1l2 PUBLIC vkblas Vulkan::Vulkan)
+    target_compile_options(vkblas_l1l2 PRIVATE -Wall -Wextra)
+
+    add_executable(test_vkblas_l1l2 tests/test_vkblas_l1l2.c)
+    target_include_directories(test_vkblas_l1l2 PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkblas
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkblas_l1l2
+    )
+    target_link_libraries(test_vkblas_l1l2 PRIVATE vkblas_l1l2 vkblas Vulkan::Vulkan)
+    add_test(NAME test_vkblas_l1l2 COMMAND test_vkblas_l1l2)
 endif()

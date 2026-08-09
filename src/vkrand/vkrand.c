@@ -28,8 +28,11 @@ typedef struct {
 } shader_blob_t;
 
 static const shader_blob_t s_shader_table[] = {
-    /* baseline tier — the only tier with a Philox shader today */
-    {VKRAND_KERNEL_UNIFORM_F32, VKRAND_TIER_BASELINE, vkrand_spv_baseline_uniform_f32, vkrand_spv_baseline_uniform_f32_size},
+    /* baseline tier — the only tier with compiled shaders today */
+    {VKRAND_KERNEL_UNIFORM_F32,    VKRAND_TIER_BASELINE, vkrand_spv_baseline_uniform_f32,       vkrand_spv_baseline_uniform_f32_size},
+    {VKRAND_KERNEL_THREEFRY_F32,   VKRAND_TIER_BASELINE, vkrand_spv_baseline_threefry_uniform_f32, vkrand_spv_baseline_threefry_uniform_f32_size},
+    {VKRAND_KERNEL_NORMAL_F32,     VKRAND_TIER_BASELINE, vkrand_spv_baseline_normal_f32,         vkrand_spv_baseline_normal_f32_size},
+    {VKRAND_KERNEL_UNIFORM_UINT32, VKRAND_TIER_BASELINE, vkrand_spv_baseline_uniform_uint32,     vkrand_spv_baseline_uniform_uint32_size},
 };
 #define SHADER_TABLE_COUNT (sizeof(s_shader_table) / sizeof(s_shader_table[0]))
 
@@ -449,6 +452,53 @@ VkResult vkrand_uniform_f32(VkRandContext *ctx, VkCommandBuffer cmd,
     pc.count = count;
     pc.seed = seed;
     return vkrand_cmd_dispatch(ctx, cmd, VKRAND_KERNEL_UNIFORM_F32,
+        &pc, elem_to_groups(count), 1, 1,
+        output);
+}
+
+/* ── Public API: threefry uniform f32 ──────────────────────────────────── */
+
+VkResult vkrand_threefry_uniform_f32(VkRandContext *ctx, VkCommandBuffer cmd,
+                                     uint32_t seed, uint32_t count,
+                                     VkBuffer output) {
+    if (!ctx) return VK_ERROR_INITIALIZATION_FAILED;
+
+    vkrand_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.count = count;
+    pc.seed = seed;
+    return vkrand_cmd_dispatch(ctx, cmd, VKRAND_KERNEL_THREEFRY_F32,
+        &pc, elem_to_groups(count), 1, 1,
+        output);
+}
+
+/* ── Public API: normal f32 ────────────────────────────────────────────── */
+
+VkResult vkrand_normal_f32(VkRandContext *ctx, VkCommandBuffer cmd,
+                           uint32_t seed, uint32_t count, VkBuffer output) {
+    if (!ctx) return VK_ERROR_INITIALIZATION_FAILED;
+
+    vkrand_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.count = count;
+    pc.seed = seed;
+    return vkrand_cmd_dispatch(ctx, cmd, VKRAND_KERNEL_NORMAL_F32,
+        &pc, elem_to_groups(count), 1, 1,
+        output);
+}
+
+/* ── Public API: uniform uint32 ────────────────────────────────────────── */
+
+VkResult vkrand_uniform_uint32(VkRandContext *ctx, VkCommandBuffer cmd,
+                               uint32_t seed, uint32_t count,
+                               VkBuffer output) {
+    if (!ctx) return VK_ERROR_INITIALIZATION_FAILED;
+
+    vkrand_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.count = count;
+    pc.seed = seed;
+    return vkrand_cmd_dispatch(ctx, cmd, VKRAND_KERNEL_UNIFORM_UINT32,
         &pc, elem_to_groups(count), 1, 1,
         output);
 }

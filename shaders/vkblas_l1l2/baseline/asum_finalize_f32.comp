@@ -1,0 +1,54 @@
+#version 450
+
+// BLAS Level 1 asum (stage 2, finalize): result[0] = sum_g partial[g]
+// pc.batchCount = number of partials produced by asum_partial_f32.
+// Single workgroup, grid-stride loop for G > 256.
+// binding 3 = partials/result (read-write).
+
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    float alpha;
+    float beta;
+    uint  lda;
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  _pad2;
+    uint  _pad3;
+} pc;
+
+layout(set = 0, binding = 3) buffer BufOut { float data[]; };
+
+shared float sdata[256];
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint G = pc.batchCount;
+
+    float acc = 0.0;
+    for (uint i = tid; i < G; i += 256u) { acc += data[i]; }
+
+    sdata[tid] = acc;
+    barrier();
+
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) { sdata[tid] += sdata[tid + s]; }
+        barrier();
+    }
+
+    if (tid == 0u) { data[0] = sdata[0]; }
+}

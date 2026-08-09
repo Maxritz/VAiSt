@@ -15,6 +15,36 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/* ── f16 -> f32 conversion (CPU side) ───────────────────────────────────── */
+
+static float vkblas_f16_to_f32(uint16_t h)
+{
+    uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
+    uint32_t exp  = (uint32_t)(h & 0x7C00u) >> 10;
+    uint32_t man  = (uint32_t)(h & 0x03FFu);
+    uint32_t fbits;
+
+    if (exp == 0) {
+        if (man == 0) {
+            fbits = sign;                                   /* +/-0 */
+        } else {
+            /* subnormal: normalize into the normal exponent range */
+            int e = 1;
+            while ((man & 0x0400u) == 0u) { man <<= 1; --e; }
+            man &= 0x03FFu;
+            fbits = sign | ((uint32_t)(e + 112) << 23) | (man << 13);
+        }
+    } else if (exp == 0x1Fu) {
+        fbits = sign | 0x7F800000u | (man << 13);           /* inf/nan */
+    } else {
+        fbits = sign | ((exp + 112u) << 23) | (man << 13);
+    }
+
+    float f;
+    memcpy(&f, &fbits, sizeof(f));
+    return f;
+}
+
 /* ── Specialization constant values ──────────────────────────────────────── */
 
 #define VKBLAS_TILE_M 16
@@ -54,27 +84,46 @@ uint64_t vkblas_hash_key(uint32_t dt, uint32_t tA, uint32_t tB,
 
 /* ── Shader blob selector ────────────────────────────────────────────────── */
 
+/* Select the SPIR-V blob for an exact (data_type, tier) pair. Returns NULL
+   when that combination has no shader (e.g. f16/f64 only exist at baseline);
+   the caller falls back to lower tiers per the AGENTS.md fallback chain. */
 static const uint32_t* vkblas_select_spirv(VkBLASContext* ctx,
                                            uint32_t data_type,
                                            VkBLASTier_t tier,
                                            size_t* out_size)
 {
     (void)ctx;
-    if (data_type != VKBLAS_DTYPE_F32) {
-        /* Only f32 is implemented in this iteration */
-        return NULL;
-    }
-
     switch (tier) {
     case VKBLAS_TIER_COOPMATRIX:
-        *out_size = vkblas_spv_coopmatrix_gemm_f32_size;
-        return vkblas_spv_coopmatrix_gemm_f32;
+        switch (data_type) {
+        case VKBLAS_DTYPE_F32:
+            *out_size = vkblas_spv_coopmatrix_gemm_f32_size;
+            return vkblas_spv_coopmatrix_gemm_f32;
+        default:
+            return NULL;
+        }
     case VKBLAS_TIER_SUBGROUP:
-        *out_size = vkblas_spv_subgroup_gemm_f32_size;
-        return vkblas_spv_subgroup_gemm_f32;
+        switch (data_type) {
+        case VKBLAS_DTYPE_F32:
+            *out_size = vkblas_spv_subgroup_gemm_f32_size;
+            return vkblas_spv_subgroup_gemm_f32;
+        default:
+            return NULL;
+        }
     case VKBLAS_TIER_BASELINE:
-        *out_size = vkblas_spv_baseline_gemm_f32_size;
-        return vkblas_spv_baseline_gemm_f32;
+        switch (data_type) {
+        case VKBLAS_DTYPE_F32:
+            *out_size = vkblas_spv_baseline_gemm_f32_size;
+            return vkblas_spv_baseline_gemm_f32;
+        case VKBLAS_DTYPE_F16:
+            *out_size = vkblas_spv_baseline_gemm_f16_size;
+            return vkblas_spv_baseline_gemm_f16;
+        case VKBLAS_DTYPE_F64:
+            *out_size = vkblas_spv_baseline_gemm_f64_size;
+            return vkblas_spv_baseline_gemm_f64;
+        default:
+            return NULL;
+        }
     default:
         return NULL;
     }
@@ -184,13 +233,15 @@ static uint32_t vkblas_hash_to_slot(uint64_t key)
     return (uint32_t)(key & (VKBLAS_MAX_PIPELINES - 1));
 }
 
-VkPipeline vkblas_get_cached_pipeline(VkBLASContext* ctx,
-                                       uint32_t data_type,
-                                       VkBool32 transA, VkBool32 transB,
-                                       VkBool32 is_strided)
+static VkPipeline vkblas_get_cached_pipeline_tier(VkBLASContext* ctx,
+                                                  uint32_t data_type,
+                                                  VkBool32 transA,
+                                                  VkBool32 transB,
+                                                  VkBool32 is_strided,
+                                                  VkBLASTier_t tier)
 {
     uint64_t key = vkblas_hash_key(data_type, transA, transB, is_strided,
-                                   (uint32_t)ctx->active_tier);
+                                   (uint32_t)tier);
     uint32_t slot = vkblas_hash_to_slot(key);
 
     for (uint32_t i = 0; i < VKBLAS_MAX_PIPELINES; ++i) {
@@ -203,13 +254,32 @@ VkPipeline vkblas_get_cached_pipeline(VkBLASContext* ctx,
     return VK_NULL_HANDLE;
 }
 
+VkPipeline vkblas_get_cached_pipeline(VkBLASContext* ctx,
+                                       uint32_t data_type,
+                                       VkBool32 transA, VkBool32 transB,
+                                       VkBool32 is_strided)
+{
+    /* Search from the active tier down so a cached lower-tier fallback
+       (e.g. f16 baseline) is found even when a higher tier is active. */
+    int t = (int)ctx->active_tier;
+    while (t >= (int)VKBLAS_TIER_BASELINE) {
+        VkPipeline p = vkblas_get_cached_pipeline_tier(ctx, data_type, transA,
+                                                       transB, is_strided,
+                                                       (VkBLASTier_t)t);
+        if (p != VK_NULL_HANDLE)
+            return p;
+        --t;
+    }
+    return VK_NULL_HANDLE;
+}
+
 VkResult vkblas_ensure_pipeline(VkBLASContext* ctx,
                                 uint32_t data_type,
                                 uint32_t transA, uint32_t transB,
                                 uint32_t is_strided,
                                 VkPipeline* out_pipeline)
 {
-    /* Try cache first */
+    /* Try cache first (searches all tiers) */
     VkPipeline cached = vkblas_get_cached_pipeline(ctx, data_type,
                                                    transA, transB, is_strided);
     if (cached != VK_NULL_HANDLE) {
@@ -217,73 +287,93 @@ VkResult vkblas_ensure_pipeline(VkBLASContext* ctx,
         return VK_SUCCESS;
     }
 
-    /* Select SPIR-V blob for the active tier */
-    size_t spirv_size = 0;
-    const uint32_t* spirv = vkblas_select_spirv(ctx, data_type, ctx->active_tier,
-                                                 &spirv_size);
-    if (spirv == NULL)
-        return VK_ERROR_FEATURE_NOT_PRESENT;
+    /* Attempt to create a pipeline, trying the active tier first and
+       falling back to lower tiers (per AGENTS.md fallback chain). */
+    VkResult last_result = VK_ERROR_FEATURE_NOT_PRESENT;
 
-    /* Create shader module */
-    VkShaderModule sm;
-    VkResult r = vkblas_load_shader_module(ctx->device, spirv, spirv_size, &sm);
-    if (r != VK_SUCCESS)
-        return r;
+    int t = (int)ctx->active_tier;
+    while (t >= (int)VKBLAS_TIER_BASELINE) {
+        VkBLASTier_t tier = (VkBLASTier_t)t;
 
-    /* Specialization constants */
-    uint32_t sc_data[7];
-    vkblas_fill_sc_data(sc_data, ctx->active_tier);
-
-    VkSpecializationInfo si = {
-        .mapEntryCount = 7,
-        .pMapEntries   = vkblas_sc_map,
-        .dataSize      = sizeof(sc_data),
-        .pData         = sc_data,
-    };
-
-    VkComputePipelineCreateInfo cpci = {
-        .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .stage  = {
-            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
-            .module = sm,
-            .pName  = "main",
-            .pSpecializationInfo = &si,
-        },
-        .layout = ctx->pipeline_layout,
-    };
-
-    VkPipeline pipeline;
-    r = vkCreateComputePipelines(ctx->device, ctx->pipeline_cache, 1, &cpci,
-                                  NULL, &pipeline);
-    vkDestroyShaderModule(ctx->device, sm, NULL);
-    if (r != VK_SUCCESS)
-        return r;
-
-    /* Insert into cache */
-    uint64_t key = vkblas_hash_key(data_type, transA, transB, is_strided,
-                                   (uint32_t)ctx->active_tier);
-    uint32_t slot = vkblas_hash_to_slot(key);
-
-    for (uint32_t i = 0; i < VKBLAS_MAX_PIPELINES; ++i) {
-        uint32_t idx = (slot + i) & (VKBLAS_MAX_PIPELINES - 1);
-        if (!ctx->pipelines[idx].valid) {
-            ctx->pipelines[idx].key        = key;
-            ctx->pipelines[idx].pipeline   = pipeline;
-            ctx->pipelines[idx].layout     = ctx->pipeline_layout;
-            ctx->pipelines[idx].data_type  = data_type;
-            ctx->pipelines[idx].transA     = transA;
-            ctx->pipelines[idx].transB     = transB;
-            ctx->pipelines[idx].is_strided = is_strided;
-            ctx->pipelines[idx].tier       = (uint32_t)ctx->active_tier;
-            ctx->pipelines[idx].valid      = 1;
-            ctx->pipeline_count++;
-            break;
+        /* Select SPIR-V blob for this tier */
+        size_t spirv_size = 0;
+        const uint32_t* spirv = vkblas_select_spirv(ctx, data_type, tier,
+                                                    &spirv_size);
+        if (spirv == NULL) {
+            --t;
+            continue;
         }
+
+        /* Create shader module */
+        VkShaderModule sm;
+        VkResult r = vkblas_load_shader_module(ctx->device, spirv,
+                                               spirv_size, &sm);
+        if (r != VK_SUCCESS) {
+            last_result = r;
+            --t;
+            continue;
+        }
+
+        /* Specialization constants */
+        uint32_t sc_data[7];
+        vkblas_fill_sc_data(sc_data, tier);
+
+        VkSpecializationInfo si = {
+            .mapEntryCount = 7,
+            .pMapEntries   = vkblas_sc_map,
+            .dataSize      = sizeof(sc_data),
+            .pData         = sc_data,
+        };
+
+        VkComputePipelineCreateInfo cpci = {
+            .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage  = {
+                .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
+                .module = sm,
+                .pName  = "main",
+                .pSpecializationInfo = &si,
+            },
+            .layout = ctx->pipeline_layout,
+        };
+
+        VkPipeline pipeline;
+        r = vkCreateComputePipelines(ctx->device, ctx->pipeline_cache, 1, &cpci,
+                                      NULL, &pipeline);
+        vkDestroyShaderModule(ctx->device, sm, NULL);
+        if (r != VK_SUCCESS) {
+            last_result = r;
+            --t;
+            continue;
+        }
+
+        /* Insert into cache under the tier actually used */
+        uint64_t key = vkblas_hash_key(data_type, transA, transB, is_strided,
+                                       (uint32_t)tier);
+        uint32_t slot = vkblas_hash_to_slot(key);
+
+        for (uint32_t i = 0; i < VKBLAS_MAX_PIPELINES; ++i) {
+            uint32_t idx = (slot + i) & (VKBLAS_MAX_PIPELINES - 1);
+            if (!ctx->pipelines[idx].valid) {
+                ctx->pipelines[idx].key        = key;
+                ctx->pipelines[idx].pipeline   = pipeline;
+                ctx->pipelines[idx].layout     = ctx->pipeline_layout;
+                ctx->pipelines[idx].data_type  = data_type;
+                ctx->pipelines[idx].transA     = transA;
+                ctx->pipelines[idx].transB     = transB;
+                ctx->pipelines[idx].is_strided = is_strided;
+                ctx->pipelines[idx].tier       = (uint32_t)tier;
+                ctx->pipelines[idx].valid      = 1;
+                ctx->pipeline_count++;
+                break;
+            }
+        }
+
+        *out_pipeline = pipeline;
+        return VK_SUCCESS;
     }
 
-    *out_pipeline = pipeline;
-    return VK_SUCCESS;
+    return last_result;
 }
 
 /* ── Descriptor set allocation ────────────────────────────────────────────── */
@@ -506,38 +596,82 @@ VkBLASPointerMode_t vkblas_get_pointer_mode(VkBLASContext* ctx)
     return ctx->pointer_mode;
 }
 
-/* ── GEMM dispatch (f32) ──────────────────────────────────────────────────── */
+/* ── GEMM dispatch (generic over dtype) ──────────────────────────────────── */
 
-static VkResult vkblas_sgemm_common(VkBLASContext*  ctx,
-                                    VkCommandBuffer  cmd,
-                                    VkBLASOperation_t transA,
-                                    VkBLASOperation_t transB,
-                                    int32_t          m,
-                                    int32_t          n,
-                                    int32_t          k,
-                                    const float*     alpha,
-                                    VkBuffer         A,
-                                    int32_t          lda,
-                                    VkBuffer         B,
-                                    int32_t          ldb,
-                                    const float*     beta,
-                                    VkBuffer         C,
-                                    int32_t          ldc,
-                                    VkBuffer         D,
-                                    int32_t          ldd,
-                                    uint32_t         strideA,
-                                    uint32_t         strideB,
-                                    uint32_t         strideC,
-                                    uint32_t         strideD,
-                                    int32_t          batchCount,
-                                    VkBool32         is_strided)
+/* Fill alpha/beta push-constant scalars for the data type.
+   - f32: stored directly in pc.alpha/pc.beta.
+   - f16: converted to f32 (exact) and stored in pc.alpha/pc.beta.
+   - f64: raw double bits packed into the 8-byte slots at offsets 12..19
+     (pc.alpha/pc.beta) and 76..83 (pc._pad2/pc._pad3); the f64 shader
+     recombines them with packDouble2x32. */
+static void vkblas_fill_scalars(uint32_t dtype, vkblas_push_constants_t* pc,
+                                const void* alpha, const void* beta)
+{
+    pc->beta_is_zero = 0;
+
+    switch (dtype) {
+    case VKBLAS_DTYPE_F64: {
+        double av = (alpha != NULL) ? *(const double*)alpha : 1.0;
+        double bv = (beta  != NULL) ? *(const double*)beta  : 0.0;
+        memcpy(&pc->alpha, &av, sizeof(av));   /* offsets 12..19 */
+        memcpy(&pc->_pad2, &bv, sizeof(bv));   /* offsets 76..83 */
+        if (bv == 0.0)
+            pc->beta_is_zero = 1;
+        break;
+    }
+    case VKBLAS_DTYPE_F16: {
+        float av = (alpha != NULL)
+            ? vkblas_f16_to_f32(*(const uint16_t*)alpha) : 1.0f;
+        float bv = (beta != NULL)
+            ? vkblas_f16_to_f32(*(const uint16_t*)beta) : 0.0f;
+        pc->alpha = av;
+        pc->beta  = bv;
+        if (bv == 0.0f)
+            pc->beta_is_zero = 1;
+        break;
+    }
+    default: /* f32 */
+        pc->alpha = (alpha != NULL) ? *(const float*)alpha : 1.0f;
+        pc->beta  = (beta  != NULL) ? *(const float*)beta  : 0.0f;
+        if (pc->beta == 0.0f)
+            pc->beta_is_zero = 1;
+        break;
+    }
+}
+
+/* Shared dispatch for every GEMM family member. alpha/beta are opaque
+   pointers whose element type follows `dtype`. */
+static VkResult vkblas_gemm_common(VkBLASContext*  ctx,
+                                   VkCommandBuffer  cmd,
+                                   VkBLASOperation_t transA,
+                                   VkBLASOperation_t transB,
+                                   int32_t          m,
+                                   int32_t          n,
+                                   int32_t          k,
+                                   uint32_t         dtype,
+                                   const void*      alpha,
+                                   VkBuffer         A,
+                                   int32_t          lda,
+                                   VkBuffer         B,
+                                   int32_t          ldb,
+                                   const void*      beta,
+                                   VkBuffer         C,
+                                   int32_t          ldc,
+                                   VkBuffer         D,
+                                   int32_t          ldd,
+                                   uint32_t         strideA,
+                                   uint32_t         strideB,
+                                   uint32_t         strideC,
+                                   uint32_t         strideD,
+                                   int32_t          batchCount,
+                                   VkBool32         is_strided)
 {
     /* Ensure pipeline exists */
     uint32_t tA = (transA == VKBLAS_OP_N) ? 0 : 1;
     uint32_t tB = (transB == VKBLAS_OP_N) ? 0 : 1;
 
     VkPipeline pipeline = VK_NULL_HANDLE;
-    VkResult r = vkblas_ensure_pipeline(ctx, VKBLAS_DTYPE_F32, tA, tB, is_strided,
+    VkResult r = vkblas_ensure_pipeline(ctx, dtype, tA, tB, is_strided,
                                         &pipeline);
     if (r != VK_SUCCESS)
         return r;
@@ -562,15 +696,13 @@ static VkResult vkblas_sgemm_common(VkBLASContext*  ctx,
     pc.m = (uint32_t)m;
     pc.n = (uint32_t)n;
     pc.k = (uint32_t)k;
-    pc.alpha = (alpha != NULL) ? *alpha : 1.0f;
-    pc.beta = (beta != NULL) ? *beta : 0.0f;
+    vkblas_fill_scalars(dtype, &pc, alpha, beta);
     pc.lda = (uint32_t)lda;
     pc.ldb = (uint32_t)ldb;
     pc.ldc = (uint32_t)ldc;
     pc.ldd = (uint32_t)ldd;
     pc.transA = (int32_t)tA;
     pc.transB = (int32_t)tB;
-    pc.beta_is_zero = (pc.beta == 0.0f) ? 1 : 0;
     pc.strideA = strideA;
     pc.strideB = strideB;
     pc.strideC = strideC;
@@ -611,10 +743,11 @@ VkResult vkblas_sgemm(VkBLASContext*  context,
     if (m <= 0 || n <= 0 || k <= 0)
         return VK_SUCCESS;  /* no-op for zero-dim matrices */
 
-    return vkblas_sgemm_common(context, cmd, transA, transB,
-                               m, n, k, alpha, A, lda, B, ldb,
-                               beta, C, ldc, D, ldd,
-                               0, 0, 0, 0, 1, VK_FALSE);
+    return vkblas_gemm_common(context, cmd, transA, transB,
+                              m, n, k, VKBLAS_DTYPE_F32,
+                              (const void*)alpha, A, lda, B, ldb,
+                              (const void*)beta, C, ldc, D, ldd,
+                              0, 0, 0, 0, 1, VK_FALSE);
 }
 
 VkResult vkblas_sgemm_strided_batched(VkBLASContext*    context,
@@ -651,12 +784,13 @@ VkResult vkblas_sgemm_strided_batched(VkBLASContext*    context,
     uint32_t elem_strideC = (uint32_t)(strideC / sizeof(float));
     uint32_t elem_strideD = (uint32_t)(strideD / sizeof(float));
 
-    return vkblas_sgemm_common(context, cmd, transA, transB,
-                               m, n, k, alpha, A, lda, B, ldb,
-                               beta, C, ldc, D, ldd,
-                               elem_strideA, elem_strideB,
-                               elem_strideC, elem_strideD,
-                               batchCount, VK_TRUE);
+    return vkblas_gemm_common(context, cmd, transA, transB,
+                              m, n, k, VKBLAS_DTYPE_F32,
+                              (const void*)alpha, A, lda, B, ldb,
+                              (const void*)beta, C, ldc, D, ldd,
+                              elem_strideA, elem_strideB,
+                              elem_strideC, elem_strideD,
+                              batchCount, VK_TRUE);
 }
 
 VkResult vkblas_sgemm_batched(VkBLASContext*    context,
@@ -693,20 +827,21 @@ VkResult vkblas_sgemm_batched(VkBLASContext*    context,
         VkBuffer bufC = (C && C[b].buffer != VK_NULL_HANDLE) ? C[b].buffer : A->buffer;
         VkBuffer bufD = (D[b].buffer != VK_NULL_HANDLE) ? D[b].buffer : A->buffer;
 
-        VkResult r = vkblas_sgemm_common(context, cmd, transA, transB,
-                                         m, n, k, alpha,
-                                         bufA, lda, bufB, ldb,
-                                         beta, bufC, ldc, bufD, ldd,
-                                         0, 0, 0, 0, 1, VK_FALSE);
+        VkResult r = vkblas_gemm_common(context, cmd, transA, transB,
+                                        m, n, k, VKBLAS_DTYPE_F32,
+                                        (const void*)alpha,
+                                        bufA, lda, bufB, ldb,
+                                        (const void*)beta, bufC, ldc, bufD, ldd,
+                                        0, 0, 0, 0, 1, VK_FALSE);
         if (r != VK_SUCCESS) return r;
     }
     return VK_SUCCESS;
 }
 
-/* ── Non-f32 GEMM variants ────────────────────────────────────────────────── *
- * Only the f32 (sgemm) shader tier exists so far. The remaining public GEMM
- * family members are defined here so the public API surface links, but they
- * return VK_ERROR_FEATURE_NOT_PRESENT until their shaders are written.
+/* ── Non-f32 GEMM variants ───────────────────────────────────────────────── *
+ * dgemm (f64) and hgemm (f16) use the same dispatch machinery as sgemm with
+ * a dtype selector. bgemm (bf16) remains FEATURE_NOT_PRESENT until a bf16
+ * shader is added.
  * ─────────────────────────────────────────────────────────────────────────── */
 
 VkResult vkblas_dgemm(VkBLASContext* context, VkCommandBuffer cmd,
@@ -715,10 +850,16 @@ VkResult vkblas_dgemm(VkBLASContext* context, VkCommandBuffer cmd,
                       VkBuffer A, int32_t lda, VkBuffer B, int32_t ldb,
                       const double* beta, VkBuffer C, int32_t ldc,
                       VkBuffer D, int32_t ldd) {
-    (void)context; (void)cmd; (void)transA; (void)transB; (void)m; (void)n;
-    (void)k; (void)alpha; (void)A; (void)lda; (void)B; (void)ldb;
-    (void)beta; (void)C; (void)ldc; (void)D; (void)ldd;
-    return VK_ERROR_FEATURE_NOT_PRESENT;
+    if (!context || !cmd || !A || !B || !D || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m <= 0 || n <= 0 || k <= 0)
+        return VK_SUCCESS;
+
+    return vkblas_gemm_common(context, cmd, transA, transB,
+                              m, n, k, VKBLAS_DTYPE_F64,
+                              (const void*)alpha, A, lda, B, ldb,
+                              (const void*)beta, C, ldc, D, ldd,
+                              0, 0, 0, 0, 1, VK_FALSE);
 }
 
 VkResult vkblas_dgemm_strided_batched(VkBLASContext* context, VkCommandBuffer cmd,
@@ -728,10 +869,23 @@ VkResult vkblas_dgemm_strided_batched(VkBLASContext* context, VkCommandBuffer cm
                                       VkBuffer B, int32_t ldb, int64_t strideB,
                                       const double* beta, VkBuffer C, int32_t ldc, int64_t strideC,
                                       VkBuffer D, int32_t ldd, int64_t strideD, int32_t batchCount) {
-    (void)context; (void)cmd; (void)transA; (void)transB; (void)m; (void)n; (void)k;
-    (void)alpha; (void)A; (void)lda; (void)strideA; (void)B; (void)ldb; (void)strideB;
-    (void)beta; (void)C; (void)ldc; (void)strideC; (void)D; (void)ldd; (void)strideD; (void)batchCount;
-    return VK_ERROR_FEATURE_NOT_PRESENT;
+    if (!context || !cmd || !A || !B || !D || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m <= 0 || n <= 0 || k <= 0 || batchCount <= 0)
+        return VK_SUCCESS;
+
+    uint32_t elem_strideA = (uint32_t)(strideA / sizeof(double));
+    uint32_t elem_strideB = (uint32_t)(strideB / sizeof(double));
+    uint32_t elem_strideC = (uint32_t)(strideC / sizeof(double));
+    uint32_t elem_strideD = (uint32_t)(strideD / sizeof(double));
+
+    return vkblas_gemm_common(context, cmd, transA, transB,
+                              m, n, k, VKBLAS_DTYPE_F64,
+                              (const void*)alpha, A, lda, B, ldb,
+                              (const void*)beta, C, ldc, D, ldd,
+                              elem_strideA, elem_strideB,
+                              elem_strideC, elem_strideD,
+                              batchCount, VK_TRUE);
 }
 
 VkResult vkblas_hgemm(VkBLASContext* context, VkCommandBuffer cmd,
@@ -740,10 +894,16 @@ VkResult vkblas_hgemm(VkBLASContext* context, VkCommandBuffer cmd,
                       VkBuffer A, int32_t lda, VkBuffer B, int32_t ldb,
                       const uint16_t* beta, VkBuffer C, int32_t ldc,
                       VkBuffer D, int32_t ldd) {
-    (void)context; (void)cmd; (void)transA; (void)transB; (void)m; (void)n;
-    (void)k; (void)alpha; (void)A; (void)lda; (void)B; (void)ldb;
-    (void)beta; (void)C; (void)ldc; (void)D; (void)ldd;
-    return VK_ERROR_FEATURE_NOT_PRESENT;
+    if (!context || !cmd || !A || !B || !D || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m <= 0 || n <= 0 || k <= 0)
+        return VK_SUCCESS;
+
+    return vkblas_gemm_common(context, cmd, transA, transB,
+                              m, n, k, VKBLAS_DTYPE_F16,
+                              (const void*)alpha, A, lda, B, ldb,
+                              (const void*)beta, C, ldc, D, ldd,
+                              0, 0, 0, 0, 1, VK_FALSE);
 }
 
 VkResult vkblas_hgemm_strided_batched(VkBLASContext* context, VkCommandBuffer cmd,
@@ -753,10 +913,23 @@ VkResult vkblas_hgemm_strided_batched(VkBLASContext* context, VkCommandBuffer cm
                                       VkBuffer B, int32_t ldb, int64_t strideB,
                                       const uint16_t* beta, VkBuffer C, int32_t ldc, int64_t strideC,
                                       VkBuffer D, int32_t ldd, int64_t strideD, int32_t batchCount) {
-    (void)context; (void)cmd; (void)transA; (void)transB; (void)m; (void)n; (void)k;
-    (void)alpha; (void)A; (void)lda; (void)strideA; (void)B; (void)ldb; (void)strideB;
-    (void)beta; (void)C; (void)ldc; (void)strideC; (void)D; (void)ldd; (void)strideD; (void)batchCount;
-    return VK_ERROR_FEATURE_NOT_PRESENT;
+    if (!context || !cmd || !A || !B || !D || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m <= 0 || n <= 0 || k <= 0 || batchCount <= 0)
+        return VK_SUCCESS;
+
+    uint32_t elem_strideA = (uint32_t)(strideA / sizeof(uint16_t));
+    uint32_t elem_strideB = (uint32_t)(strideB / sizeof(uint16_t));
+    uint32_t elem_strideC = (uint32_t)(strideC / sizeof(uint16_t));
+    uint32_t elem_strideD = (uint32_t)(strideD / sizeof(uint16_t));
+
+    return vkblas_gemm_common(context, cmd, transA, transB,
+                              m, n, k, VKBLAS_DTYPE_F16,
+                              (const void*)alpha, A, lda, B, ldb,
+                              (const void*)beta, C, ldc, D, ldd,
+                              elem_strideA, elem_strideB,
+                              elem_strideC, elem_strideD,
+                              batchCount, VK_TRUE);
 }
 
 VkResult vkblas_bgemm(VkBLASContext* context, VkCommandBuffer cmd,
@@ -768,6 +941,7 @@ VkResult vkblas_bgemm(VkBLASContext* context, VkCommandBuffer cmd,
     (void)context; (void)cmd; (void)transA; (void)transB; (void)m; (void)n;
     (void)k; (void)alpha; (void)A; (void)lda; (void)B; (void)ldb;
     (void)beta; (void)C; (void)ldc; (void)D; (void)ldd;
+    /* bf16 shader not yet implemented — see AGENTS.md fallback policy. */
     return VK_ERROR_FEATURE_NOT_PRESENT;
 }
 
@@ -781,7 +955,29 @@ VkResult vkblas_bgemm_strided_batched(VkBLASContext* context, VkCommandBuffer cm
     (void)context; (void)cmd; (void)transA; (void)transB; (void)m; (void)n; (void)k;
     (void)alpha; (void)A; (void)lda; (void)strideA; (void)B; (void)ldb; (void)strideB;
     (void)beta; (void)C; (void)ldc; (void)strideC; (void)D; (void)ldd; (void)strideD; (void)batchCount;
+    /* bf16 shader not yet implemented — see AGENTS.md fallback policy. */
     return VK_ERROR_FEATURE_NOT_PRESENT;
+}
+
+/* Map a gemm_ex compute type to a storage dtype + element size.
+   Supported: 16F -> f16 storage (accumulated in f32 by the hgemm shader),
+   32F -> f32 storage. bf16/tf32 return FEATURE_NOT_PRESENT. */
+static VkResult vkblas_gemm_ex_dtype(VkBLASComputeType_t computeType,
+                                     uint32_t* out_dtype, size_t* out_elem)
+{
+    switch (computeType) {
+    case VKBLAS_COMPUTE_32F:
+        *out_dtype = VKBLAS_DTYPE_F32;
+        *out_elem   = sizeof(float);
+        return VK_SUCCESS;
+    case VKBLAS_COMPUTE_16F:
+        /* f16 storage with f32 accumulation */
+        *out_dtype = VKBLAS_DTYPE_F16;
+        *out_elem   = sizeof(uint16_t);
+        return VK_SUCCESS;
+    default:
+        return VK_ERROR_FEATURE_NOT_PRESENT;
+    }
 }
 
 VkResult vkblas_gemm_ex(VkBLASContext* context, VkCommandBuffer cmd,
@@ -792,11 +988,30 @@ VkResult vkblas_gemm_ex(VkBLASContext* context, VkCommandBuffer cmd,
                         const void* beta, VkBuffer C, int32_t ldc, size_t strideC_element,
                         VkBuffer D, int32_t ldd, size_t strideD_element,
                         VkBLASComputeType_t computeType, VkBLASGemmFlags_t flags) {
-    (void)context; (void)cmd; (void)transA; (void)transB; (void)m; (void)n; (void)k;
-    (void)alpha; (void)A; (void)lda; (void)strideA_element; (void)B; (void)ldb; (void)strideB_element;
-    (void)beta; (void)C; (void)ldc; (void)strideC_element; (void)D; (void)ldd; (void)strideD_element;
-    (void)computeType; (void)flags;
-    return VK_ERROR_FEATURE_NOT_PRESENT;
+    if (!context || !cmd || !A || !B || !D || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m <= 0 || n <= 0 || k <= 0)
+        return VK_SUCCESS;
+    (void)flags;
+
+    uint32_t dtype = 0;
+    size_t elem = 0;
+    VkResult r = vkblas_gemm_ex_dtype(computeType, &dtype, &elem);
+    if (r != VK_SUCCESS)
+        return r;
+
+    /* strideX_element is the byte stride between elements; 0 = tightly packed.
+       Any other non-identity element stride is unsupported. */
+    if ((strideA_element != 0 && strideA_element != elem) ||
+        (strideB_element != 0 && strideB_element != elem) ||
+        (strideC_element != 0 && strideC_element != elem) ||
+        (strideD_element != 0 && strideD_element != elem))
+        return VK_ERROR_INITIALIZATION_FAILED;
+
+    return vkblas_gemm_common(context, cmd, transA, transB,
+                              m, n, k, dtype,
+                              alpha, A, lda, B, ldb, beta, C, ldc, D, ldd,
+                              0, 0, 0, 0, 1, VK_FALSE);
 }
 
 VkResult vkblas_gemm_ex_strided_batched(VkBLASContext* context, VkCommandBuffer cmd,
@@ -807,11 +1022,29 @@ VkResult vkblas_gemm_ex_strided_batched(VkBLASContext* context, VkCommandBuffer 
                                         const void* beta, VkBuffer C, int32_t ldc, int64_t strideC, size_t strideC_element,
                                         VkBuffer D, int32_t ldd, int64_t strideD, size_t strideD_element,
                                         int32_t batchCount, VkBLASComputeType_t computeType, VkBLASGemmFlags_t flags) {
-    (void)context; (void)cmd; (void)transA; (void)transB; (void)m; (void)n; (void)k;
-    (void)alpha; (void)A; (void)lda; (void)strideA; (void)strideA_element;
-    (void)B; (void)ldb; (void)strideB; (void)strideB_element;
-    (void)beta; (void)C; (void)ldc; (void)strideC; (void)strideC_element;
-    (void)D; (void)ldd; (void)strideD; (void)strideD_element;
-    (void)batchCount; (void)computeType; (void)flags;
-    return VK_ERROR_FEATURE_NOT_PRESENT;
+    if (!context || !cmd || !A || !B || !D || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m <= 0 || n <= 0 || k <= 0 || batchCount <= 0)
+        return VK_SUCCESS;
+    (void)flags;
+
+    uint32_t dtype = 0;
+    size_t elem = 0;
+    VkResult r = vkblas_gemm_ex_dtype(computeType, &dtype, &elem);
+    if (r != VK_SUCCESS)
+        return r;
+
+    /* strideX is bytes between matrices; strideX_element is the element byte
+       stride (0 = tightly packed). Convert to element strides for the shader. */
+    uint32_t elem_strideA = (uint32_t)(strideA / (int64_t)(strideA_element ? strideA_element : elem));
+    uint32_t elem_strideB = (uint32_t)(strideB / (int64_t)(strideB_element ? strideB_element : elem));
+    uint32_t elem_strideC = (uint32_t)(strideC / (int64_t)(strideC_element ? strideC_element : elem));
+    uint32_t elem_strideD = (uint32_t)(strideD / (int64_t)(strideD_element ? strideD_element : elem));
+
+    return vkblas_gemm_common(context, cmd, transA, transB,
+                              m, n, k, dtype,
+                              alpha, A, lda, B, ldb, beta, C, ldc, D, ldd,
+                              elem_strideA, elem_strideB,
+                              elem_strideC, elem_strideD,
+                              batchCount, VK_TRUE);
 }

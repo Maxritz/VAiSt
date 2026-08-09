@@ -72,19 +72,20 @@ VAiSt
 
 ### VKBLAS (implemented)
 
-The first component to reach production readiness. Implements the full
-hipBLAS GEMM family:
+Mirrors the hipBLAS/rocBLAS GEMM family. Pipeline selection happens
+automatically based on GPU capabilities:
 
 | Function | Precision | Description |
 |----------|-----------|-------------|
 | `vkblas_sgemm` | f32 | Single GEMM |
-| `vkblas_sgemm_strided_batched` | f32 | Strided batched GEMM |
+| `vkblas_hgemm` | f16 (f32 accumulate) | Single GEMM |
+| `vkblas_dgemm` | f64 | Single GEMM |
+| `vkblas_s/h/dgemm_strided_batched` | f32/f16/f64 | Strided batched GEMM |
+| `vkblas_gemm_ex` | f16/f32 | Mixed-precision with compute-type control |
 | `vkblas_sgemm_batched` | f32 | Per-buffer batched GEMM |
-| `vkblas_sgemm_ex` | mixed | Ex dispatch with compute-type control |
 
 API mirrors `hipblasSgemm` parameter order exactly — porting from HIP is a
-mechanical find-and-replace. Pipeline selection happens automatically based on
-GPU capabilities:
+mechanical find-and-replace:
 
 ```c
 VkBLASContext* ctx;
@@ -94,6 +95,28 @@ vkblas_sgemm(ctx, cmd, VKBLAS_OP_N, VKBLAS_OP_N,
              m, n, k, &alpha, bufA, lda, bufB, ldb,
              &beta, bufC, ldc, bufD, ldd);
 ```
+
+> **Note:** the coopmatrix tier currently uses the correct shared-memory
+> fallback. A real `GL_KHR_cooperative_matrix` (coopMatMulAddKHR) path was
+> written and compiles, but the AMD 26.7.1 driver crashes inside
+> `vkCreateComputePipelines` on RDNA2, so the fallback is retained until the
+> driver is fixed. `vkblas_bgemm` (bf16) remains a
+> `VK_ERROR_FEATURE_NOT_PRESENT` stub.
+
+### VKBLAS L1/L2 (implemented)
+
+rocBLAS-style Level-1/Level-2 vector/matrix ops (companion library that
+reuses `VkBLASContext`):
+
+| Function | Precision | Description |
+|----------|-----------|-------------|
+| `vkblas_l1_axpy` | f32/f16 | `y = alpha*x + y` |
+| `vkblas_l1_scal` | f32/f16 | `x = alpha*x` |
+| `vkblas_l1_dot` | f32/f16 | dot product → result[0] |
+| `vkblas_l1_nrm2` | f32 | Euclidean norm |
+| `vkblas_l1_asum` | f32 | Sum of absolute values |
+| `vkblas_l1_amax` | f32 | Index of max |x| (0-based) |
+| `vkblas_l2_gemv` | f32/f16 | `y = alpha*op(A)*x + beta*y` (N and T) |
 
 ### VKMath (implemented)
 
@@ -118,7 +141,7 @@ available, otherwise a context-owned descriptor pool.
 
 ### VKQuant (implemented)
 
-Block dequantization of quantized LLM weights to f32, using the same
+Block dequantization of quantized weights to f32, using the same
 context/pipeline-cache pattern as VKMath.
 
 | Function | Description |
@@ -128,32 +151,51 @@ context/pipeline-cache pattern as VKMath.
 
 ### VKRAND (implemented)
 
-Stateless counter-based PRNG using the Philox4x32-10 algorithm, verified
-against the Random123 known-answer vectors.
+Stateless counter-based PRNGs verified against the Random123 known-answer
+vectors.
 
 | Function | Description |
 |----------|-------------|
-| `vkrand_uniform_f32` | `count` uniform floats in [0,1) from a `(seed, count)` pair |
+| `vkrand_uniform_f32` | `count` uniform floats in [0,1) (Philox4x32-10) |
+| `vkrand_threefry_uniform_f32` | `count` uniform floats in [0,1) (ThreeFry2x32-20) |
+| `vkrand_normal_f32` | `count` N(0,1) samples (Philox + Box-Muller) |
+| `vkrand_uniform_uint32` | `count` raw uint32 (Philox counter words) |
 
 ### VKFFT (implemented)
 
-1D forward radix-2 complex FFT (f32, interleaved Re/Im), n = power of two
-≤ 256, shared-memory Cooley-Tukey, plan-based API.
+1D radix-2 complex FFT, plan-based API, interleaved Re/Im buffers.
+n = power of two ≤ 1024.
 
 | Function | Description |
 |----------|-------------|
 | `vkfft_create_plan` / `vkfft_destroy_plan` | Create/destroy an FFT plan for size n |
-| `vkfft_execute_f32` | Forward FFT of `2n` floats (interleaved complex) |
+| `vkfft_execute_f32` / `vkfft_execute_inverse_f32` | Forward / inverse FFT (f32) |
+| `vkfft_execute_f16` / `vkfft_execute_inverse_f16` | Forward / inverse FFT (f16 I/O, f32 compute) |
+
+### VKRuntime (implemented)
+
+The hipRuntime-equivalent base layer every library sits on. Vulkan-native.
+
+| Function | Description |
+|----------|-------------|
+| `vkr_create_runtime` / `vkr_destroy_runtime` | Device/queue wrapper + capability detection |
+| `vkr_malloc` / `vkr_free` | Pooled buffer allocator (hipMalloc-equivalent) |
+| `vkr_upload` / `vkr_download` | Staging upload/download with sync |
+| `vkr_create_command_pool` / `vkr_create_descriptor_pool` | Pool helpers |
+| `vkr_get_arch_index` / `vkr_get_arch_name` / `vkr_has_subgroup` / `vkr_has_coop_matrix` | Capability queries |
 
 ### In Progress
 
-The following components are scaffolded but not yet implemented:
-
-- **VKBLAS non-f32 GEMMs** — f16/bf16/f64/int8 GEMM shaders (public API
-  stubs return `VK_ERROR_FEATURE_NOT_PRESENT` until the shaders land)
-- **LLM engine integration** — Transformer layer pipeline, KV caching,
-  token sampling (rms_norm, attn_*, ffn_*, lm_head shaders per
-  `specs/SHADER-INVENTORY.md`)
+- **VKBLAS bf16 GEMM** — `vkblas_bgemm` still returns
+  `VK_ERROR_FEATURE_NOT_PRESENT` until the bf16 shader lands.
+- **Real cooperative-matrix GEMM** — blocked by the AMD 26.7.1 driver crash
+  on `coopMatMulAddKHR`; shared-memory fallback is active.
+- **VKFFT 2D** — separable row+column FFT not yet implemented.
+- **VKQuant advanced formats** — Q4_K, Q6_K, IQ4_XS and forward
+  quantization not yet implemented.
+- **Refactor the five per-library contexts onto VKRuntime** — the libs still
+  embed their own context/capability/pipeline-cache copies; adopting
+  VKRuntime is a follow-up.
 
 ---
 

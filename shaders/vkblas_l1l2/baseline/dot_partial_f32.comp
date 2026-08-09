@@ -1,0 +1,60 @@
+#version 450
+
+// BLAS Level 1 dot (stage 1, partial reduction): result[g] = sum_i x[i]*y[i]
+// n = pc.n, incx = pc.lda, incy = pc.ldb (element strides).
+// One workgroup per 256-element segment; workgroup g writes one partial to
+// result[g].  Result buffer must hold ceil(n/256) floats (stage 2 reduces).
+// binding 0 = x (read),  binding 1 = y (read),  binding 3 = partials (write).
+
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    float alpha;
+    float beta;
+    uint  lda;
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  _pad2;
+    uint  _pad3;
+} pc;
+
+layout(set = 0, binding = 0) restrict readonly buffer BufX { float x[]; };
+layout(set = 0, binding = 1) restrict readonly buffer BufY { float y[]; };
+layout(set = 0, binding = 3) writeonly          buffer BufOut { float data[]; };
+
+shared float sdata[256];
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint g = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    uint idx = g * 256u + tid;
+
+    float acc = 0.0;
+    if (idx < pc.n) {
+        acc = x[idx * pc.lda] * y[idx * pc.ldb];
+    }
+
+    sdata[tid] = acc;
+    barrier();
+
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) { sdata[tid] += sdata[tid + s]; }
+        barrier();
+    }
+
+    if (tid == 0u) { data[g] = sdata[0]; }
+}

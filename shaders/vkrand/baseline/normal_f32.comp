@@ -1,0 +1,72 @@
+#version 450
+
+// Normal N(0,1) distribution from Philox4x32-10 uniform draws via Box-Muller.
+// Stateless: thread i derives two consecutive uniform draws from the global
+// invocation index and the caller seed (counters 2*i and 2*i+1), then maps
+//   u0, u1 ~ U(0,1)   ->   z = sqrt(-2 ln(u0)) * cos(2*pi*u1) ~ N(0,1)
+// u0 is clamped away from 0 so -2*ln(u0) stays finite (no inf output).
+// Deterministic: same (seed, count) -> identical output bits.
+
+layout(push_constant) uniform PC {
+    uint count;
+    uint seed;
+    uint _pad0;
+    uint _pad1;
+} pc;
+
+layout(set = 0, binding = 2) writeonly buffer BufOut { float data_out[]; };
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#define PHILOX_M0 0xD2511F53u
+#define PHILOX_M1 0xCD9E8D57u
+#define PHILOX_W0 0x9E3779B9u
+#define PHILOX_W1 0xBB67AE85u
+
+// Murmur3 finalizer (fmix32) — must match the CPU reference exactly.
+uint philox_seed_hash(uint s) {
+    s ^= s >> 16;
+    s *= 0x85EBCA6Bu;
+    s ^= s >> 13;
+    s *= 0xC2B2AE35u;
+    s ^= s >> 16;
+    return s;
+}
+
+// One Philox4x32 round. c = 4 counter words, k = 2 key words.
+void philox_round(inout uvec4 c, in uvec2 k) {
+    uint hi0, lo0, hi1, lo1;
+    umulExtended(c.x, PHILOX_M0, hi0, lo0);
+    umulExtended(c.z, PHILOX_M1, hi1, lo1);
+    c.x = hi1 ^ c.y ^ k.x;
+    c.y = lo1;
+    c.z = hi0 ^ c.w ^ k.y;
+    c.w = lo0;
+}
+
+// One uniform f32 in [0,1) from the Philox counter at position ctr.
+float uniform_from_counter(uint ctr) {
+    uvec4 c = uvec4(ctr, philox_seed_hash(pc.seed), PHILOX_W0, PHILOX_W1);
+    uvec2 k = uvec2(pc.seed, PHILOX_W0 ^ pc.seed);
+    for (int r = 0; r < 10; r++) {
+        philox_round(c, k);
+        k.x += PHILOX_W0;
+        k.y += PHILOX_W1;
+    }
+    return float(c.x & 0xFFFFFFu) / 16777216.0f;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.count) { return; }
+
+    float u0 = uniform_from_counter(2u * idx);
+    float u1 = uniform_from_counter(2u * idx + 1u);
+
+    // Guard against ln(0) -> inf. 1e-30 keeps -2*ln(u0) finite (~138 max).
+    if (u0 < 1.0e-30) u0 = 1.0e-30;
+
+    float radius = sqrt(-2.0 * log(u0));
+    float theta = 6.28318530717958647692 * u1;
+    data_out[idx] = radius * cos(theta);
+}

@@ -1,0 +1,77 @@
+#version 450
+
+// BLAS Level 1 amax (stage 1, partial reduction):
+//   partial[2g]   = global index of max |x| within segment g
+//   partial[2g+1] = value of max |x| within segment g (float bits)
+// n = pc.n, incx = pc.lda (element stride).  Result index is 0-based.
+// Ties resolve to the lowest index (strictly-greater comparison).
+// Result buffer must hold 2*ceil(n/256) uint32s (stage 2 reduces).
+// binding 0 = x (read),  binding 3 = partial pairs (write, uint).
+
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    float alpha;
+    float beta;
+    uint  lda;
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  _pad2;
+    uint  _pad3;
+} pc;
+
+layout(set = 0, binding = 0) restrict readonly buffer BufX { float x[]; };
+layout(set = 0, binding = 3) writeonly          buffer BufOut { uint data[]; };
+
+shared uint  s_idx[256];
+shared float s_val[256];
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint g = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    uint idx = g * 256u + tid;
+
+    float best = -1.0e30;
+    uint  best_idx = 0u;
+    if (idx < pc.n) {
+        best = abs(x[idx * pc.lda]);
+        best_idx = idx;
+    }
+
+    s_idx[tid] = best_idx;
+    s_val[tid] = best;
+    barrier();
+
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) {
+            uint o = tid + s;
+            /* Larger value wins; on a tie the LOWER index wins (BLAS iamax
+               returns the first occurrence of the maximum). */
+            if (s_val[o] > s_val[tid] ||
+                (s_val[o] == s_val[tid] && s_idx[o] < s_idx[tid])) {
+                s_val[tid] = s_val[o];
+                s_idx[tid] = s_idx[o];
+            }
+        }
+        barrier();
+    }
+
+    if (tid == 0u) {
+        data[2u * g]     = s_idx[0];
+        data[2u * g + 1u] = floatBitsToUint(s_val[0]);
+    }
+}
