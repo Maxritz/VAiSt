@@ -67,7 +67,18 @@ typedef char vkquant_pc_static_assert[sizeof(vkquant_push_constants_t) == 16 ? 1
 #define VKQUANT_KERNEL_Q4K_QUANT      30
 #define VKQUANT_KERNEL_Q5K_QUANT      31
 #define VKQUANT_KERNEL_Q6K_QUANT      32
-#define VKQUANT_KERNEL_COUNT          33
+#define VKQUANT_KERNEL_IQ1S_QUANT     33
+#define VKQUANT_KERNEL_IQ1M_QUANT     34
+#define VKQUANT_KERNEL_IQ2XXS_QUANT   35
+#define VKQUANT_KERNEL_IQ2XS_QUANT    36
+#define VKQUANT_KERNEL_IQ2S_QUANT     37
+#define VKQUANT_KERNEL_IQ3XXS_QUANT   38
+#define VKQUANT_KERNEL_IQ3S_QUANT     39
+#define VKQUANT_KERNEL_IQ4NL_QUANT    40
+#define VKQUANT_KERNEL_IQ4XS_QUANT    41
+#define VKQUANT_KERNEL_TQ1_0_QUANT    42
+#define VKQUANT_KERNEL_TQ2_0_QUANT    43
+#define VKQUANT_KERNEL_COUNT          44
 
 /* ── Capability tiers ──────────────────────────────────────────────────── */
 

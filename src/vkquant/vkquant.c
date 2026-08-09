@@ -68,6 +68,18 @@ static const shader_blob_t s_shader_table[] = {
     {VKQUANT_KERNEL_Q4K_QUANT,    VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_quantize_q4k_f32, vkquant_spv_baseline_quantize_q4k_f32_size},
     {VKQUANT_KERNEL_Q5K_QUANT,    VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_quantize_q5k_f32, vkquant_spv_baseline_quantize_q5k_f32_size},
     {VKQUANT_KERNEL_Q6K_QUANT,    VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_quantize_q6k_f32, vkquant_spv_baseline_quantize_q6k_f32_size},
+    /* IQ / TQ forward quant */
+    {VKQUANT_KERNEL_IQ1S_QUANT,   VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_quantize_iq1_s_f32, vkquant_spv_baseline_quantize_iq1_s_f32_size},
+    {VKQUANT_KERNEL_IQ1M_QUANT,   VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_quantize_iq1_m_f32, vkquant_spv_baseline_quantize_iq1_m_f32_size},
+    {VKQUANT_KERNEL_IQ2XXS_QUANT, VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_quantize_iq2_xxs_f32, vkquant_spv_baseline_quantize_iq2_xxs_f32_size},
+    {VKQUANT_KERNEL_IQ2XS_QUANT,  VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_quantize_iq2_xs_f32, vkquant_spv_baseline_quantize_iq2_xs_f32_size},
+    {VKQUANT_KERNEL_IQ2S_QUANT,   VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_quantize_iq2_s_f32, vkquant_spv_baseline_quantize_iq2_s_f32_size},
+    {VKQUANT_KERNEL_IQ3XXS_QUANT, VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_quantize_iq3_xxs_f32, vkquant_spv_baseline_quantize_iq3_xxs_f32_size},
+    {VKQUANT_KERNEL_IQ3S_QUANT,   VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_quantize_iq3_s_f32, vkquant_spv_baseline_quantize_iq3_s_f32_size},
+    {VKQUANT_KERNEL_IQ4NL_QUANT,  VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_quantize_iq4_nl_f32, vkquant_spv_baseline_quantize_iq4_nl_f32_size},
+    {VKQUANT_KERNEL_IQ4XS_QUANT,  VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_quantize_iq4xs_f32, vkquant_spv_baseline_quantize_iq4xs_f32_size},
+    {VKQUANT_KERNEL_TQ1_0_QUANT,  VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_quantize_tq1_0_f32, vkquant_spv_baseline_quantize_tq1_0_f32_size},
+    {VKQUANT_KERNEL_TQ2_0_QUANT,  VKQUANT_DTYPE_F32, VKQUANT_TIER_BASELINE, vkquant_spv_baseline_quantize_tq2_0_f32, vkquant_spv_baseline_quantize_tq2_0_f32_size},
 };
 #define SHADER_TABLE_COUNT (sizeof(s_shader_table) / sizeof(s_shader_table[0]))
 
@@ -737,4 +749,68 @@ VkResult vkquant_quantize_q4_0_f32(VkQuantContext *ctx, VkCommandBuffer cmd,
     return vkquant_cmd_dispatch(ctx, cmd, VKQUANT_KERNEL_Q4_0_QUANT,
         &pc, (num_blocks + 7u) / 8u,
         input, output);
+}
+
+/* ── Public API: IQ / TQ forward quantization (f32 -> block) ─────────────
+ * All IQ/TQ super-blocks are 256 elements (IQ4_NL is 32), one block per
+ * workgroup.  These quantizers perform a direct exhaustive grid search over
+ * the same dequant grid tables (embedded as GLSL const arrays) that the
+ * matching dequant shaders use, so the stored grid indices round-trip
+ * through the existing dequant ops.  This replaces the ggml runtime
+ * kmap/neighbours optimisation with the equivalent (exact) codebook search.
+ * Each op records one dispatch with dispatch groups = num_blocks. */
+
+VkResult vkquant_quantize_iq1_s_f32(VkQuantContext *ctx, VkCommandBuffer cmd,
+                                    uint32_t num_blocks, VkBuffer input, VkBuffer output) {
+    return vkquant_quantize_one(ctx, cmd, num_blocks, VKQUANT_KERNEL_IQ1S_QUANT, input, output);
+}
+
+VkResult vkquant_quantize_iq1_m_f32(VkQuantContext *ctx, VkCommandBuffer cmd,
+                                    uint32_t num_blocks, VkBuffer input, VkBuffer output) {
+    return vkquant_quantize_one(ctx, cmd, num_blocks, VKQUANT_KERNEL_IQ1M_QUANT, input, output);
+}
+
+VkResult vkquant_quantize_iq2_xxs_f32(VkQuantContext *ctx, VkCommandBuffer cmd,
+                                      uint32_t num_blocks, VkBuffer input, VkBuffer output) {
+    return vkquant_quantize_one(ctx, cmd, num_blocks, VKQUANT_KERNEL_IQ2XXS_QUANT, input, output);
+}
+
+VkResult vkquant_quantize_iq2_xs_f32(VkQuantContext *ctx, VkCommandBuffer cmd,
+                                     uint32_t num_blocks, VkBuffer input, VkBuffer output) {
+    return vkquant_quantize_one(ctx, cmd, num_blocks, VKQUANT_KERNEL_IQ2XS_QUANT, input, output);
+}
+
+VkResult vkquant_quantize_iq2_s_f32(VkQuantContext *ctx, VkCommandBuffer cmd,
+                                    uint32_t num_blocks, VkBuffer input, VkBuffer output) {
+    return vkquant_quantize_one(ctx, cmd, num_blocks, VKQUANT_KERNEL_IQ2S_QUANT, input, output);
+}
+
+VkResult vkquant_quantize_iq3_xxs_f32(VkQuantContext *ctx, VkCommandBuffer cmd,
+                                      uint32_t num_blocks, VkBuffer input, VkBuffer output) {
+    return vkquant_quantize_one(ctx, cmd, num_blocks, VKQUANT_KERNEL_IQ3XXS_QUANT, input, output);
+}
+
+VkResult vkquant_quantize_iq3_s_f32(VkQuantContext *ctx, VkCommandBuffer cmd,
+                                    uint32_t num_blocks, VkBuffer input, VkBuffer output) {
+    return vkquant_quantize_one(ctx, cmd, num_blocks, VKQUANT_KERNEL_IQ3S_QUANT, input, output);
+}
+
+VkResult vkquant_quantize_iq4_nl_f32(VkQuantContext *ctx, VkCommandBuffer cmd,
+                                     uint32_t num_blocks, VkBuffer input, VkBuffer output) {
+    return vkquant_quantize_one(ctx, cmd, num_blocks, VKQUANT_KERNEL_IQ4NL_QUANT, input, output);
+}
+
+VkResult vkquant_quantize_iq4xs_f32(VkQuantContext *ctx, VkCommandBuffer cmd,
+                                    uint32_t num_blocks, VkBuffer input, VkBuffer output) {
+    return vkquant_quantize_one(ctx, cmd, num_blocks, VKQUANT_KERNEL_IQ4XS_QUANT, input, output);
+}
+
+VkResult vkquant_quantize_tq1_0_f32(VkQuantContext *ctx, VkCommandBuffer cmd,
+                                    uint32_t num_blocks, VkBuffer input, VkBuffer output) {
+    return vkquant_quantize_one(ctx, cmd, num_blocks, VKQUANT_KERNEL_TQ1_0_QUANT, input, output);
+}
+
+VkResult vkquant_quantize_tq2_0_f32(VkQuantContext *ctx, VkCommandBuffer cmd,
+                                    uint32_t num_blocks, VkBuffer input, VkBuffer output) {
+    return vkquant_quantize_one(ctx, cmd, num_blocks, VKQUANT_KERNEL_TQ2_0_QUANT, input, output);
 }

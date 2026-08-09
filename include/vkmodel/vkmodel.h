@@ -1,13 +1,13 @@
 /**
  * \file vkmodel.h
- * \brief Vulkan-native GGUF model loader (parse + tensor upload).
+ * \brief Vulkan-native GGUF / safetensors model loader (parse + tensor upload).
  *
  * VKModel is the model-loading entry point of the Vulkan AI stack. It parses
- * a GGUF model file (metadata key-value pairs + tensor infos) on the host and
- * uploads every tensor's raw bytes into a device buffer through vkruntime
- * (vkr_malloc + vkr_upload). The result is a ready-to-use model object: host
- * metadata lookups plus a per-tensor VkBuffer holding the exact quantized
- * bytes straight from the file.
+ * a GGUF or safetensors model file (metadata key-value pairs + tensor infos)
+ * on the host and uploads every tensor's raw bytes into a device buffer
+ * through vkruntime (vkr_malloc + vkr_upload). The result is a ready-to-use
+ * model object: host metadata lookups plus a per-tensor VkBuffer holding the
+ * exact quantized bytes straight from the file.
  *
  * The loader does NOT dequantize. Each tensor's ggml_type is reported so the
  * consumer (VKQuant) can dispatch the right dequant kernel; the device buffer
@@ -80,6 +80,42 @@ typedef struct VkModel VkModel;
  * \retval VK_ERROR_FEATURE_NOT_PRESENT Staging buffer could not be mapped.
  */
 VkResult vkmodel_load(VkRuntime* rt, const char* path, VkModel** pModel);
+
+/**
+ * \brief Parse a safetensors file and upload all tensor data to the GPU.
+ *
+ * Reads the 8-byte little-endian header length N, parses the N-byte UTF-8
+ * JSON header with a self-contained recursive-descent parser (object of
+ * tensor name -> {dtype, shape, data_offsets}, plus an optional
+ * "__metadata__" object), then uploads each tensor's bytes at absolute file
+ * offset 8 + N + data_offsets[0] verbatim into a dedicated device buffer.
+ * Upload is streamed in bounded chunks through the same model-owned command
+ * pool/buffer as the GGUF loader.
+ *
+ * Dtype support: F32/F16/BF16/F64/I8/I16/I32/I64 map to their ggml_type
+ * equivalents (0/1/30/28/24/25/26/27); U8/U16/U32/U64/BOOL/F8_E4M3/F8_E5M2
+ * are stored as opaque bytes with the ggml_type sentinel
+ * VKMODEL_DTYPE_UNKNOWN (reported by vkmodel_get_tensor_dtype() as
+ * 0xFFFFFFFF) since ggml has no 1:1 mapping for them. Tensor sizes are
+ * validated against dtype * nelems. __metadata__ string entries are exposed
+ * as metadata KVs (see vkmodel_get_kv_string()); non-string metadata values
+ * are skipped. Tensors with more than GGML_MAX_DIMS (4) dimensions are
+ * rejected. Unsupported dtypes fail the load.
+ *
+ * \param rt     Runtime providing device/queue/allocator. Its queue is
+ *               assumed to live on queue family 0.
+ * \param path   Path to the .safetensors file to load.
+ * \param pModel Receives the loaded model on success.
+ * \retval VK_SUCCESS
+ * \retval VK_ERROR_INITIALIZATION_FAILED Malformed header/JSON, unsupported
+ *         dtype, size mismatch, or unreadable file.
+ * \retval VK_ERROR_OUT_OF_HOST_MEMORY Host bookkeeping allocation failed.
+ * \retval VK_ERROR_OUT_OF_DEVICE_MEMORY Device buffer / staging allocation
+ *         failed (propagated from vkr_malloc / vkr_upload).
+ * \retval VK_ERROR_FEATURE_NOT_PRESENT Staging buffer could not be mapped.
+ */
+VkResult vkmodel_load_safetensors(VkRuntime* rt, const char* path,
+                                  VkModel** pModel);
 
 /**
  * \brief Destroy a loaded model and release every resource it owns.
@@ -170,6 +206,20 @@ const char* vkmodel_get_tensor_name(VkModel* m, uint32_t i);
  * \return ggml_type enum value, or 0 if \p i is out of range.
  */
 uint32_t vkmodel_get_tensor_dtype(VkModel* m, uint32_t i);
+
+/**
+ * \brief Return the canonical dtype name string of the i-th tensor.
+ *
+ * Safetensors-loaded tensors return their file dtype name exactly
+ * ("F32", "F16", "BF16", "U8", ...); GGUF-loaded tensors return the canonical
+ * ggml_type name ("F32", "Q4_K", ...). The returned pointer is a static string
+ * owned by the library.
+ *
+ * \param m Valid model.
+ * \param i Tensor index.
+ * \return NUL-terminated dtype name, or NULL if \p i is out of range.
+ */
+const char* vkmodel_get_tensor_dtype_name(VkModel* m, uint32_t i);
 
 /**
  * \brief Return the total element count of the i-th tensor (product of dims).

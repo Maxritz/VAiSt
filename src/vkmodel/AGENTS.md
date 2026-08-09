@@ -8,8 +8,8 @@ Child of root `AGENTS.md` and `include/vkmodel/AGENTS.md`.
 - Pure C99 `FILE*` reading through a small little-endian byte reader
   (`vkmodel_reader_t`). All multi-byte fields are assembled byte-by-byte, so
   the parser is endian-explicit and alignment-safe.
-- Header: magic `0x46554747` ("GGUF"), version 2..3 accepted (v2/v3 both use
-  u64 counts; v1 used u32 counts and is rejected), tensor_count + kv_count.
+- GGUF header: magic `0x46554747` ("GGUF"), version 2..3 accepted (v2/v3 both
+  use u64 counts; v1 used u32 counts and is rejected), tensor_count + kv_count.
 - Metadata: for each KV — key (u64 len + bytes), u32 value type, typed value.
   All 13 value types are stored as `VkModelValue` (scalars in `u64`/`f64`,
   strings as NUL-terminated copies, arrays recursive). `general.alignment`
@@ -21,6 +21,26 @@ Child of root `AGENTS.md` and `include/vkmodel/AGENTS.md`.
   re-derived from sizes/alignment).
 - Sanity caps (malformed-file guards): counts ≤ 2^20, array length ≤ 2^24,
   string length ≤ 64 MiB.
+
+### Safetensors parser (same file)
+- Header: 8-byte little-endian length N (1..64 MiB), then N bytes of UTF-8
+  JSON parsed by a self-contained recursive-descent parser
+  (`vkmodel_json_*`, ~250 lines, no external dependency). Supports objects,
+  arrays, strings (incl. `\uXXXX` + surrogate pairs → UTF-8), integers,
+  true/false/null; fractions/exponents consumed but truncated.
+- Root object: each non-`__metadata__` member is a tensor
+  {`dtype`, `shape`, `data_offsets`}; `__metadata__` string entries become
+  `VkModelKV` (STRING), non-string metadata values are skipped.
+- The loader sets `m->data_offset = 8 + N` and `t->offset = data_offsets[0]`
+  so the **shared** GGUF streamed-upload path (`vkmodel_upload_tensor`)
+  locates bytes verbatim with no changes. Tensor size = `end - start`, which
+  must equal `nelems × element_size` (validated).
+- Dtype map lives in `vkmodel_st_dtypes`; unknown dtypes fail the load. Shapes
+  limited to 4 dims (GGML_MAX_DIMS); dims/offsets validated for overflow.
+- JSON node children are stored as array slots inside each node's `members`
+  array (never individually malloc'd) — the free routine releases keys/strings/
+  child arrays recursively but only `free()`s the node itself (see
+  `vkmodel_json_free` / `vkmodel_json_free_children`).
 
 ### Tensor byte size
 - `size = ceil(nelems / blck_elems) * blck_bytes` from the two ggml_type
@@ -44,6 +64,18 @@ Child of root `AGENTS.md` and `include/vkmodel/AGENTS.md`.
 - Every partial state path (header parse, metadata, tensor infos, upload,
   pool/CB creation) unwinds through `vkmodel_destroy()`, so a failed load
   leaks nothing.
+
+### Safetensors upload path (reuses shared uploader)
+| Condition                                        | Expected                          | Actual |
+|--------------------------------------------------|-----------------------------------|--------|
+| data_offsets end-start == nelems × esize         | size = end-start, uploaded verbatim | ✅ |
+| data_offsets start non-32-aligned                | bytes read at 8+N+start verbatim  | ✅ |
+| end <= start or size mismatch                    | VK_ERROR_INITIALIZATION_FAILED    | ✅ |
+| unknown dtype                                   | VK_ERROR_INITIALIZATION_FAILED    | ✅ |
+| __metadata__ string value                       | exposed as VKModelKV (STRING)     | ✅ |
+| __metadata__ non-string value                   | skipped (get_kv_string → NULL)    | ✅ |
+| shape > 4 dims / dim == 0 / overflow            | VK_ERROR_INITIALIZATION_FAILED    | ✅ |
+| JSON node free (children in array slots)        | keys/strings/child arrays freed once, no free() of slots | ✅ |
 
 ## Truth tables before code
 
@@ -77,12 +109,14 @@ Child of root `AGENTS.md` and `include/vkmodel/AGENTS.md`.
 | multiple chunks                             | slices written at ascending offsets | ✅   |
 | cmd reset between vkr_upload calls          | vkr_upload resets cmd itself      | ✅     |
 
-### VERDICT: parser + upload paths proven by tests/test_vkmodel.c (load,
+### VERDICT: parser + upload paths proven by tests/test_vkmodel.c (GGUF load,
 metadata, tensor info, block map, F32 download memcmp, 33-byte odd-size
-offset-verbatim download).
+offset-verbatim download; safetensors load of F32/F16 tensors + __metadata__
+KV exposure + dtype name/enum mapping + 2-tensor byte-identical download +
+non-aligned odd-offset I8 [33] verbatim download).
 
 ## Files
 | File | Purpose |
 |------|---------|
 | `vkmodel_internal.h` | Model struct, value/tensor/KV storage, constants |
-| `vkmodel.c` | Reader, parser, streamed upload, public API, type tables |
+| `vkmodel.c` | GGUF reader/parser, self-contained JSON parser, safetensors loader, streamed upload, public API, type tables |

@@ -1,0 +1,87 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// IQ4_NL forward quantizer (18 B/block, 32 elems). ggml quantize_row_iq4_nl_ref (ntry=-1 path).
+// 1 thread per 256-element block (thread 0 transliteration of the ggml ref).
+// Grid search is a direct exhaustive search over the embedded dequant grid tables
+// (in dequant units), replacing ggml's runtime kmap/neighbours optimisation.
+
+layout(push_constant) uniform PC {
+    uint num_blocks;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn {
+    float x[];
+};
+layout(scalar, set = 0, binding = 2) writeonly buffer BufOut {
+    uint8_t obytes[];
+};
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+int nearest_int(float fval) {
+    return int(round(fval));
+}
+
+
+const int iq4nl[16] = int[](-127, -104, -83, -65, -49, -35, -22, -10,
+                              1,   13,  25,  38,  53,  69,  89, 113);
+
+int best_index_int8(int n, int val[16], float xx) {
+    if (xx <= float(val[0])) return 0;
+    if (xx >= float(val[n-1])) return n-1;
+    int ml = 0, mu = n-1;
+    while (mu-ml > 1) {
+        int mav = (ml+mu)/2;
+        if (xx < float(val[mav])) mu = mav; else ml = mav;
+    }
+    return (xx - float(val[mu-1]) < float(val[mu]) - xx) ? mu-1 : mu;
+}
+
+void main_body(uint gblk) {
+    uint base_in = gblk * 32u;
+    uint base_out = gblk * 18u;
+
+    float amax = 0.0f, mx = 0.0f;
+    for (uint i = 0u; i < 32u; ++i) {
+        float v = x[base_in + i];
+        float a = abs(v);
+        if (a > amax) { amax = a; mx = v; }
+    }
+
+    int L[32];
+    if (amax < 1e-15f) {
+        for (uint i = 0u; i < 32u; ++i) L[i] = 0;
+    } else {
+        float d0 = mx / float(iq4nl[0]);
+        float id = (d0 != 0.0f) ? (1.0f / d0) : 0.0f;
+        for (uint i = 0u; i < 32u; ++i) {
+            L[i] = best_index_int8(16, iq4nl, id * x[base_in + i]);
+        }
+    }
+    float sumqx = 0.0f, sumq2 = 0.0f;
+    for (uint i = 0u; i < 32u; ++i) {
+        float q = float(iq4nl[L[i]]);
+        float w = x[base_in + i] * x[base_in + i];
+        sumqx += w * q * x[base_in + i];
+        sumq2 += w * q * q;
+    }
+    float d = (sumq2 > 0.0f) ? (sumqx / sumq2) : 0.0f;
+
+    uint dh = packHalf2x16(vec2(d, 0.0f));
+    obytes[base_out] = uint8_t(dh & 0xFFu);
+    obytes[base_out + 1u] = uint8_t((dh >> 8u) & 0xFFu);
+    for (uint i = 0u; i < 16u; ++i) {
+        uint q0 = uint(L[i]) & 0xFu;
+        uint q1 = uint(L[i + 16]) & 0xFu;
+        obytes[base_out + 2u + i] = uint8_t(q0 | (q1 << 4u));
+    }
+}
+void main() {
+    uint gblk = gl_WorkGroupID.x;
+    if (gblk >= pc.num_blocks) { return; }
+    main_body(gblk);
+}

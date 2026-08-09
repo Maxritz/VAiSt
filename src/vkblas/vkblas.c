@@ -1008,8 +1008,9 @@ VkResult vkblas_bgemm_strided_batched(VkBLASContext* context, VkCommandBuffer cm
 }
 
 /* Map a gemm_ex compute type to a storage dtype + element size.
-   Supported: 16F -> f16 storage (accumulated in f32 by the hgemm shader),
-   32F -> f32 storage. bf16/tf32 return FEATURE_NOT_PRESENT. */
+   Supported: 32F -> f32 storage, 16F -> f16 storage (accumulated in f32 by
+   the hgemm shader), 16B -> bf16 storage (accumulated in f32 by the bgemm
+   shader). Anything else returns FEATURE_NOT_PRESENT. */
 static VkResult vkblas_gemm_ex_dtype(VkBLASComputeType_t computeType,
                                      uint32_t* out_dtype, size_t* out_elem)
 {
@@ -1021,6 +1022,13 @@ static VkResult vkblas_gemm_ex_dtype(VkBLASComputeType_t computeType,
     case VKBLAS_COMPUTE_16F:
         /* f16 storage with f32 accumulation */
         *out_dtype = VKBLAS_DTYPE_F16;
+        *out_elem   = sizeof(uint16_t);
+        return VK_SUCCESS;
+    case VKBLAS_COMPUTE_16B:
+        /* bf16 storage (2-byte uint16) with f32 accumulation; reuses the
+           bgemm shader path. The stride arithmetic in vkblas_gemm_ex divides
+           byte strides by out_elem, which is correct for the 2-byte layout. */
+        *out_dtype = VKBLAS_DTYPE_BF16;
         *out_elem   = sizeof(uint16_t);
         return VK_SUCCESS;
     default:

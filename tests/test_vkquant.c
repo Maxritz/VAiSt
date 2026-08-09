@@ -1137,6 +1137,7 @@ typedef struct {
     float (*src_fn)(uint32_t);
     VkResult (*quant_fn)(VkQuantContext *, VkCommandBuffer, uint32_t, VkBuffer, VkBuffer);
     VkResult (*dequant_fn)(VkQuantContext *, VkCommandBuffer, uint32_t, VkBuffer, VkBuffer);
+    float tolerance;
     rtop_t op;
 } qcase_t;
 
@@ -1162,15 +1163,27 @@ static dqcase_t s_dq_cases[] = {
 #define DQ_CASE_COUNT (sizeof(s_dq_cases) / sizeof(s_dq_cases[0]))
 
 static qcase_t s_q_cases[] = {
-    { "quant+q4_1_rt", 20u,  32u,  TEST_QUANT_BLOCKS,   gen_quant_src,   vkquant_quantize_q4_1_f32, vkquant_dequant_q4_1_f32, {0} },
-    { "quant+q5_0_rt", 22u,  32u,  TEST_QUANT_BLOCKS,   gen_quant_src,   vkquant_quantize_q5_0_f32, vkquant_dequant_q5_0_f32, {0} },
-    { "quant+q5_1_rt", 24u,  32u,  TEST_QUANT_BLOCKS,   gen_quant_src,   vkquant_quantize_q5_1_f32, vkquant_dequant_q5_1_f32, {0} },
-    { "quant+q8_1_rt", 36u,  32u,  TEST_QUANT_BLOCKS,   gen_quant_src,   vkquant_quantize_q8_1_f32, vkquant_dequant_q8_1_f32, {0} },
-    { "quant+q2k_rt",  84u,  256u, TEST_KQUANT_BLOCKS,  gen_quant_src_k, vkquant_quantize_q2k_f32,  vkquant_dequant_q2k_f32,  {0} },
-    { "quant+q3k_rt",  110u, 256u, TEST_KQUANT_BLOCKS,  gen_quant_src_k, vkquant_quantize_q3k_f32,  vkquant_dequant_q3k_f32,  {0} },
-    { "quant+q4k_rt",  144u, 256u, TEST_KQUANT_BLOCKS,  gen_quant_src_k, vkquant_quantize_q4k_f32,  vkquant_dequant_q4k_f32,  {0} },
-    { "quant+q5k_rt",  176u, 256u, TEST_KQUANT_BLOCKS,  gen_quant_src_k, vkquant_quantize_q5k_f32,  vkquant_dequant_q5k_f32,  {0} },
-    { "quant+q6k_rt",  210u, 256u, TEST_KQUANT_BLOCKS,  gen_quant_src_k, vkquant_quantize_q6k_f32,  vkquant_dequant_q6k_f32,  {0} },
+    { "quant+q4_1_rt", 20u,  32u,  TEST_QUANT_BLOCKS,   gen_quant_src,   vkquant_quantize_q4_1_f32, vkquant_dequant_q4_1_f32,   0.1f, {0} },
+    { "quant+q5_0_rt", 22u,  32u,  TEST_QUANT_BLOCKS,   gen_quant_src,   vkquant_quantize_q5_0_f32, vkquant_dequant_q5_0_f32,   0.1f, {0} },
+    { "quant+q5_1_rt", 24u,  32u,  TEST_QUANT_BLOCKS,   gen_quant_src,   vkquant_quantize_q5_1_f32, vkquant_dequant_q5_1_f32,   0.1f, {0} },
+    { "quant+q8_1_rt", 36u,  32u,  TEST_QUANT_BLOCKS,   gen_quant_src,   vkquant_quantize_q8_1_f32, vkquant_dequant_q8_1_f32,   0.1f, {0} },
+    { "quant+q2k_rt",  84u,  256u, TEST_KQUANT_BLOCKS,  gen_quant_src_k, vkquant_quantize_q2k_f32,  vkquant_dequant_q2k_f32,    0.1f, {0} },
+    { "quant+q3k_rt",  110u, 256u, TEST_KQUANT_BLOCKS,  gen_quant_src_k, vkquant_quantize_q3k_f32,  vkquant_dequant_q3k_f32,    0.1f, {0} },
+    { "quant+q4k_rt",  144u, 256u, TEST_KQUANT_BLOCKS,  gen_quant_src_k, vkquant_quantize_q4k_f32,  vkquant_dequant_q4k_f32,    0.1f, {0} },
+    { "quant+q5k_rt",  176u, 256u, TEST_KQUANT_BLOCKS,  gen_quant_src_k, vkquant_quantize_q5k_f32,  vkquant_dequant_q5k_f32,    0.1f, {0} },
+    { "quant+q6k_rt",  210u, 256u, TEST_KQUANT_BLOCKS,  gen_quant_src_k, vkquant_quantize_q6k_f32,  vkquant_dequant_q6k_f32,    0.1f, {0} },
+    /* IQ/TQ forward quantizers (lossy; per-format round-trip bounds) */
+    { "quant+tq1_0_rt", 54u,  256u, TEST_KQUANT_BLOCKS, gen_quant_src_k, vkquant_quantize_tq1_0_f32, vkquant_dequant_tq1_0_f32, 0.5f, {0} },
+    { "quant+tq2_0_rt", 66u,  256u, TEST_KQUANT_BLOCKS, gen_quant_src_k, vkquant_quantize_tq2_0_f32, vkquant_dequant_tq2_0_f32, 0.5f, {0} },
+    { "quant+iq4nl_rt", 18u,  32u,  TEST_QUANT_BLOCKS,  gen_quant_src,   vkquant_quantize_iq4_nl_f32, vkquant_dequant_iq4_nl_f32, 0.15f, {0} },
+    { "quant+iq4xs_rt", 136u, 256u, TEST_KQUANT_BLOCKS, gen_quant_src_k, vkquant_quantize_iq4xs_f32, vkquant_dequant_iq4xs_f32, 0.15f, {0} },
+    { "quant+iq3xxs_rt",98u,  256u, TEST_KQUANT_BLOCKS, gen_quant_src_k, vkquant_quantize_iq3_xxs_f32, vkquant_dequant_iq3_xxs_f32, 0.2f, {0} },
+    { "quant+iq3s_rt", 110u, 256u, TEST_KQUANT_BLOCKS,  gen_quant_src_k, vkquant_quantize_iq3_s_f32,  vkquant_dequant_iq3_s_f32,  0.2f, {0} },
+    { "quant+iq2xxs_rt",66u, 256u, TEST_KQUANT_BLOCKS,  gen_quant_src_k, vkquant_quantize_iq2_xxs_f32, vkquant_dequant_iq2_xxs_f32, 0.35f, {0} },
+    { "quant+iq2xs_rt", 74u, 256u, TEST_KQUANT_BLOCKS,  gen_quant_src_k, vkquant_quantize_iq2_xs_f32,  vkquant_dequant_iq2_xs_f32,  0.35f, {0} },
+    { "quant+iq2s_rt",  82u, 256u, TEST_KQUANT_BLOCKS,  gen_quant_src_k, vkquant_quantize_iq2_s_f32,   vkquant_dequant_iq2_s_f32,   0.35f, {0} },
+    { "quant+iq1s_rt",  50u, 256u, TEST_KQUANT_BLOCKS,  gen_quant_src_k, vkquant_quantize_iq1_s_f32,  vkquant_dequant_iq1_s_f32,   0.6f, {0} },
+    { "quant+iq1m_rt",  56u, 256u, TEST_KQUANT_BLOCKS,  gen_quant_src_k, vkquant_quantize_iq1_m_f32,  vkquant_dequant_iq1_m_f32,   0.6f, {0} },
 };
 #define Q_CASE_COUNT (sizeof(s_q_cases) / sizeof(s_q_cases[0]))
 
@@ -1637,7 +1650,7 @@ int main(void)
         overall_pass &= check_roundtrip(s_q_cases[i].name, h.mapped,
                                         s_q_cases[i].op.off_readback,
                                         s_q_cases[i].num_blocks * s_q_cases[i].elems_per_block,
-                                        TEST_QUANT_TOLERANCE, s_q_cases[i].src_fn);
+                                        s_q_cases[i].tolerance, s_q_cases[i].src_fn);
     }
 
 cleanup:

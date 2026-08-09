@@ -17,6 +17,19 @@
  *   4. The client sends BYE; the server thread joins and its VkResult must be
  *      VK_SUCCESS.
  *
+ * Phase 1 adds multi-connection serving + column-partitioned GEMM, all
+ * loopback in one process:
+ *
+ *   5. For each partitioned case, a serve thread runs
+ *      vkdist_server_accept_many() (N workers) then vkdist_server_serve_many()
+ *      (N pthreads, each vkdist_server_run() on one connection); the main
+ *      thread connects N clients and calls vkdist_sgemm_partitioned(), which
+ *      splits the 16x16 C columns across the workers, broadcasts A, uploads
+ *      each worker's B column strip + C strip, dispatches per-worker sgemms,
+ *      and merges the read-back strips. Cases: 2 workers ([8,8]), 3 workers
+ *      uneven ([5,5,6]), and a beta-accumulation run (alpha=1, beta=0.5, twice
+ *      into the same C). Each case is compared against the CPU reference.
+ *
  * Threading: POSIX threads (winpthreads). This MinGW-W64 build is the "posix"
  * threading model, so pthread.h is available and links with -lpthread; the same
  * source compiles unmodified on Linux. (Win32 CreateThread would also work but
@@ -306,11 +319,205 @@ static int check_output(const char *name, const float *got,
 }
 
 /* ===========================================================================
+ * Phase 1: multi-worker partitioned GEMM plumbing
+ * ========================================================================== */
+
+#define PT_M  16    /**< Rows of op(A) and C in the partitioned tests.   */
+#define PT_N  16    /**< Cols of op(B) and C in the partitioned tests.   */
+#define PT_K  16    /**< Contraction dimension in the partitioned tests. */
+#define PT_LDA PT_M  /**< Leading dimension of A (>= m).                 */
+#define PT_LDB PT_K  /**< Leading dimension of B (>= k).                 */
+#define PT_LDC PT_M  /**< Leading dimension of C (>= m).                 */
+
+#define TEST_MAX_WORKERS 4 /**< Max workers any partitioned case spawns. */
+
+typedef struct {
+    int             listen_fd;
+    VkPhysicalDevice pd;
+    VkDevice        dev;
+    VkBLASContext  *blas;
+    int             n_workers;
+    int             conn_fds[TEST_MAX_WORKERS];
+    VkResult        result;
+} serve_many_arg_t;
+
+static void *serve_many_thread_fn(void *arg)
+{
+    serve_many_arg_t *a = (serve_many_arg_t *)arg;
+    a->result = vkdist_server_accept_many(a->listen_fd,
+                                          (uint32_t)a->n_workers,
+                                          a->conn_fds);
+    if (a->result != VK_SUCCESS) {
+        printf("  server      : accept_many failed (VkResult=%d)\n",
+               (int)a->result);
+        return NULL;
+    }
+    a->result = vkdist_server_serve_many(a->pd, a->dev, a->blas, a->conn_fds,
+                                         (uint32_t)a->n_workers);
+    printf("  server      : serve_many done (VkResult=%d)\n", (int)a->result);
+    return NULL;
+}
+
+/* Client-side connection worker. vkdist_client_connect() performs the HELLO
+   handshake and blocks until the server replies, and the server cannot reply
+   until accept_many() has accepted ALL n connections — so the clients must be
+   connected concurrently (each handshake lands in the listen backlog, then
+   serve_many's threads process them all). A sequential connect loop would
+   deadlock: the first client would wait for its HELLO reply while the server
+   still waits for the remaining connections to arrive. */
+typedef struct {
+    int  port;
+    int  fd;
+} client_arg_t;
+
+static void *client_connect_fn(void *arg)
+{
+    client_arg_t *a = (client_arg_t *)arg;
+    a->fd = vkdist_client_connect("127.0.0.1", (uint16_t)a->port);
+    return NULL;
+}
+
+/* Run one partitioned-GEMM case end to end: spawn a serve thread that accepts
+   n_workers connections and serves them concurrently, connect n_workers
+   clients, run vkdist_sgemm_partitioned() `runs` times (accumulating into the
+   same host C), compare the final C against an iterated CPU reference, then
+   BYE + join. Returns 1 on pass, 0 on fail. */
+static int run_partitioned_case(VkPhysicalDevice pd, VkDevice dev,
+                                VkBLASContext *blas, const char *name,
+                                int n_workers, int runs, float alpha,
+                                float beta)
+{
+    static float A[PT_M * PT_K];
+    static float B[PT_K * PT_N];
+    static float C[PT_M * PT_N];
+    static float ref[PT_M * PT_N];
+    static float out[PT_M * PT_N];
+
+    const int32_t m = PT_M, n = PT_N, k = PT_K;
+    const uint32_t elem_count = (uint32_t)(m * n);
+
+    /* A = ones, B = ramp (16x16, column-major), C_init = ones. */
+    for (int32_t row = 0; row < m; row++)
+        for (int32_t t = 0; t < k; t++)
+            A[row + t * PT_LDA] = 1.0f;
+    for (int32_t t = 0; t < k; t++)
+        for (int32_t c = 0; c < n; c++)
+            B[t + c * PT_LDB] = (float)(1 + t + 16 * c);
+    for (uint32_t i = 0; i < elem_count; i++)
+        C[i] = 1.0f;
+
+    /* Iterative CPU reference: ref = alpha*A*B + beta*ref, `runs` times. */
+    memcpy(ref, C, elem_count * sizeof(float));
+    for (int i = 0; i < runs; i++)
+        compute_reference_f32(A, PT_LDA, B, PT_LDB, alpha, beta, ref, PT_LDC,
+                              ref, PT_LDC, m, n, k);
+
+    /* Server: accept n workers, then serve them concurrently. */
+    int listen_fd = vkdist_server_start(0, "127.0.0.1");
+    if (listen_fd < 0) {
+        printf("  %-28s : FAIL (no server socket)\n", name);
+        return 0;
+    }
+    int port = get_bound_port(listen_fd);
+    if (port <= 0) {
+        printf("  %-28s : FAIL (no bound port)\n", name);
+        vkdist_close(listen_fd);
+        return 0;
+    }
+
+    serve_many_arg_t arg;
+    arg.listen_fd = listen_fd;
+    arg.pd = pd;
+    arg.dev = dev;
+    arg.blas = blas;
+    arg.n_workers = n_workers;
+    arg.result = VK_ERROR_UNKNOWN;
+
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, serve_many_thread_fn, &arg) != 0) {
+        printf("  %-28s : FAIL (pthread_create)\n", name);
+        vkdist_close(listen_fd);
+        return 0;
+    }
+
+    /* Client: connect n_workers connections concurrently (see the note on
+       client_connect_fn for why the handshakes must overlap). */
+    pthread_t cthreads[TEST_MAX_WORKERS];
+    client_arg_t cargs[TEST_MAX_WORKERS];
+    for (int i = 0; i < n_workers; i++) {
+        cargs[i].port = port;
+        cargs[i].fd = -1;
+        pthread_create(&cthreads[i], NULL, client_connect_fn, &cargs[i]);
+    }
+    for (int i = 0; i < n_workers; i++)
+        pthread_join(cthreads[i], NULL);
+
+    int fds[TEST_MAX_WORKERS];
+    int connected = 0;
+    for (int i = 0; i < n_workers; i++) {
+        fds[i] = cargs[i].fd;
+        if (fds[i] < 0)
+            break;
+        connected++;
+    }
+    if (connected != n_workers) {
+        for (int i = 0; i < connected; i++)
+            vkdist_close(fds[i]);
+        vkdist_close(listen_fd);
+        pthread_join(thread, NULL);
+        printf("  %-28s : FAIL (client connect)\n", name);
+        return 0;
+    }
+
+    /* Report the actual column split this scheme produces. */
+    int32_t split_sum = 0;
+    printf("  %-28s : n=%d workers=%d cols=[", name, n, n_workers);
+    for (int w = 0; w < n_workers; w++) {
+        int32_t n_i = (w == n_workers - 1) ? (n - split_sum) : (n / n_workers);
+        printf("%d%s", n_i, (w + 1 < n_workers) ? "," : "");
+        split_sum += n_i;
+    }
+    printf("]\n");
+
+    /* Partitioned GEMM, `runs` times (accumulates into the same host C). */
+    int pass = 1;
+    VkResult vr = VK_SUCCESS;
+    for (int i = 0; i < runs; i++) {
+        vr = vkdist_sgemm_partitioned(n_workers, fds, m, n, k, &alpha, A,
+                                      PT_LDA, B, PT_LDB, &beta, C, PT_LDC);
+        if (vr != VK_SUCCESS) {
+            printf("  %-28s : FAIL (partitioned run %d, VkResult=%d)\n",
+                   name, i, (int)vr);
+            pass = 0;
+            break;
+        }
+    }
+
+    if (pass) {
+        memcpy(out, C, elem_count * sizeof(float));
+        pass = check_output(name, out, ref, elem_count, TEST_TOLERANCE);
+    }
+
+    /* BYE on every worker, join the serve thread, verify clean shutdown. */
+    for (int i = 0; i < n_workers; i++)
+        vkdist_close(fds[i]);
+    pthread_join(thread, NULL);
+    vkdist_close(listen_fd);
+    if (arg.result != VK_SUCCESS) {
+        printf("  %-28s : FAIL (server VkResult=%d)\n", name, (int)arg.result);
+        pass = 0;
+    }
+    return pass;
+}
+
+/* ===========================================================================
  * main
  * ========================================================================== */
 
 int main(void)
 {
+    setvbuf(stdout, NULL, _IONBF, 0); /* keep test progress visible when piped */
+
     const int32_t m = TEST_GEMM_M;
     const int32_t n = TEST_GEMM_N;
     const int32_t k = TEST_GEMM_K;
@@ -491,6 +698,18 @@ int main(void)
     } else {
         printf("  server      : clean shutdown (BYE honored)\n");
     }
+
+    /* ── 11. Phase 1: multi-worker partitioned GEMM ────────────────────── */
+    printf("  -- phase 1: partitioned GEMM across worker connections --\n");
+    overall_pass &= run_partitioned_case(pd, dev, blas,
+                                         "partitioned 2w [8,8]",
+                                         2, 1, 1.0f, 0.0f);
+    overall_pass &= run_partitioned_case(pd, dev, blas,
+                                         "partitioned 3w uneven",
+                                         3, 1, 1.0f, 0.0f);
+    overall_pass &= run_partitioned_case(pd, dev, blas,
+                                         "partitioned beta=0.5 x2",
+                                         2, 2, 1.0f, 0.5f);
 
 cleanup:
     if (blas) vkblas_destroy_context(blas);

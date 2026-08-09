@@ -630,6 +630,162 @@ VkResult vkquant_quantize_q6k_f32(VkQuantContext* ctx,
                                   VkBuffer input,
                                   VkBuffer output);
 
+/**
+ * \brief Quantize f32 data to IQ1_S blocks (ggml block_iq1_s, 50 B/block, 256 elems).
+ *
+ * Direct grid search over the iq1s grid (+ IQ1S_DELTA), replacing ggml's
+ * kmap/neighbours optimisation with an exact exhaustive codebook search.
+ * Round-trips through vkquant_dequant_iq1_s_f32().
+ *
+ * \retval VK_SUCCESS On success (recorded into cmd).
+ */
+VkResult vkquant_quantize_iq1_s_f32(VkQuantContext* ctx,
+                                    VkCommandBuffer cmd,
+                                    uint32_t num_blocks,
+                                    VkBuffer input,
+                                    VkBuffer output);
+
+/**
+ * \brief Quantize f32 data to IQ1_M blocks (ggml block_iq1_m, 56 B/block, 256 elems).
+ *
+ * Direct grid search over the iq1s grid; 3-bit per-16-block scales + shift bits.
+ * Round-trips through vkquant_dequant_iq1_m_f32().
+ *
+ * \retval VK_SUCCESS On success (recorded into cmd).
+ */
+VkResult vkquant_quantize_iq1_m_f32(VkQuantContext* ctx,
+                                    VkCommandBuffer cmd,
+                                    uint32_t num_blocks,
+                                    VkBuffer input,
+                                    VkBuffer output);
+
+/**
+ * \brief Quantize f32 data to IQ2_XXS blocks (ggml block_iq2_xxs, 66 B/block, 256 elems).
+ *
+ * Direct grid search over the iq2xxs grid; 8-bit grid indices + 7-bit signs.
+ * Round-trips through vkquant_dequant_iq2_xxs_f32().
+ *
+ * \retval VK_SUCCESS On success (recorded into cmd).
+ */
+VkResult vkquant_quantize_iq2_xxs_f32(VkQuantContext* ctx,
+                                      VkCommandBuffer cmd,
+                                      uint32_t num_blocks,
+                                      VkBuffer input,
+                                      VkBuffer output);
+
+/**
+ * \brief Quantize f32 data to IQ2_XS blocks (ggml block_iq2_xs, 74 B/block, 256 elems).
+ *
+ * Direct grid search over the iq2xs grid; 9-bit grid indices + 7-bit signs.
+ * Round-trips through vkquant_dequant_iq2_xs_f32().
+ *
+ * \retval VK_SUCCESS On success (recorded into cmd).
+ */
+VkResult vkquant_quantize_iq2_xs_f32(VkQuantContext* ctx,
+                                     VkCommandBuffer cmd,
+                                     uint32_t num_blocks,
+                                     VkBuffer input,
+                                     VkBuffer output);
+
+/**
+ * \brief Quantize f32 data to IQ2_S blocks (ggml block_iq2_s, 82 B/block, 256 elems).
+ *
+ * Direct grid search over the iq2s grid; 10-bit grid indices + full 8-bit signs.
+ * Round-trips through vkquant_dequant_iq2_s_f32().
+ *
+ * \retval VK_SUCCESS On success (recorded into cmd).
+ */
+VkResult vkquant_quantize_iq2_s_f32(VkQuantContext* ctx,
+                                    VkCommandBuffer cmd,
+                                    uint32_t num_blocks,
+                                    VkBuffer input,
+                                    VkBuffer output);
+
+/**
+ * \brief Quantize f32 data to IQ3_XXS blocks (ggml block_iq3_xxs, 98 B/block, 256 elems).
+ *
+ * Direct grid search over the iq3xxs grid; 8-bit grid indices + 7-bit signs.
+ * Round-trips through vkquant_dequant_iq3_xxs_f32().
+ *
+ * \retval VK_SUCCESS On success (recorded into cmd).
+ */
+VkResult vkquant_quantize_iq3_xxs_f32(VkQuantContext* ctx,
+                                      VkCommandBuffer cmd,
+                                      uint32_t num_blocks,
+                                      VkBuffer input,
+                                      VkBuffer output);
+
+/**
+ * \brief Quantize f32 data to IQ3_S blocks (ggml block_iq3_s, 110 B/block, 256 elems).
+ *
+ * Direct grid search over the iq3s grid; 9-bit grid indices + full 8-bit signs.
+ * Round-trips through vkquant_dequant_iq3_s_f32().
+ *
+ * \retval VK_SUCCESS On success (recorded into cmd).
+ */
+VkResult vkquant_quantize_iq3_s_f32(VkQuantContext* ctx,
+                                    VkCommandBuffer cmd,
+                                    uint32_t num_blocks,
+                                    VkBuffer input,
+                                    VkBuffer output);
+
+/**
+ * \brief Quantize f32 data to IQ4_NL blocks (ggml block_iq4_nl, 18 B/block, 32 elems).
+ *
+ * kvalues_iq4nl best-index search (ggml quantize_row_iq4_nl_ref, ntry=-1 path).
+ * Round-trips through vkquant_dequant_iq4_nl_f32().
+ *
+ * \retval VK_SUCCESS On success (recorded into cmd).
+ */
+VkResult vkquant_quantize_iq4_nl_f32(VkQuantContext* ctx,
+                                     VkCommandBuffer cmd,
+                                     uint32_t num_blocks,
+                                     VkBuffer input,
+                                     VkBuffer output);
+
+/**
+ * \brief Quantize f32 data to IQ4_XS blocks (ggml block_iq4_xs, 136 B/block, 256 elems).
+ *
+ * kvalues_iq4nl best-index search + per-32-group scale (ggml
+ * quantize_row_iq4_xs_ref, ntry=7 path). Round-trips through
+ * vkquant_dequant_iq4xs_f32().
+ *
+ * \retval VK_SUCCESS On success (recorded into cmd).
+ */
+VkResult vkquant_quantize_iq4xs_f32(VkQuantContext* ctx,
+                                    VkCommandBuffer cmd,
+                                    uint32_t num_blocks,
+                                    VkBuffer input,
+                                    VkBuffer output);
+
+/**
+ * \brief Quantize f32 data to TQ1_0 blocks (ggml block_tq1_0, 54 B/block, 256 elems).
+ *
+ * Ternary 5-in-1 byte grouping (ggml quantize_row_tq1_0_ref).
+ * Round-trips through vkquant_dequant_tq1_0_f32().
+ *
+ * \retval VK_SUCCESS On success (recorded into cmd).
+ */
+VkResult vkquant_quantize_tq1_0_f32(VkQuantContext* ctx,
+                                    VkCommandBuffer cmd,
+                                    uint32_t num_blocks,
+                                    VkBuffer input,
+                                    VkBuffer output);
+
+/**
+ * \brief Quantize f32 data to TQ2_0 blocks (ggml block_tq2_0, 66 B/block, 256 elems).
+ *
+ * Ternary 2-bits-per-element (ggml quantize_row_tq2_0_ref).
+ * Round-trips through vkquant_dequant_tq2_0_f32().
+ *
+ * \retval VK_SUCCESS On success (recorded into cmd).
+ */
+VkResult vkquant_quantize_tq2_0_f32(VkQuantContext* ctx,
+                                    VkCommandBuffer cmd,
+                                    uint32_t num_blocks,
+                                    VkBuffer input,
+                                    VkBuffer output);
+
 /* ===========================================================================
  * Utility
  * ========================================================================== */

@@ -4,10 +4,13 @@
  *        Vulkan AI stack.
  *
  * vkdist lets one machine offload compute to another PC's Vulkan card over a
- * network. Phase 0 (this file) is a loopback-vertical slice: a TCP server
- * hosts one Vulkan device, and a client connects over the network, registers
- * buffers by opaque u64 handle, uploads host data, remotely executes
- * vkblas_sgemm() on the server device, and reads results back.
+ * network. Phase 0 is a loopback-vertical slice: a TCP server hosts one Vulkan
+ * device, and a client connects over the network, registers buffers by opaque
+ * u64 handle, uploads host data, remotely executes vkblas_sgemm() on the
+ * server device, and reads results back. Phase 1 adds multi-connection
+ * serving (vkdist_server_accept_many / vkdist_server_serve_many) and a
+ * client-side column-partitioned GEMM (vkdist_sgemm_partitioned) that splits
+ * the output columns across workers and merges the partial results.
  *
  * All handles are file descriptors (ints) returned by the connect/accept
  * functions; all remote buffers are opaque uint64_t handles allocated on the
@@ -88,6 +91,59 @@ int vkdist_server_accept(int listen_fd);
  */
 VkResult vkdist_server_run(VkPhysicalDevice pd, VkDevice dev,
                            VkBLASContext *blas, int conn_fd);
+
+/**
+ * \brief Accept exactly \p n connections on a listen socket (blocking).
+ *
+ * Reuses vkdist_server_accept() \p n times and stores each connected socket
+ * descriptor in \p conn_fds[0..n). On error, any descriptors already accepted
+ * are closed internally and VK_ERROR_UNKNOWN is returned.
+ *
+ * \param listen_fd Descriptor returned by vkdist_server_start().
+ * \param n         Number of connections to accept (must be > 0).
+ * \param conn_fds  Array of at least \p n ints, filled with the accepted
+ *                  descriptors.
+ * \retval VK_SUCCESS
+ * \retval VK_ERROR_INITIALIZATION_FAILED Invalid argument.
+ * \retval VK_ERROR_UNKNOWN accept() failed before all \p n connected.
+ */
+VkResult vkdist_server_accept_many(int listen_fd, uint32_t n, int *conn_fds);
+
+/**
+ * \brief Serve \p n established connections concurrently, one thread each.
+ *
+ * Convenience wrapper for a multi-worker server: spawns \p n POSIX threads
+ * (pthread_create) that each run vkdist_server_run() on one of \p conn_fds
+ * until that connection sends BYE or disconnects. Each connection gets its own
+ * transient VkRuntime, command pool/buffer/fence, and remote-buffer table
+ * (vkdist_server_run already owns all of these per call), so the sessions are
+ * fully independent except for the caller-owned \p blas.
+ *
+ * The shared VkBLASContext is NOT thread-safe (lazy pipeline cache + descriptor
+ * pool), so serve_many internally serializes the vkblas_sgemm dispatches with a
+ * mutex. Queue submits and per-connection command buffers are safe to use
+ * concurrently, so upload/download/dispatch of different connections overlap;
+ * only the context-mutating part of a GEMM dispatch is serialized. Callers that
+ * also use vkdist_server_run() directly on the same \p blas must serialize
+ * those calls themselves.
+ *
+ * This function requires POSIX threads: on this MinGW-W64 "posix" build it is
+ * winpthreads, linked with -lpthread (the same source compiles unchanged on
+ * Linux). The caller must have already accepted the connections (e.g. via
+ * vkdist_server_accept_many()).
+ *
+ * \param pd        Physical device backing \p dev.
+ * \param dev       Logical device the remote buffers and dispatches use.
+ * \param blas      VkBLASContext bound to \p dev (shared; serialized here).
+ * \param conn_fds  Array of \p n connected sockets to serve.
+ * \param n         Number of connections/threads.
+ * \retval VK_SUCCESS Every session ended cleanly (BYE or peer close).
+ * \retval VK_ERROR_INITIALIZATION_FAILED Invalid argument or pthread failure.
+ * \retval other    First VkResult error returned by any worker session.
+ */
+VkResult vkdist_server_serve_many(VkPhysicalDevice pd, VkDevice dev,
+                                  VkBLASContext *blas, const int *conn_fds,
+                                  uint32_t n);
 
 /* ===========================================================================
  * Client
@@ -180,6 +236,51 @@ VkResult vkdist_sgemm(int fd, int32_t m, int32_t n, int32_t k,
  */
 VkResult vkdist_readback(int fd, uint64_t handle, VkDeviceSize offset,
                          VkDeviceSize size, void *host);
+
+/**
+ * \brief Column-partitioned f32 GEMM across \p n_workers connections.
+ *
+ * Splits the C matrix (m x n) into contiguous column strips across
+ * \p n_workers workers: worker i computes C_i (m x n_i) = alpha * A * B_i +
+ * beta * C_i where B_i is the k x n_i column strip B[:, n_start:n_start+n_i)
+ * and the strips are merged back into the host C buffer. The split is
+ * n_i = n / n_workers for every worker except the last, which receives the
+ * remainder (n - n_start), so uneven splits (e.g. n=16, 3 workers -> 5/5/6)
+ * are supported.
+ *
+ * Per worker the function: registers A_i (m x k), B_i (k x n_i, sized to the
+ * strip's ldb span), C_i (m x n_i, sized to the ldc span); uploads A in full,
+ * the B column strip (B is column-major so the strip is one contiguous block
+ * starting at B + n_start*ldb), and the current C strip (so the beta term
+ * reads the caller's data — required for accumulating runs); dispatches
+ * vkdist_sgemm with the strip's n = n_i and the original ldb/ldc strides; and
+ * reads C_i back into C + n_start*ldc. All matrices are column-major. On
+ * failure the first error is returned (buffers registered earlier on that
+ * connection stay until the connection closes).
+ *
+ * \param n_workers Number of worker connections (must be > 0).
+ * \param fds       Array of \p n_workers connected sockets.
+ * \param m         Rows of op(A) and C.
+ * \param n         Cols of op(B) and C.
+ * \param k         Contraction dimension.
+ * \param alpha     Host pointer to the alpha scalar.
+ * \param A         Host A buffer (m x k, lda stride).
+ * \param lda       Leading dimension of A (>= m).
+ * \param B         Host B buffer (k x n, ldb stride).
+ * \param ldb       Leading dimension of B (>= k).
+ * \param beta      Host pointer to the beta scalar.
+ * \param C         Host C buffer (m x n, ldc stride); read for beta, then
+ *                  overwritten with the merged result.
+ * \param ldc       Leading dimension of C (>= m).
+ * \retval VK_SUCCESS
+ * \retval VK_ERROR_INITIALIZATION_FAILED Invalid argument.
+ * \retval VK_ERROR_UNKNOWN Transport/protocol error on any worker.
+ */
+VkResult vkdist_sgemm_partitioned(int n_workers, const int *fds,
+                                  int32_t m, int32_t n, int32_t k,
+                                  const float *alpha, const float *A,
+                                  int32_t lda, const float *B, int32_t ldb,
+                                  const float *beta, float *C, int32_t ldc);
 
 /**
  * \brief Close a vkdist connection.

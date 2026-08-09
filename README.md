@@ -203,15 +203,16 @@ inline Vulkan code.
 
 ### VKModel (implemented)
 
-GGUF model loader — parses gguf metadata + tensor infos and uploads every
-tensor's raw bytes into device buffers via VKRuntime, as ready-to-use
+GGUF + safetensors model loader — parses metadata + tensor infos and uploads
+every tensor's raw bytes into device buffers via VKRuntime, as ready-to-use
 components.
 
 | Function | Description |
 |----------|-------------|
 | `vkmodel_load` / `vkmodel_destroy` | Load/free a GGUF model (all metadata value types, streamed tensor upload) |
+| `vkmodel_load_safetensors` | Load a safetensors model (self-contained JSON header parser, `__metadata__` KV exposure, verbatim offsets) |
 | `vkmodel_get_kv_count/_key/_string` | Host-side metadata access |
-| `vkmodel_get_tensor_count/_name/_dtype/_nelems/_buffer/_size` | Tensor info + device buffer access |
+| `vkmodel_get_tensor_count/_name/_dtype/_dtype_name/_nelems/_buffer/_size` | Tensor info + device buffer access |
 | `vkmodel_block_elems` | ggml_type → elements-per-block |
 
 ### VKKV (implemented)
@@ -252,7 +253,7 @@ in `specs/VKDIST-DESIGN.md`.
 - **VKDist Phase 1+** — multi-PC over IP, distributed GEMM partition across
   workers, attention/KV sharding, TLS + discovery (roadmap in
   `specs/VKDIST-DESIGN.md`).
-- **VKModel safetensors** — only GGUF is supported so far.
+- **VKModel F16→F32 / GGML quantized in-place conversion** — loader stores raw bytes verbatim.
 - **IQ/TQ forward quantization** — dequant-only (their quantizers are
   search/heuristic-based).
 

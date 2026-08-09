@@ -55,7 +55,21 @@ Binding 0 = quantized input (bytes), binding 2 = dequantized output (f32).
   workgroup of 1 thread (thread 0 transliteration of quantize_row_*_ref).
 - K-quants (ggml scale-selection math): Q2_K, Q3_K, Q4_K, Q5_K, Q6_K — one
   256-elem block per workgroup of 1 thread. Round-trips through the matching
-  dequant. IQ/TQ formats are dequant-only (their quantizers are search-based).
+  dequant.
+- IQ/TQ forward quantizers (all GPU, one 256-elem block per workgroup of 1
+  thread; IQ4_NL uses 32-elem blocks): TQ1_0, TQ2_0 and IQ4_NL, IQ4_XS are
+  direct transliterations of quantize_row_tq{1,2}_0_ref /
+  quantize_row_iq4_{nl,xs}_ref (kvalues_iq4nl best-index search). The grid
+  formats IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S transliterate
+  the ggml quantize_row_*_ref scale-selection search but replace ggml's
+  runtime-generated kmap/neighbours tables with a DIRECT exhaustive search
+  over the same dequant grid tables (embedded as GLSL const arrays), searching
+  in dequant units (q = grid_byte/DIV) so the chosen grid indices round-trip
+  exactly through the existing dequant shaders. Each grid-search shader runs a
+  scale search (is-loop) plus a final requantize of grid indices against the
+  quantized block scale (db), matching ggml's structure. All round-trip
+  through the matching dequant; the test harness asserts per-format max-abs
+  error bounds (see tests/test_vkquant.c).
 
 ## Kernel ids
 
@@ -68,6 +82,7 @@ Binding 0 = quantized input (bytes), binding 2 = dequantized output (f32).
 | dequant q2k/q3k/q5k/iq1_s/iq1_m/iq2_xs/iq2_s/iq2_xxs/iq3_s/iq3_xxs/tq1_0/tq2_0 | 11..13, 15..23 | `num_blocks` |
 | quantize q4_1/q5_0/q5_1/q8_1 | 24..27 | `num_blocks` (1 block/wg) |
 | quantize q2k/q3k/q4k/q5k/q6k | 28..32 | `num_blocks` (1 block/wg) |
+| quantize iq1_s/iq1_m/iq2_xxs/iq2_xs/iq2_s/iq3_xxs/iq3_s/iq4_nl/iq4xs/tq1_0/tq2_0 | 33..43 | `num_blocks` (1 block/wg) |
 
 ## Files
 

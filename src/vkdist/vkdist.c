@@ -14,6 +14,18 @@
  *    REGISTER_BUFFER / UPLOAD / DISPATCH_GEMM / READBACK until BYE. Every
  *    stage (upload/dispatch/readback) is separated by a full host-side wait,
  *    so no pipeline barriers are required (see spec section 5.3).
+ *  - Phase 1 multi-connection: vkdist_server_accept_many() accepts N clients
+ *    and vkdist_server_serve_many() serves them concurrently, one POSIX
+ *    pthread per connection, each running the same per-connection loop. The
+ *    VkBLASContext is shared and not thread-safe (lazy pipeline cache +
+ *    descriptor pool), so serve_many serializes the vkblas_sgemm dispatch with
+ *    a mutex; everything else (per-connection runtime, command buffer, buffer
+ *    table, queue submits) is already independent per connection.
+ *  - Phase 1 client: vkdist_sgemm_partitioned() splits C's columns across
+ *    worker connections (n_i = n/n_workers, last takes the remainder),
+ *    registers/uploads A + the B column strip + the current C strip per
+ *    worker, dispatches an sgemm per worker, and merges the read-back strips
+ *    into the host C buffer.
  *  - Client: fd-based request/reply helpers on top of the same framing.
  */
 
@@ -35,6 +47,12 @@
 #include <unistd.h>
 #include <errno.h>
 #endif
+
+/* POSIX threads for vkdist_server_serve_many. On Windows winsock2.h is
+   included above (before anything that might pull in windows.h), and this
+   MinGW-W64 build uses the "posix" threading model, so winpthreads' pthread.h
+   is available and links with -lpthread. */
+#include <pthread.h>
 
 /* ===========================================================================
  * Socket abstraction
@@ -294,10 +312,20 @@ static VkResult vkdist_server_dispatch(vkdist_server_state_t *st, int32_t m,
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
     vr = vkBeginCommandBuffer(st->cmd, &begin);
-    if (vr == VK_SUCCESS)
+    if (vr == VK_SUCCESS) {
+        /* The VkBLASContext is shared across connections in serve_many and is
+           not thread-safe (lazy pipeline cache + descriptor pool). Take the
+           caller-provided lock around the context-mutating call; each
+           connection's command buffer and queue submits stay independent. */
+        pthread_mutex_t *lock = (pthread_mutex_t *)st->blas_lock;
+        if (lock != NULL)
+            pthread_mutex_lock(lock);
         vr = vkblas_sgemm(st->blas, st->cmd, VKBLAS_OP_N, VKBLAS_OP_N,
                           m, n, k, &alpha, A, lda, B, ldb, &beta, C, ldc,
                           C, ldc);
+        if (lock != NULL)
+            pthread_mutex_unlock(lock);
+    }
     if (vr == VK_SUCCESS)
         vr = vkEndCommandBuffer(st->cmd);
 
@@ -386,8 +414,11 @@ int vkdist_server_accept(int listen_fd)
     return (int)c;
 }
 
-VkResult vkdist_server_run(VkPhysicalDevice pd, VkDevice dev,
-                           VkBLASContext *blas, int conn_fd)
+/* Single-connection serve loop. blas_lock may be NULL (no serialization) or a
+   pthread_mutex_t* shared by serve_many worker threads. */
+static VkResult vkdist_server_run_ex(VkPhysicalDevice pd, VkDevice dev,
+                                     VkBLASContext *blas, int conn_fd,
+                                     void *blas_lock)
 {
     if (dev == VK_NULL_HANDLE || blas == NULL || conn_fd < 0)
         return VK_ERROR_INITIALIZATION_FAILED;
@@ -400,6 +431,7 @@ VkResult vkdist_server_run(VkPhysicalDevice pd, VkDevice dev,
     st.pd = pd;
     st.dev = dev;
     st.blas = blas;
+    st.blas_lock = blas_lock;
     st.next_handle = 1;
 
     /* Setup: queue (family 0), transient runtime, command pool/buffer/fence. */
@@ -649,6 +681,109 @@ out_socket:
     return result;
 }
 
+VkResult vkdist_server_run(VkPhysicalDevice pd, VkDevice dev,
+                           VkBLASContext *blas, int conn_fd)
+{
+    return vkdist_server_run_ex(pd, dev, blas, conn_fd, NULL);
+}
+
+VkResult vkdist_server_accept_many(int listen_fd, uint32_t n, int *conn_fds)
+{
+    if (conn_fds == NULL || n == 0)
+        return VK_ERROR_INITIALIZATION_FAILED;
+
+    for (uint32_t i = 0; i < n; i++) {
+        int c = vkdist_server_accept(listen_fd);
+        if (c < 0) {
+            /* Roll back: close everything accepted so far. */
+            for (uint32_t j = 0; j < i; j++)
+                vkdist_sock_close((vkdist_sock_t)conn_fds[j]);
+            return VK_ERROR_UNKNOWN;
+        }
+        conn_fds[i] = c;
+    }
+    return VK_SUCCESS;
+}
+
+/* ── serve_many: one pthread per connection, each running vkdist_server_run.
+   Per-connection state (runtime, command pool/buffer/fence, buffer table) is
+   created inside run_ex, so sessions are independent; only the shared
+   VkBLASContext needs the mutex, which run_ex takes around vkblas_sgemm. ── */
+
+typedef struct {
+    VkPhysicalDevice pd;
+    VkDevice         dev;
+    VkBLASContext   *blas;
+    int              conn_fd;
+    pthread_mutex_t *blas_lock;
+    VkResult         result;
+} vkdist_serve_thread_arg_t;
+
+static void *vkdist_serve_thread_fn(void *arg)
+{
+    vkdist_serve_thread_arg_t *a = (vkdist_serve_thread_arg_t *)arg;
+    a->result = vkdist_server_run_ex(a->pd, a->dev, a->blas, a->conn_fd,
+                                     a->blas_lock);
+    return NULL;
+}
+
+VkResult vkdist_server_serve_many(VkPhysicalDevice pd, VkDevice dev,
+                                  VkBLASContext *blas, const int *conn_fds,
+                                  uint32_t n)
+{
+    if (conn_fds == NULL || blas == NULL || n == 0)
+        return VK_ERROR_INITIALIZATION_FAILED;
+
+    pthread_mutex_t blas_lock;
+    if (pthread_mutex_init(&blas_lock, NULL) != 0)
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+    vkdist_serve_thread_arg_t *args =
+        (vkdist_serve_thread_arg_t *)malloc(n * sizeof(*args));
+    pthread_t *threads = (pthread_t *)malloc(n * sizeof(*threads));
+    if (args == NULL || threads == NULL) {
+        free(args);
+        free(threads);
+        pthread_mutex_destroy(&blas_lock);
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+
+    VkResult result = VK_SUCCESS;
+
+    for (uint32_t i = 0; i < n; i++) {
+        args[i].pd = pd;
+        args[i].dev = dev;
+        args[i].blas = blas;
+        args[i].conn_fd = conn_fds[i];
+        args[i].blas_lock = &blas_lock;
+        args[i].result = VK_ERROR_UNKNOWN;
+        if (pthread_create(&threads[i], NULL, vkdist_serve_thread_fn,
+                           &args[i]) != 0) {
+            result = VK_ERROR_OUT_OF_HOST_MEMORY;
+            /* Close the sessions that were never started; join what did. */
+            for (uint32_t j = i; j < n; j++)
+                vkdist_sock_close((vkdist_sock_t)conn_fds[j]);
+            for (uint32_t j = 0; j < i; j++)
+                pthread_join(threads[j], NULL);
+            free(args);
+            free(threads);
+            pthread_mutex_destroy(&blas_lock);
+            return result;
+        }
+    }
+
+    for (uint32_t i = 0; i < n; i++) {
+        pthread_join(threads[i], NULL);
+        if (args[i].result != VK_SUCCESS && result == VK_SUCCESS)
+            result = args[i].result;
+    }
+
+    free(args);
+    free(threads);
+    pthread_mutex_destroy(&blas_lock);
+    return result;
+}
+
 /* ===========================================================================
  * Client helpers
  * ========================================================================== */
@@ -870,6 +1005,74 @@ VkResult vkdist_readback(int fd, uint64_t handle, VkDeviceSize offset,
     }
     free(reply);
     return (VkResult)result;
+}
+
+VkResult vkdist_sgemm_partitioned(int n_workers, const int *fds,
+                                  int32_t m, int32_t n, int32_t k,
+                                  const float *alpha, const float *A,
+                                  int32_t lda, const float *B, int32_t ldb,
+                                  const float *beta, float *C, int32_t ldc)
+{
+    if (fds == NULL || n_workers <= 0 || m <= 0 || n <= 0 || k <= 0)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (alpha == NULL || beta == NULL || A == NULL || B == NULL || C == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+
+    VkResult result = VK_SUCCESS;
+    int32_t n_start = 0;
+
+    for (int32_t w = 0; w < n_workers; w++) {
+        /* Column strip: n_i = n/n_workers for every worker but the last, which
+           takes the remainder so the split always covers all n columns. */
+        int32_t n_i = (w == n_workers - 1) ? (n - n_start) : (n / n_workers);
+        if (n_i <= 0)
+            continue;
+        int fd = fds[w];
+
+        /* Per-strip byte spans. B and C are column-major with ldb/ldc strides,
+           so a column strip is one contiguous block starting at n_start*ldb /
+           n_start*ldc; the span extends to the last column's k/m-th element.
+           A is the full m x k matrix (span to column k-1, row m-1). */
+        const uint64_t szA =
+            (uint64_t)(((int64_t)(k - 1) * lda + m) * (int64_t)sizeof(float));
+        const uint64_t szB =
+            (uint64_t)(((int64_t)(n_i - 1) * ldb + k) * (int64_t)sizeof(float));
+        const uint64_t szC =
+            (uint64_t)(((int64_t)(n_i - 1) * ldc + m) * (int64_t)sizeof(float));
+        const char *stripB =
+            (const char *)B + (size_t)n_start * (size_t)ldb * sizeof(float);
+        char *stripC =
+            (char *)C + (size_t)n_start * (size_t)ldc * sizeof(float);
+
+        uint64_t hA = 0, hB = 0, hC = 0;
+        VkResult vr = vkdist_register_buffer(fd, szA, &hA);
+        if (vr == VK_SUCCESS)
+            vr = vkdist_register_buffer(fd, szB, &hB);
+        if (vr == VK_SUCCESS)
+            vr = vkdist_register_buffer(fd, szC, &hC);
+        if (vr == VK_SUCCESS)
+            vr = vkdist_upload(fd, hA, A, 0, szA);
+        if (vr == VK_SUCCESS)
+            vr = vkdist_upload(fd, hB, stripB, 0, szB);
+        if (vr == VK_SUCCESS)
+            /* Upload the current C strip so the beta term reads the caller's
+               data (needed for accumulating runs: C = alpha*A*B + beta*C). */
+            vr = vkdist_upload(fd, hC, stripC, 0, szC);
+        if (vr == VK_SUCCESS)
+            vr = vkdist_sgemm(fd, m, n_i, k, alpha, hA, hB, hC, beta,
+                              lda, ldb, ldc);
+        if (vr == VK_SUCCESS)
+            /* Column-major merge: the strip is contiguous in C, so copy the
+               read-back bytes directly into C + n_start*ldc. */
+            vr = vkdist_readback(fd, hC, 0, szC, stripC);
+
+        if (vr != VK_SUCCESS && result == VK_SUCCESS)
+            result = vr;
+
+        n_start += n_i;
+    }
+
+    return result;
 }
 
 void vkdist_close(int fd)

@@ -14,7 +14,11 @@
  *   (d) vkmodel_destroy() frees without error;
  *   (e) loads a second file with a 33-byte tensor (I8 [33]) to verify the
  *       loader reads tensor data at the gguf offset field verbatim through
- *       the 32-byte-aligned data region.
+ *       the 32-byte-aligned data region;
+ *   (f) loads synthetic safetensors files (F32/F16 tensors + __metadata__,
+ *       plus an odd-offset I8 [33] tensor) to verify the safetensors loader:
+ *       header-length/JSON parsing, dtype name + ggml mapping, metadata KV
+ *       exposure, and verbatim non-aligned data_offsets.
  *
  * This is a header-only test: it includes only <vulkan/vulkan.h> and the
  * public vkmodel.h header. No internal headers are pulled.
@@ -34,6 +38,8 @@
 
 #define TEST_FILE_A "test_vkmodel_a.gguf"   /**< 3-tensor synthetic model.  */
 #define TEST_FILE_B "test_vkmodel_b.gguf"   /**< Odd-size (33-byte) tensor. */
+#define TEST_FILE_SF    "test_vkmodel.safetensors"     /**< 2-tensor + metadata. */
+#define TEST_FILE_SF_ODD "test_vkmodel_odd.safetensors" /**< Non-aligned odd-size. */
 
 #define GGUF_MAGIC_LE 0x46554747u           /**< "GGUF" little-endian.      */
 #define GGUF_VERSION  3u
@@ -175,6 +181,90 @@ static void wr_pad_to(FILE* f, uint64_t align, uint64_t* pos)
     uint64_t pad = rem == 0 ? 0 : align - rem;
     for (uint64_t i = 0; i < pad; i++) fputc(0, f);
     *pos += pad;
+}
+
+static void wr_u64_le(FILE* f, uint64_t v)
+{
+    uint8_t b[8];
+    for (int i = 0; i < 8; i++) b[i] = (uint8_t)(v >> (8 * i));
+    fwrite(b, 1, 8, f);
+}
+
+static void fill_pattern(uint8_t* buf, size_t n, unsigned seed);
+
+/* ===========================================================================
+ * Synthetic safetensors writer
+ *
+ * Format: 8-byte little-endian header length N, then the N-byte JSON header,
+ * then tensor data at absolute offset 8 + N + data_offsets[0]. Tensor data
+ * offsets are relative to the start of the data region (8 + N).
+ * ========================================================================== */
+
+/**
+ * \brief Write the 2-tensor safetensors file with __metadata__.
+ *
+ *   embed_tokens.weight  F32 [8,16]  -> 512 bytes at data_offsets [0,512]
+ *   head.weight          F16 [8,8]   -> 128 bytes at data_offsets [512,640]
+ *   __metadata__.format == "pt"
+ *
+ * \retval 1 on success, 0 on write failure.
+ */
+static int write_sf_file_c(const char* path)
+{
+    static const char hdr[] =
+        "{\"embed_tokens.weight\":{\"dtype\":\"F32\",\"shape\":[8,16],"
+        "\"data_offsets\":[0,512]},"
+        "\"head.weight\":{\"dtype\":\"F16\",\"shape\":[8,8],"
+        "\"data_offsets\":[512,640]},"
+        "\"__metadata__\":{\"format\":\"pt\"}}";
+    size_t n = strlen(hdr);
+    FILE* f = fopen(path, "wb");
+    if (!f) return 0;
+
+    wr_u64_le(f, (uint64_t)n);
+    fwrite(hdr, 1, n, f);
+
+    uint8_t buf[512];
+    fill_pattern(buf, 512, 131);
+    fwrite(buf, 1, 512, f);   /* embed_tokens at 8+N+0   */
+    fill_pattern(buf, 128, 67);
+    fwrite(buf, 1, 128, f);   /* head at 8+N+512         */
+
+    fclose(f);
+    return 1;
+}
+
+/**
+ * \brief Write the odd-size safetensors file (I8 [33], non-aligned offsets).
+ *
+ *   odd.weight  I8 [33] -> 33 bytes at data_offsets [1,34]
+ *
+ * The absolute data offset 8+N+1 is deliberately not 32-aligned, and a 1-byte
+ * pad precedes the payload, so the loader must honor data_offsets[0] verbatim
+ * rather than re-deriving an aligned offset.
+ *
+ * \retval 1 on success, 0 on write failure.
+ */
+static int write_sf_file_d(const char* path)
+{
+    static const char hdr[] =
+        "{\"odd.weight\":{\"dtype\":\"I8\",\"shape\":[33],"
+        "\"data_offsets\":[1,34]}}";
+    size_t n = strlen(hdr);
+    FILE* f = fopen(path, "wb");
+    if (!f) return 0;
+
+    wr_u64_le(f, (uint64_t)n);
+    fwrite(hdr, 1, n, f);
+
+    fputc(0, f);              /* 1 pad byte before the payload              */
+
+    uint8_t buf[33];
+    fill_pattern(buf, 33, 83);
+    fwrite(buf, 1, 33, f);    /* odd at 8+N+1 (non-32-aligned)              */
+
+    fclose(f);
+    return 1;
 }
 
 static void fill_pattern(uint8_t* buf, size_t n, unsigned seed)
@@ -502,6 +592,146 @@ int main(void)
         overall_pass &= report(1, "vkmodel_destroy model B");
     }
 
+    /* ── 8.5 Safetensors loader ─────────────────────────────────────────── */
+    printf("  --- safetensors writer ---\n");
+    if (!write_sf_file_c(TEST_FILE_SF)) {
+        fprintf(stderr, "test_vkmodel: failed to write %s\n", TEST_FILE_SF);
+        overall_pass = 0;
+        goto cleanup;
+    }
+    overall_pass &= report(1, "wrote safetensors model file");
+    if (!write_sf_file_d(TEST_FILE_SF_ODD)) {
+        fprintf(stderr, "test_vkmodel: failed to write %s\n", TEST_FILE_SF_ODD);
+        overall_pass = 0;
+        goto cleanup;
+    }
+    overall_pass &= report(1, "wrote odd-offset safetensors file");
+
+    printf("  --- safetensors load + metadata ---\n");
+    r = vkmodel_load_safetensors(rt, TEST_FILE_SF, &model);
+    overall_pass &= report(r == VK_SUCCESS, "vkmodel_load_safetensors");
+
+    if (r == VK_SUCCESS) {
+        overall_pass &= report(vkmodel_get_tensor_count(model) == 2,
+                               "sf tensor_count == 2");
+        overall_pass &= report(vkmodel_get_kv_count(model) == 1,
+                               "sf kv_count == 1 (metadata)");
+        const char* fmt = vkmodel_get_kv_string(model, "format", NULL);
+        overall_pass &= report(fmt != NULL && strcmp(fmt, "pt") == 0,
+                               "__metadata__.format == pt");
+
+        overall_pass &= report(
+            vkmodel_get_tensor_name(model, 0) != NULL &&
+            strcmp(vkmodel_get_tensor_name(model, 0),
+                   "embed_tokens.weight") == 0,
+            "sf tensor 0 name == embed_tokens.weight");
+        const char* dn0 = vkmodel_get_tensor_dtype_name(model, 0);
+        overall_pass &= report(dn0 != NULL && strcmp(dn0, "F32") == 0,
+                               "sf tensor 0 dtype name == F32");
+        overall_pass &= report(vkmodel_get_tensor_dtype(model, 0) == 0,
+                               "sf tensor 0 dtype enum == F32 (0)");
+        overall_pass &= report(vkmodel_get_tensor_nelems(model, 0) == 128,
+                               "sf tensor 0 nelems == 128");
+        overall_pass &= report(vkmodel_get_tensor_size(model, 0) == 512,
+                               "sf tensor 0 size == 512");
+        overall_pass &= report(
+            vkmodel_get_tensor_buffer(model, 0) != VK_NULL_HANDLE,
+            "sf tensor 0 buffer non-null");
+
+        overall_pass &= report(
+            vkmodel_get_tensor_name(model, 1) != NULL &&
+            strcmp(vkmodel_get_tensor_name(model, 1), "head.weight") == 0,
+            "sf tensor 1 name == head.weight");
+        const char* dn1 = vkmodel_get_tensor_dtype_name(model, 1);
+        overall_pass &= report(dn1 != NULL && strcmp(dn1, "F16") == 0,
+                               "sf tensor 1 dtype name == F16");
+        overall_pass &= report(vkmodel_get_tensor_dtype(model, 1) == 1,
+                               "sf tensor 1 dtype enum == F16 (1)");
+        overall_pass &= report(vkmodel_get_tensor_nelems(model, 1) == 64,
+                               "sf tensor 1 nelems == 64");
+        overall_pass &= report(vkmodel_get_tensor_size(model, 1) == 128,
+                               "sf tensor 1 size == 128");
+
+        printf("  --- safetensors upload round-trip ---\n");
+        {
+            uint8_t ref0[512];
+            uint8_t got0[512];
+            uint8_t ref1[128];
+            uint8_t got1[128];
+            fill_pattern(ref0, 512, 131);
+            memset(got0, 0xAA, sizeof(got0));
+            fill_pattern(ref1, 128, 67);
+            memset(got1, 0xAA, sizeof(got1));
+
+            r = vkr_download(rt, harness_cmd, queue,
+                             vkmodel_get_tensor_buffer(model, 0), 0,
+                             got0, sizeof(got0));
+            overall_pass &= report(r == VK_SUCCESS, "sf download tensor 0");
+            overall_pass &= report(memcmp(ref0, got0, sizeof(got0)) == 0,
+                                   "sf tensor 0 byte-identical");
+
+            r = vkr_download(rt, harness_cmd, queue,
+                             vkmodel_get_tensor_buffer(model, 1), 0,
+                             got1, sizeof(got1));
+            overall_pass &= report(r == VK_SUCCESS, "sf download tensor 1");
+            overall_pass &= report(memcmp(ref1, got1, sizeof(got1)) == 0,
+                                   "sf tensor 1 byte-identical");
+        }
+
+        vkmodel_destroy(model);
+        model = NULL;
+        overall_pass &= report(1, "vkmodel_destroy safetensors model");
+    }
+
+    /* GGUF tensors should also expose derived dtype names */
+    if (model == NULL) {
+        r = vkmodel_load(rt, TEST_FILE_A, &model);
+        if (r == VK_SUCCESS) {
+            const char* dn = vkmodel_get_tensor_dtype_name(model, 0);
+            overall_pass &= report(dn != NULL && strcmp(dn, "F32") == 0,
+                                   "GGUF tensor dtype name derived (F32)");
+            vkmodel_destroy(model);
+            model = NULL;
+        }
+    }
+
+    printf("  --- safetensors odd-offset tensor (I8 [33]) ---\n");
+    r = vkmodel_load_safetensors(rt, TEST_FILE_SF_ODD, &model);
+    overall_pass &= report(r == VK_SUCCESS, "sf load odd-offset file");
+
+    if (r == VK_SUCCESS) {
+        overall_pass &= report(vkmodel_get_tensor_count(model) == 1,
+                               "sf odd tensor_count == 1");
+        overall_pass &= report(
+            vkmodel_get_tensor_name(model, 0) != NULL &&
+            strcmp(vkmodel_get_tensor_name(model, 0), "odd.weight") == 0,
+            "sf odd tensor name");
+        const char* dn = vkmodel_get_tensor_dtype_name(model, 0);
+        overall_pass &= report(dn != NULL && strcmp(dn, "I8") == 0,
+                               "sf odd dtype name == I8");
+        overall_pass &= report(vkmodel_get_tensor_dtype(model, 0) == 24,
+                               "sf odd dtype enum == I8 (24)");
+        overall_pass &= report(vkmodel_get_tensor_nelems(model, 0) == 33,
+                               "sf odd nelems == 33");
+        overall_pass &= report(vkmodel_get_tensor_size(model, 0) == 33,
+                               "sf odd size == 33");
+
+        uint8_t ref[33];
+        uint8_t got[33];
+        fill_pattern(ref, 33, 83);
+        memset(got, 0xAA, sizeof(got));
+        r = vkr_download(rt, harness_cmd, queue,
+                         vkmodel_get_tensor_buffer(model, 0), 0,
+                         got, sizeof(got));
+        overall_pass &= report(r == VK_SUCCESS, "sf download odd tensor");
+        overall_pass &= report(memcmp(ref, got, sizeof(got)) == 0,
+                               "sf odd byte-identical (offset verbatim)");
+
+        vkmodel_destroy(model);
+        model = NULL;
+        overall_pass &= report(1, "vkmodel_destroy odd-offset model");
+    }
+
     /* ── 9. Error path: missing file ────────────────────────────────────── */
     printf("  --- error path ---\n");
     {
@@ -515,6 +745,8 @@ cleanup:
     if (model) vkmodel_destroy(model);
     remove(TEST_FILE_A);
     remove(TEST_FILE_B);
+    remove(TEST_FILE_SF);
+    remove(TEST_FILE_SF_ODD);
     if (harness_cmd != VK_NULL_HANDLE && harness_pool != VK_NULL_HANDLE)
         vkFreeCommandBuffers(device, harness_pool, 1, &harness_cmd);
     if (harness_pool != VK_NULL_HANDLE)

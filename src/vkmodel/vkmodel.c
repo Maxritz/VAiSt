@@ -152,6 +152,36 @@ static uint64_t vkmodel_align_up(uint64_t value, uint64_t align)
     return rem == 0 ? value : value + (align - rem);
 }
 
+static char* vkmodel_strdup(const char* s)
+{
+    if (!s) return NULL;
+    size_t n = strlen(s);
+    char* d = (char*)malloc(n + 1);
+    if (!d) return NULL;
+    memcpy(d, s, n + 1);
+    return d;
+}
+
+static VkResult vkmodel_create_upload_state(VkModel* m)
+{
+    VkResult res = vkr_create_command_pool(m->rt, 0, &m->upload_pool);
+    if (res != VK_SUCCESS) return res;
+
+    VkCommandBufferAllocateInfo ai;
+    memset(&ai, 0, sizeof(ai));
+    ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.commandPool = m->upload_pool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    res = vkAllocateCommandBuffers(vkr_get_device(m->rt), &ai, &m->upload_cmd);
+    if (res != VK_SUCCESS) {
+        vkDestroyCommandPool(vkr_get_device(m->rt), m->upload_pool, NULL);
+        m->upload_pool = VK_NULL_HANDLE;
+        return res;
+    }
+    return VK_SUCCESS;
+}
+
 /* ===========================================================================
  * Little-endian file reader
  * ========================================================================== */
@@ -234,6 +264,406 @@ static VkResult vkmodel_rd_str(vkmodel_reader_t* r, char** out)
     s[len] = '\0';
     *out = s;
     return VK_SUCCESS;
+}
+
+/* ===========================================================================
+ * Minimal JSON parser (recursive descent, self-contained)
+ *
+ * Parses the safetensors header (a JSON object mapping tensor names to
+ * {dtype, shape, data_offsets} plus an optional "__metadata__" object). The
+ * parser is deliberately small: it handles objects, arrays, strings (incl.
+ * \uXXXX escapes with surrogate pairs, encoded to UTF-8), non-negative
+ * integers, and the true/false/null literals. Fractions/exponents are
+ * consumed but truncated (the loader only needs integer dims/offsets). Every
+ * node stores its values in host memory owned by the node tree, released with
+ * vkmodel_json_free(). No external dependency.
+ * ========================================================================== */
+
+typedef enum {
+    VKMODEL_JSON_OBJECT,
+    VKMODEL_JSON_ARRAY,
+    VKMODEL_JSON_STRING,
+    VKMODEL_JSON_NUMBER,
+    VKMODEL_JSON_BOOL,
+    VKMODEL_JSON_NULL
+} VkModelJsonType;
+
+typedef struct VkModelJsonNode VkModelJsonNode;
+
+struct VkModelJsonNode {
+    VkModelJsonType  type;      /**< Node kind.                              */
+    char            *key;       /**< Object member key (owned) or NULL.      */
+    char            *str;       /**< STRING: NUL-terminated decoded value.   */
+    unsigned long long num;     /**< NUMBER: integer value.                  */
+    int              boolean;   /**< BOOL: 0/1.                              */
+    size_t           count;     /**< OBJECT/ARRAY: child count.              */
+    size_t           cap;       /**< Allocated capacity of members[].        */
+    VkModelJsonNode *members;   /**< OBJECT/ARRAY: children.                 */
+};
+
+typedef struct {
+    const char *s;              /**< Header text.                            */
+    size_t      len;            /**< Header byte length.                     */
+    size_t      pos;            /**< Current cursor.                         */
+    int         failed;         /**< Parse failed flag.                      */
+} VkModelJsonParser;
+
+static void vkmodel_json_free_children(VkModelJsonNode* n)
+{
+    if (!n) return;
+    free(n->key);
+    if (n->type == VKMODEL_JSON_STRING) free(n->str);
+    if (n->type == VKMODEL_JSON_OBJECT || n->type == VKMODEL_JSON_ARRAY) {
+        for (size_t i = 0; i < n->count; i++) {
+            vkmodel_json_free_children(&n->members[i]);
+        }
+        free(n->members);
+    }
+}
+
+static void vkmodel_json_free(VkModelJsonNode* n)
+{
+    if (!n) return;
+    /* Children are stored as array slots inside n->members, never malloc'd
+     * individually, so only n itself may be free()'d here. */
+    vkmodel_json_free_children(n);
+    free(n);
+}
+
+static void vkmodel_json_skip_ws(VkModelJsonParser* p)
+{
+    while (p->pos < p->len) {
+        char c = p->s[p->pos];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') p->pos++;
+        else break;
+    }
+}
+
+static int vkmodel_json_parse_lit(VkModelJsonParser* p, const char* lit)
+{
+    size_t n = strlen(lit);
+    if (p->pos + n > p->len || strncmp(p->s + p->pos, lit, n) != 0) return 0;
+    p->pos += n;
+    return 1;
+}
+
+static int vkmodel_json_putc(VkModelJsonParser* p, char** buf, size_t* cap,
+                             size_t* len, unsigned char b)
+{
+    if (*len + 1 >= *cap) {
+        size_t ncap = *cap * 2;
+        char* nb = (char*)realloc(*buf, ncap);
+        if (!nb) { p->failed = 1; return 0; }
+        *buf = nb;
+        *cap = ncap;
+    }
+    (*buf)[(*len)++] = (char)b;
+    return 1;
+}
+
+static int vkmodel_json_parse_string(VkModelJsonParser* p, char** out)
+{
+    if (p->pos >= p->len || p->s[p->pos] != '"') { p->failed = 1; return 0; }
+    p->pos++;
+    size_t cap = 32, len = 0;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { p->failed = 1; return 0; }
+
+    for (;;) {
+        if (p->pos >= p->len) { free(buf); p->failed = 1; return 0; }
+        unsigned char c = (unsigned char)p->s[p->pos];
+
+        if (c == '"') {
+            p->pos++;
+            buf[len] = '\0';
+            *out = buf;
+            return 1;
+        }
+        if (c == '\\') {
+            p->pos++;
+            if (p->pos >= p->len) { free(buf); p->failed = 1; return 0; }
+            char e = p->s[p->pos];
+            p->pos++;
+
+            if (e == 'u') {
+                if (p->pos + 4 > p->len) { free(buf); p->failed = 1; return 0; }
+                unsigned long cp = 0;
+                for (int k = 0; k < 4; k++) {
+                    char h = p->s[p->pos++];
+                    unsigned hv;
+                    if (h >= '0' && h <= '9')      hv = (unsigned)(h - '0');
+                    else if (h >= 'a' && h <= 'f') hv = (unsigned)(h - 'a' + 10);
+                    else if (h >= 'A' && h <= 'F') hv = (unsigned)(h - 'A' + 10);
+                    else { free(buf); p->failed = 1; return 0; }
+                    cp = (cp << 4) | hv;
+                }
+                /* combine a valid surrogate pair */
+                if (cp >= 0xD800 && cp <= 0xDBFF && p->pos + 6 <= p->len &&
+                    p->s[p->pos] == '\\' && p->s[p->pos + 1] == 'u') {
+                    unsigned long lo = 0;
+                    for (int k = 0; k < 4; k++) {
+                        char h = p->s[p->pos + 2 + k];
+                        unsigned hv;
+                        if (h >= '0' && h <= '9')      hv = (unsigned)(h - '0');
+                        else if (h >= 'a' && h <= 'f') hv = (unsigned)(h - 'a' + 10);
+                        else if (h >= 'A' && h <= 'F') hv = (unsigned)(h - 'A' + 10);
+                        else { free(buf); p->failed = 1; return 0; }
+                        lo = (lo << 4) | hv;
+                    }
+                    if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                        p->pos += 6;
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                    }
+                }
+                /* encode code point as UTF-8 */
+                if (cp < 0x80) {
+                    if (!vkmodel_json_putc(p, &buf, &cap, &len,
+                                           (unsigned char)cp)) { free(buf); return 0; }
+                } else if (cp < 0x800) {
+                    if (!vkmodel_json_putc(p, &buf, &cap, &len,
+                                           (unsigned char)(0xC0 | (cp >> 6))) ||
+                        !vkmodel_json_putc(p, &buf, &cap, &len,
+                                           (unsigned char)(0x80 | (cp & 0x3F)))) {
+                        free(buf); return 0;
+                    }
+                } else if (cp < 0x10000) {
+                    if (!vkmodel_json_putc(p, &buf, &cap, &len,
+                                           (unsigned char)(0xE0 | (cp >> 12))) ||
+                        !vkmodel_json_putc(p, &buf, &cap, &len,
+                                           (unsigned char)(0x80 | ((cp >> 6) & 0x3F))) ||
+                        !vkmodel_json_putc(p, &buf, &cap, &len,
+                                           (unsigned char)(0x80 | (cp & 0x3F)))) {
+                        free(buf); return 0;
+                    }
+                } else {
+                    if (!vkmodel_json_putc(p, &buf, &cap, &len,
+                                           (unsigned char)(0xF0 | (cp >> 18))) ||
+                        !vkmodel_json_putc(p, &buf, &cap, &len,
+                                           (unsigned char)(0x80 | ((cp >> 12) & 0x3F))) ||
+                        !vkmodel_json_putc(p, &buf, &cap, &len,
+                                           (unsigned char)(0x80 | ((cp >> 6) & 0x3F))) ||
+                        !vkmodel_json_putc(p, &buf, &cap, &len,
+                                           (unsigned char)(0x80 | (cp & 0x3F)))) {
+                        free(buf); return 0;
+                    }
+                }
+                continue;
+            }
+
+            char ch;
+            switch (e) {
+            case '"':  ch = '"';  break;
+            case '\\': ch = '\\'; break;
+            case '/':  ch = '/';  break;
+            case 'b':  ch = '\b'; break;
+            case 'f':  ch = '\f'; break;
+            case 'n':  ch = '\n'; break;
+            case 'r':  ch = '\r'; break;
+            case 't':  ch = '\t'; break;
+            default:   free(buf); p->failed = 1; return 0;
+            }
+            if (!vkmodel_json_putc(p, &buf, &cap, &len, (unsigned char)ch)) {
+                free(buf); return 0;
+            }
+            continue;
+        }
+        /* raw byte (UTF-8 bytes pass through untouched) */
+        if (!vkmodel_json_putc(p, &buf, &cap, &len, c)) { free(buf); return 0; }
+        p->pos++;
+    }
+}
+
+static int vkmodel_json_add_child(VkModelJsonParser* p, VkModelJsonNode* parent,
+                                  VkModelJsonNode* child)
+{
+    if (parent->count >= parent->cap) {
+        size_t ncap = parent->cap == 0 ? 4 : parent->cap * 2;
+        VkModelJsonNode* nm = (VkModelJsonNode*)realloc(
+            parent->members, ncap * sizeof(VkModelJsonNode));
+        if (!nm) { p->failed = 1; return 0; }
+        parent->members = nm;
+        parent->cap = ncap;
+    }
+    parent->members[parent->count] = *child;
+    parent->count++;
+    return 1;
+}
+
+static VkModelJsonNode* vkmodel_json_parse_value(VkModelJsonParser* p);
+
+static VkModelJsonNode* vkmodel_json_parse_object(VkModelJsonParser* p)
+{
+    VkModelJsonNode* node = (VkModelJsonNode*)calloc(1, sizeof(*node));
+    if (!node) { p->failed = 1; return NULL; }
+    node->type = VKMODEL_JSON_OBJECT;
+    p->pos++;
+    vkmodel_json_skip_ws(p);
+    if (p->pos < p->len && p->s[p->pos] == '}') { p->pos++; return node; }
+
+    for (;;) {
+        vkmodel_json_skip_ws(p);
+        char* key = NULL;
+        if (p->pos >= p->len || !vkmodel_json_parse_string(p, &key)) {
+            vkmodel_json_free(node);
+            return NULL;
+        }
+        vkmodel_json_skip_ws(p);
+        if (p->pos >= p->len || p->s[p->pos] != ':') {
+            free(key);
+            vkmodel_json_free(node);
+            p->failed = 1;
+            return NULL;
+        }
+        p->pos++;
+        VkModelJsonNode* val = vkmodel_json_parse_value(p);
+        if (!val) {
+            free(key);
+            vkmodel_json_free(node);
+            return NULL;
+        }
+        val->key = key;
+        if (!vkmodel_json_add_child(p, node, val)) {
+            vkmodel_json_free(val);
+            vkmodel_json_free(node);
+            return NULL;
+        }
+        free(val);
+        vkmodel_json_skip_ws(p);
+        if (p->pos >= p->len) { vkmodel_json_free(node); p->failed = 1; return NULL; }
+        if (p->s[p->pos] == ',') { p->pos++; continue; }
+        if (p->s[p->pos] == '}') { p->pos++; return node; }
+        vkmodel_json_free(node);
+        p->failed = 1;
+        return NULL;
+    }
+}
+
+static VkModelJsonNode* vkmodel_json_parse_array(VkModelJsonParser* p)
+{
+    VkModelJsonNode* node = (VkModelJsonNode*)calloc(1, sizeof(*node));
+    if (!node) { p->failed = 1; return NULL; }
+    node->type = VKMODEL_JSON_ARRAY;
+    p->pos++;
+    vkmodel_json_skip_ws(p);
+    if (p->pos < p->len && p->s[p->pos] == ']') { p->pos++; return node; }
+
+    for (;;) {
+        VkModelJsonNode* val = vkmodel_json_parse_value(p);
+        if (!val) { vkmodel_json_free(node); return NULL; }
+        if (!vkmodel_json_add_child(p, node, val)) {
+            vkmodel_json_free(val);
+            vkmodel_json_free(node);
+            return NULL;
+        }
+        free(val);
+        vkmodel_json_skip_ws(p);
+        if (p->pos >= p->len) { vkmodel_json_free(node); p->failed = 1; return NULL; }
+        if (p->s[p->pos] == ',') { p->pos++; continue; }
+        if (p->s[p->pos] == ']') { p->pos++; return node; }
+        vkmodel_json_free(node);
+        p->failed = 1;
+        return NULL;
+    }
+}
+
+static VkModelJsonNode* vkmodel_json_parse_value(VkModelJsonParser* p)
+{
+    vkmodel_json_skip_ws(p);
+    if (p->pos >= p->len) { p->failed = 1; return NULL; }
+    char c = p->s[p->pos];
+
+    if (c == '{') return vkmodel_json_parse_object(p);
+    if (c == '[') return vkmodel_json_parse_array(p);
+
+    if (c == '"') {
+        VkModelJsonNode* node = (VkModelJsonNode*)calloc(1, sizeof(*node));
+        if (!node) { p->failed = 1; return NULL; }
+        node->type = VKMODEL_JSON_STRING;
+        if (!vkmodel_json_parse_string(p, &node->str)) { free(node); return NULL; }
+        return node;
+    }
+    if (c == 't') {
+        if (!vkmodel_json_parse_lit(p, "true")) { p->failed = 1; return NULL; }
+        VkModelJsonNode* node = (VkModelJsonNode*)calloc(1, sizeof(*node));
+        if (!node) { p->failed = 1; return NULL; }
+        node->type = VKMODEL_JSON_BOOL;
+        node->boolean = 1;
+        return node;
+    }
+    if (c == 'f') {
+        if (!vkmodel_json_parse_lit(p, "false")) { p->failed = 1; return NULL; }
+        VkModelJsonNode* node = (VkModelJsonNode*)calloc(1, sizeof(*node));
+        if (!node) { p->failed = 1; return NULL; }
+        node->type = VKMODEL_JSON_BOOL;
+        return node;
+    }
+    if (c == 'n') {
+        if (!vkmodel_json_parse_lit(p, "null")) { p->failed = 1; return NULL; }
+        VkModelJsonNode* node = (VkModelJsonNode*)calloc(1, sizeof(*node));
+        if (!node) { p->failed = 1; return NULL; }
+        node->type = VKMODEL_JSON_NULL;
+        return node;
+    }
+    if (c == '-' || (c >= '0' && c <= '9')) {
+        VkModelJsonNode* node = (VkModelJsonNode*)calloc(1, sizeof(*node));
+        if (!node) { p->failed = 1; return NULL; }
+        node->type = VKMODEL_JSON_NUMBER;
+        if (c == '-') p->pos++;
+        unsigned long long val = 0;
+        int digits = 0;
+        while (p->pos < p->len && p->s[p->pos] >= '0' && p->s[p->pos] <= '9') {
+            if (val > 0x0FFFFFFFFFFFFFFULL) { free(node); p->failed = 1; return NULL; }
+            val = val * 10 + (unsigned long long)(p->s[p->pos] - '0');
+            p->pos++;
+            digits++;
+        }
+        if (!digits) { free(node); p->failed = 1; return NULL; }
+        /* fraction/exponent: consume (loader needs integers only) */
+        if (p->pos < p->len && p->s[p->pos] == '.') {
+            p->pos++;
+            while (p->pos < p->len && p->s[p->pos] >= '0' && p->s[p->pos] <= '9') p->pos++;
+        }
+        if (p->pos < p->len && (p->s[p->pos] == 'e' || p->s[p->pos] == 'E')) {
+            p->pos++;
+            if (p->pos < p->len && (p->s[p->pos] == '+' || p->s[p->pos] == '-')) p->pos++;
+            while (p->pos < p->len && p->s[p->pos] >= '0' && p->s[p->pos] <= '9') p->pos++;
+        }
+        node->num = val;
+        return node;
+    }
+    p->failed = 1;
+    return NULL;
+}
+
+/**
+ * \brief Parse a complete JSON document (single top-level value).
+ *
+ * \param s   NUL-terminated JSON text.
+ * \param len Byte length of \p s (may be shorter than strlen(s)).
+ * \return Root node, or NULL on malformed input / trailing garbage.
+ */
+static VkModelJsonNode* vkmodel_json_parse(const char* s, size_t len)
+{
+    VkModelJsonParser p;
+    p.s = s;
+    p.len = len;
+    p.pos = 0;
+    p.failed = 0;
+    VkModelJsonNode* root = vkmodel_json_parse_value(&p);
+    if (!root || p.failed) { vkmodel_json_free(root); return NULL; }
+    vkmodel_json_skip_ws(&p);
+    if (p.pos != p.len) { vkmodel_json_free(root); return NULL; }
+    return root;
+}
+
+static VkModelJsonNode* vkmodel_json_find(VkModelJsonNode* obj, const char* key)
+{
+    if (!obj || obj->type != VKMODEL_JSON_OBJECT) return NULL;
+    for (size_t i = 0; i < obj->count; i++) {
+        VkModelJsonNode* m = &obj->members[i];
+        if (m->key && strcmp(m->key, key) == 0) return m;
+    }
+    return NULL;
 }
 
 /* ===========================================================================
@@ -585,20 +1015,15 @@ VkResult vkmodel_load(VkRuntime* rt, const char* path, VkModel** pModel)
         return res;
     }
 
-    res = vkr_create_command_pool(rt, 0, &m->upload_pool);
+    res = vkmodel_create_upload_state(m);
     if (res != VK_SUCCESS) {
         fclose(fp);
         vkmodel_destroy(m);
         return res;
     }
-    {
-        VkCommandBufferAllocateInfo ai;
-        memset(&ai, 0, sizeof(ai));
-        ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        ai.commandPool = m->upload_pool;
-        ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        ai.commandBufferCount = 1;
-        res = vkAllocateCommandBuffers(vkr_get_device(rt), &ai, &m->upload_cmd);
+
+    for (uint32_t i = 0; i < m->tensor_count; i++) {
+        res = vkmodel_upload_tensor(m, &reader, i);
         if (res != VK_SUCCESS) {
             fclose(fp);
             vkmodel_destroy(m);
@@ -606,6 +1031,258 @@ VkResult vkmodel_load(VkRuntime* rt, const char* path, VkModel** pModel)
         }
     }
 
+    fclose(fp);
+    *pModel = m;
+    return VK_SUCCESS;
+}
+
+/* ===========================================================================
+ * Safetensors loader
+ *
+ * Format: 8-byte little-endian header length N, then N bytes of UTF-8 JSON
+ * (object: tensor name -> {dtype, shape, data_offsets}, plus an optional
+ * "__metadata__" object), then tensor data. Tensor k is stored at absolute
+ * file offset 8 + N + data_offsets[0].
+ *
+ * The JSON is parsed with the self-contained parser above; each tensor is
+ * stored into the same VkModelTensor array as GGUF, with data_offset =
+ * 8 + N so the shared streamed-upload path locates bytes verbatim. __metadata__
+ * string entries are exposed as regular VKModel KV pairs (non-string values
+ * are skipped; get_kv_string() returns NULL for them, matching GGUF).
+ * ========================================================================== */
+
+typedef struct {
+    const char* name;    /**< Safetensors dtype name.                       */
+    uint32_t     ggml;   /**< ggml_type mapping (VKMODEL_DTYPE_UNKNOWN if none). */
+    uint32_t     esize;  /**< Element size in bytes.                        */
+} VkModelStDtype;
+
+static const VkModelStDtype vkmodel_st_dtypes[] = {
+    { "F32",      0,                  4 },
+    { "F16",      1,                  2 },
+    { "BF16",     30,                 2 },
+    { "F64",      28,                 8 },
+    { "I8",       24,                 1 },
+    { "I16",      25,                 2 },
+    { "I32",      26,                 4 },
+    { "I64",      27,                 8 },
+    { "U8",       VKMODEL_DTYPE_UNKNOWN, 1 },
+    { "U16",      VKMODEL_DTYPE_UNKNOWN, 2 },
+    { "U32",      VKMODEL_DTYPE_UNKNOWN, 4 },
+    { "U64",      VKMODEL_DTYPE_UNKNOWN, 8 },
+    { "BOOL",     VKMODEL_DTYPE_UNKNOWN, 1 },
+    { "F8_E4M3",  VKMODEL_DTYPE_UNKNOWN, 1 },
+    { "F8_E5M2",  VKMODEL_DTYPE_UNKNOWN, 1 },
+};
+
+static int vkmodel_st_dtype_lookup(const char* name, uint32_t* out_ggml,
+                                   uint32_t* out_esize, const char** out_name)
+{
+    for (size_t i = 0; i < sizeof(vkmodel_st_dtypes) / sizeof(vkmodel_st_dtypes[0]); i++) {
+        if (strcmp(name, vkmodel_st_dtypes[i].name) == 0) {
+            *out_ggml  = vkmodel_st_dtypes[i].ggml;
+            *out_esize = vkmodel_st_dtypes[i].esize;
+            *out_name  = vkmodel_st_dtypes[i].name;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/**
+ * \brief Count tensors and metadata string entries in a parsed header.
+ *
+ * \param root     Parsed header (JSON object).
+ * \param p_tensor Receives the tensor count.
+ * \param p_kv     Receives the metadata KV count (string entries only).
+ */
+static void vkmodel_st_count(VkModelJsonNode* root, uint32_t* p_tensor,
+                             uint32_t* p_kv)
+{
+    uint32_t tc = 0, kc = 0;
+    for (size_t i = 0; i < root->count; i++) {
+        VkModelJsonNode* m = &root->members[i];
+        if (!m->key) continue;
+        if (strcmp(m->key, "__metadata__") == 0) {
+            if (m->type == VKMODEL_JSON_OBJECT) {
+                for (size_t j = 0; j < m->count; j++) {
+                    if (m->members[j].key &&
+                        m->members[j].type == VKMODEL_JSON_STRING) kc++;
+                }
+            }
+            continue;
+        }
+        if (m->type == VKMODEL_JSON_OBJECT) tc++;
+    }
+    *p_tensor = tc;
+    *p_kv = kc;
+}
+
+static VkResult vkmodel_st_fill(VkModelJsonNode* root, VkModel* m)
+{
+    uint32_t ti = 0, ki = 0;
+    for (size_t i = 0; i < root->count; i++) {
+        VkModelJsonNode* memb = &root->members[i];
+        if (!memb->key) continue;
+
+        if (strcmp(memb->key, "__metadata__") == 0) {
+            if (memb->type != VKMODEL_JSON_OBJECT)
+                return VK_ERROR_INITIALIZATION_FAILED;
+            for (size_t j = 0; j < memb->count; j++) {
+                VkModelJsonNode* kv = &memb->members[j];
+                if (!kv->key || kv->type != VKMODEL_JSON_STRING) continue;
+                m->kv[ki].key = vkmodel_strdup(kv->key);
+                if (!m->kv[ki].key) return VK_ERROR_OUT_OF_HOST_MEMORY;
+                m->kv[ki].value.type = VKMODEL_VAL_STRING;
+                m->kv[ki].value.v.str = vkmodel_strdup(kv->str);
+                if (!m->kv[ki].value.v.str) return VK_ERROR_OUT_OF_HOST_MEMORY;
+                ki++;
+            }
+            continue;
+        }
+
+        /* tensor entry */
+        if (memb->type != VKMODEL_JSON_OBJECT)
+            return VK_ERROR_INITIALIZATION_FAILED;
+
+        VkModelJsonNode* dt    = vkmodel_json_find(memb, "dtype");
+        VkModelJsonNode* shape = vkmodel_json_find(memb, "shape");
+        VkModelJsonNode* offs  = vkmodel_json_find(memb, "data_offsets");
+        if (!dt || dt->type != VKMODEL_JSON_STRING)
+            return VK_ERROR_INITIALIZATION_FAILED;
+        if (!shape || shape->type != VKMODEL_JSON_ARRAY)
+            return VK_ERROR_INITIALIZATION_FAILED;
+        if (!offs || offs->type != VKMODEL_JSON_ARRAY || offs->count != 2)
+            return VK_ERROR_INITIALIZATION_FAILED;
+
+        uint32_t ggml = 0, esize = 0;
+        const char* dname = NULL;
+        if (!vkmodel_st_dtype_lookup(dt->str, &ggml, &esize, &dname))
+            return VK_ERROR_INITIALIZATION_FAILED;   /* unsupported dtype */
+
+        if (shape->count == 0 || shape->count > VKMODEL_MAX_DIMS)
+            return VK_ERROR_INITIALIZATION_FAILED;
+
+        VkModelTensor* t = &m->tensors[ti];
+        t->n_dims = (uint32_t)shape->count;
+        t->nelems = 1;
+        for (size_t d = 0; d < shape->count; d++) {
+            VkModelJsonNode* dim = &shape->members[d];
+            if (dim->type != VKMODEL_JSON_NUMBER || dim->num == 0)
+                return VK_ERROR_INITIALIZATION_FAILED;
+            if (t->nelems > UINT64_MAX / dim->num)
+                return VK_ERROR_INITIALIZATION_FAILED;   /* overflow */
+            t->dims[d] = dim->num;
+            t->nelems *= dim->num;
+        }
+
+        if (offs->members[0].type != VKMODEL_JSON_NUMBER ||
+            offs->members[1].type != VKMODEL_JSON_NUMBER)
+            return VK_ERROR_INITIALIZATION_FAILED;
+        uint64_t start = offs->members[0].num;
+        uint64_t end   = offs->members[1].num;
+        if (end <= start) return VK_ERROR_INITIALIZATION_FAILED;
+        if (end - start != t->nelems * esize)
+            return VK_ERROR_INITIALIZATION_FAILED;   /* size/dtype mismatch */
+
+        t->name = vkmodel_strdup(memb->key);
+        if (!t->name) return VK_ERROR_OUT_OF_HOST_MEMORY;
+        t->dtype      = ggml;
+        t->dtype_name = dname;                       /* static, not owned */
+        t->offset     = start;
+        t->size       = (VkDeviceSize)(end - start);
+        ti++;
+    }
+    return VK_SUCCESS;
+}
+
+VkResult vkmodel_load_safetensors(VkRuntime* rt, const char* path,
+                                  VkModel** pModel)
+{
+    if (!rt || !path || !pModel) return VK_ERROR_INITIALIZATION_FAILED;
+    *pModel = NULL;
+
+    VkModel* m = (VkModel*)calloc(1, sizeof(VkModel));
+    if (!m) return VK_ERROR_OUT_OF_HOST_MEMORY;
+    m->rt = rt;
+
+    FILE* fp = fopen(path, "rb");
+    if (!fp) { free(m); return VK_ERROR_INITIALIZATION_FAILED; }
+
+    /* 8-byte little-endian header length */
+    uint8_t hdr[8];
+    if (fread(hdr, 1, 8, fp) != 8) {
+        fclose(fp); free(m); return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    uint64_t hlen = 0;
+    for (int i = 0; i < 8; i++) hlen |= (uint64_t)hdr[i] << (8 * i);
+    if (hlen == 0 || hlen > VKMODEL_MAX_STRING) {
+        fclose(fp); free(m); return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    char* json = (char*)malloc((size_t)hlen + 1);
+    if (!json) { fclose(fp); free(m); return VK_ERROR_OUT_OF_HOST_MEMORY; }
+    if (fread(json, 1, (size_t)hlen, fp) != hlen) {
+        free(json); fclose(fp); free(m); return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    json[hlen] = '\0';
+
+    VkModelJsonNode* root = vkmodel_json_parse(json, hlen);
+    if (!root || root->type != VKMODEL_JSON_OBJECT) {
+        vkmodel_json_free(root);
+        free(json); fclose(fp); free(m);
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    /* first pass: allocate exact host arrays */
+    uint32_t tc = 0, kc = 0;
+    vkmodel_st_count(root, &tc, &kc);
+    if (tc > (1u << 20) || kc > (1u << 20)) {
+        vkmodel_json_free(root);
+        free(json); fclose(fp); free(m);
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if (tc > 0) {
+        m->tensors = (VkModelTensor*)calloc(tc, sizeof(VkModelTensor));
+        if (!m->tensors) {
+            vkmodel_json_free(root);
+            free(json); fclose(fp); free(m);
+            return VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
+    }
+    if (kc > 0) {
+        m->kv = (VkModelKV*)calloc(kc, sizeof(VkModelKV));
+        if (!m->kv) {
+            vkmodel_json_free(root);
+            free(json); fclose(fp); free(m);
+            return VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
+    }
+    m->tensor_count = tc;
+    m->kv_count = kc;
+
+    VkResult res = vkmodel_st_fill(root, m);
+    vkmodel_json_free(root);
+    free(json);
+    if (res != VK_SUCCESS) {
+        fclose(fp);
+        vkmodel_destroy(m);
+        return res;
+    }
+
+    /* data region starts right after the header */
+    m->data_offset = 8 + hlen;
+
+    res = vkmodel_create_upload_state(m);
+    if (res != VK_SUCCESS) {
+        fclose(fp);
+        vkmodel_destroy(m);
+        return res;
+    }
+
+    vkmodel_reader_t reader;
+    memset(&reader, 0, sizeof(reader));
+    reader.fp = fp;
     for (uint32_t i = 0; i < m->tensor_count; i++) {
         res = vkmodel_upload_tensor(m, &reader, i);
         if (res != VK_SUCCESS) {
@@ -708,6 +1385,32 @@ VkBuffer vkmodel_get_tensor_buffer(VkModel* m, uint32_t i)
 {
     if (!m || i >= m->tensor_count) return VK_NULL_HANDLE;
     return m->tensors[i].buffer;
+}
+
+/* ggml_type -> canonical name (for GGUF-loaded tensors; safetensors tensors
+ * carry their dtype name directly in dtype_name). */
+static const struct { uint32_t ggml; const char* name; } vkmodel_ggml_names[] = {
+    { 0,  "F32"     }, { 1,  "F16"    }, { 2,  "Q4_0"  }, { 3,  "Q4_1"  },
+    { 6,  "Q5_0"    }, { 7,  "Q5_1"   }, { 8,  "Q8_0"  }, { 9,  "Q8_1"  },
+    { 10, "Q2_K"    }, { 11, "Q3_K"   }, { 12, "Q4_K"  }, { 13, "Q5_K"  },
+    { 14, "Q6_K"    }, { 15, "Q8_K"   }, { 16, "IQ2_XXS"}, { 17, "IQ2_XS"},
+    { 18, "IQ3_XXS" }, { 19, "IQ1_S"  }, { 20, "IQ4_NL"}, { 21, "IQ3_S" },
+    { 22, "IQ2_S"   }, { 23, "IQ4_XS" }, { 24, "I8"    }, { 25, "I16"   },
+    { 26, "I32"     }, { 27, "I64"    }, { 28, "F64"   }, { 29, "IQ1_M" },
+    { 30, "BF16"    }, { 34, "TQ1_0"  }, { 35, "TQ2_0" }, { 39, "MXFP4" },
+    { 40, "NVFP4"   }, { 41, "Q1_0"   }, { 42, "Q2_0"  },
+};
+
+const char* vkmodel_get_tensor_dtype_name(VkModel* m, uint32_t i)
+{
+    if (!m || i >= m->tensor_count) return NULL;
+    VkModelTensor* t = &m->tensors[i];
+    if (t->dtype_name) return t->dtype_name;
+    if (t->dtype == VKMODEL_DTYPE_UNKNOWN) return NULL;
+    for (size_t k = 0; k < sizeof(vkmodel_ggml_names) / sizeof(vkmodel_ggml_names[0]); k++) {
+        if (vkmodel_ggml_names[k].ggml == t->dtype) return vkmodel_ggml_names[k].name;
+    }
+    return NULL;
 }
 
 VkDeviceSize vkmodel_get_tensor_size(VkModel* m, uint32_t i)

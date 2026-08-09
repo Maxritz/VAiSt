@@ -24,6 +24,12 @@
 #define VKMODEL_MAX_DIMS     4u            /**< GGML_MAX_DIMS.                */
 #define VKMODEL_MAX_STRING   (64u << 20)   /**< Sanity cap on string/array.   */
 
+/* Sentinel ggml_type for safetensors dtypes that have no 1:1 ggml mapping
+ * (unsigned ints, BOOL, F8). Stored in VkModelTensor::dtype and reported by
+ * vkmodel_get_tensor_dtype(); vkmodel_get_tensor_dtype_name() still returns
+ * the safetensors name via VkModelTensor::dtype_name. */
+#define VKMODEL_DTYPE_UNKNOWN 0xFFFFFFFFu
+
 /* GGUF metadata value types */
 #define VKMODEL_VAL_UINT8   0u
 #define VKMODEL_VAL_INT8    1u
@@ -81,7 +87,8 @@ typedef struct {
  */
 typedef struct {
     char        *name;         /**< NUL-terminated name copy.               */
-    uint32_t     dtype;        /**< ggml_type enum value.                   */
+    uint32_t     dtype;        /**< ggml_type enum value (or DTYPE_UNKNOWN).*/
+    const char  *dtype_name;   /**< Safetensors dtype name (static) / NULL.*/
     uint32_t     n_dims;       /**< Number of dimensions.                   */
     uint64_t     dims[VKMODEL_MAX_DIMS]; /**< Dimension extents.            */
     uint64_t     nelems;       /**< Product of dims.                        */

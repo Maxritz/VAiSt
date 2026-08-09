@@ -1354,7 +1354,7 @@ int main(void)
     uint16_t SB16_expected[TEST_BATCH][TEST_GEMM_M * TEST_GEMM_N];
     double SB64_expected[TEST_BATCH][TEST_GEMM_M * TEST_GEMM_N];
     /* gemm_ex buffers (reuse the single-gemm A/B; own D + readback) */
-    gemm_buffers_t gex32b, gex16b;
+    gemm_buffers_t gex32b, gex16b, gex16bb;
     /* f64 alpha/beta packing check (non-trivial alpha/beta + C read) */
     gemm_buffers_t bt64b;
     double C64in[TEST_GEMM_M * TEST_GEMM_N];
@@ -1375,6 +1375,7 @@ int main(void)
     memset(&sb64b, 0, sizeof(sb64b));
     memset(&gex32b, 0, sizeof(gex32b));
     memset(&gex16b, 0, sizeof(gex16b));
+    memset(&gex16bb, 0, sizeof(gex16bb));
     memset(&bt64b, 0, sizeof(bt64b));
     memset(&q8_32, 0, sizeof(q8_32));
     memset(&q8_64, 0, sizeof(q8_64));
@@ -1619,12 +1620,21 @@ int main(void)
         gex16b.off_D = take_region(&h.cursor, h.align, m * n * sizeof(uint16_t));
         gex16b.off_readback = take_region(&h.cursor, h.align, m * n * sizeof(uint16_t));
     }
+    if (h.test_bf16) {
+        gex16bb.off_D = take_region(&h.cursor, h.align, m * n * sizeof(uint16_t));
+        gex16bb.off_readback = take_region(&h.cursor, h.align, m * n * sizeof(uint16_t));
+    }
     r = create_sub_buffer(h.device, h.mem, gex32b.off_D,
                           m * n * sizeof(float), &gex32b.D);
     if (r != VK_SUCCESS) goto cleanup;
     if (h.test_f16) {
         r = create_sub_buffer(h.device, h.mem, gex16b.off_D,
                               m * n * sizeof(uint16_t), &gex16b.D);
+        if (r != VK_SUCCESS) goto cleanup;
+    }
+    if (h.test_bf16) {
+        r = create_sub_buffer(h.device, h.mem, gex16bb.off_D,
+                              m * n * sizeof(uint16_t), &gex16bb.D);
         if (r != VK_SUCCESS) goto cleanup;
     }
 
@@ -2290,6 +2300,19 @@ int main(void)
                            VKBLAS_COMPUTE_16F, VKBLAS_GEMM_FLAGS_NONE),
             "gemm_ex 16F");
     }
+    if (h.test_bf16) {
+        const uint16_t gex_alpha16b = f32_to_bf16(1.0f);
+        const uint16_t gex_beta16b  = f32_to_bf16(0.0f);
+        overall_pass &= record_dispatch(
+            vkblas_gemm_ex(h.blas_ctx, h.cmd, VKBLAS_OP_N, VKBLAS_OP_N,
+                           (int32_t)m, (int32_t)n, (int32_t)k,
+                           &gex_alpha16b, bf16b.A, TEST_GEMM_LDA, 0,
+                           bf16b.B, TEST_GEMM_LDB, 0,
+                           &gex_beta16b, VK_NULL_HANDLE, 0, 0,
+                           gex16bb.D, TEST_GEMM_LDD, 0,
+                           VKBLAS_COMPUTE_16B, VKBLAS_GEMM_FLAGS_NONE),
+            "gemm_ex BF16");
+    }
 
     /* ── 11d. f64 alpha/beta packing check ───────────────────────────────── */
     if (h.test_f64) {
@@ -2400,6 +2423,9 @@ int main(void)
     if (h.test_f16)
         record_copy_readback(h.cmd, gex16b.D, h.staging, gex16b.off_readback,
                              m * n * sizeof(uint16_t));
+    if (h.test_bf16)
+        record_copy_readback(h.cmd, gex16bb.D, h.staging, gex16bb.off_readback,
+                             m * n * sizeof(uint16_t));
     if (h.test_f64)
         record_copy_readback(h.cmd, bt64b.D, h.staging, bt64b.off_readback,
                              m * n * sizeof(double));
@@ -2507,6 +2533,12 @@ int main(void)
                                          elem_count, TEST_F16_TOLERANCE);
     else
         printf("  %-18s : SKIP (f16 features absent)\n", "gemm_ex 16F");
+    if (h.test_bf16)
+        overall_pass &= check_output_bf16("gemm_ex BF16", h.mapped,
+                                          gex16bb.off_readback, D16b_expected,
+                                          elem_count, TEST_BF16_TOLERANCE);
+    else
+        printf("  %-18s : SKIP (bf16 16-bit features absent)\n", "gemm_ex BF16");
 
     if (h.test_f64)
         overall_pass &= check_output_f64("dgemm a/b pack", h.mapped,
@@ -2569,6 +2601,7 @@ cleanup:
     if (sb64b.D) vkDestroyBuffer(h.device, sb64b.D, NULL);
     if (gex32b.D) vkDestroyBuffer(h.device, gex32b.D, NULL);
     if (gex16b.D) vkDestroyBuffer(h.device, gex16b.D, NULL);
+    if (gex16bb.D) vkDestroyBuffer(h.device, gex16bb.D, NULL);
     if (bt64b.A) vkDestroyBuffer(h.device, bt64b.A, NULL);
     if (bt64b.D) vkDestroyBuffer(h.device, bt64b.D, NULL);
     if (q8_32.Wq) vkDestroyBuffer(h.device, q8_32.Wq, NULL);

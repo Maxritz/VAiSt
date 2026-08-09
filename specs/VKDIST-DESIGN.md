@@ -5,20 +5,31 @@ machine offload compute to another PC's Vulkan GPU over a network. The end goal
 of the module is to run a single model split across multiple PCs' Vulkan GPUs
 (tensor-parallel inference). This document covers the architecture, transport,
 wire protocol, data movement, concurrency, fault handling, and security posture,
-plus the phased roadmap from a single-machine loopback slice (Phase 0, shipped
-in this subtree) to multi-PC tensor-parallel operation (P1–P4).
+plus the phased roadmap from a single-machine loopback slice (Phase 0) to
+multi-PC tensor-parallel operation (P1 done in this subtree; P2–P3 future).
 
 ## 1. Scope and Goal
 
-- **Phase 0 (this subtree):** a real, testable loopback vertical slice. One
-  TCP server hosts a Vulkan device; a client connects over `127.0.0.1`,
-  registers buffers by opaque `u64` handle, uploads host data, remotely
-  executes `vkblas_sgemm` on the server, and reads results back. This proves
-  transport + RPC + remote-dispatch plumbing end to end on localhost.
-- **Later phases:** multiple PCs over IP (P1), distributed GEMM where m/n is
-  partitioned across workers (P2), attention/KV sharding (P3), and
-  rendezvous/discovery + TLS (P4). These are design targets documented below,
-  not implemented here.
+- **Phase 0 (done):** a real, testable loopback vertical slice. One TCP server
+  hosts a Vulkan device; a client connects over `127.0.0.1`, registers buffers
+  by opaque `u64` handle, uploads host data, remotely executes `vkblas_sgemm`
+  on the server, and reads results back. This proves transport + RPC +
+  remote-dispatch plumbing end to end on localhost.
+- **Phase 1 (this subtree, done):** a multi-connection distributed GEMM. The
+  server accepts and serves **N worker connections concurrently**
+  (`vkdist_server_accept_many` + `vkdist_server_serve_many`, one pthread per
+  connection), and the client side provides a **column-partitioned GEMM**
+  (`vkdist_sgemm_partitioned`) that splits the output matrix C's columns across
+  the workers (n_i = n/n_workers, last takes the remainder), broadcasts A,
+  uploads each worker's B column strip + C strip, dispatches a per-worker
+  sgemm, and merges the read-back strips into the host C buffer. Exercised
+  end to end in `tests/test_vkdist.c` (2-worker [8,8], 3-worker uneven [5,5,6],
+  and a beta-accumulation run). The same code runs over any routable interface,
+  so **cross-PC validation** is exercised by running the server on one host
+  (e.g. the local RX 9070 XT) and the client on another (e.g. the MacX 6700 XT)
+  over the LAN.
+- **Later phases:** attention/KV sharding (P2) and rendezvous/discovery + TLS
+  (P3). These are design targets documented below, not implemented here.
 
 ## 2. Architecture
 
@@ -26,8 +37,9 @@ in this subtree) to multi-PC tensor-parallel operation (P1–P4).
 
 `vkdist` is a request/reply remote-execution layer. One server process hosts
 exactly one GPU endpoint (one `VkPhysicalDevice` + `VkDevice` + one
-`VkBLASContext`). A server can accept multiple connections (P1+), but in
-Phase 0 each connection is served by one serialized RPC loop.
+`VkBLASContext`). A server can accept multiple connections (Phase 1+); each
+connection is served by its own serialized RPC loop, one pthread per connection
+via `vkdist_server_serve_many`.
 
 ```
                      ┌────────────────────────────────────────────────┐
@@ -77,8 +89,10 @@ assigned monotonically per connection starting at 1.
 
 ## 3. Transport
 
-- **TCP/IP** over loopback in Phase 0; the same code runs over any routable
-  interface in P1.
+- **TCP/IP** over loopback in Phase 0/1; the same code runs over any routable
+  interface (LAN IP binding already works — `vkdist_server_start` accepts any
+  IPv4 bind address, and the Phase-1 multi-worker test drives real connections
+  over the loopback interface).
 - Implementation: Winsock2 on `_WIN32` (`<winsock2.h>`, link `ws2_32`), POSIX
   sockets otherwise (`<sys/socket.h>` etc.). Both paths are implemented in
   `src/vkdist/vkdist.c` behind small send/recv/close wrappers.
@@ -105,7 +119,8 @@ Every message on the wire is:
 - Phase 0 caps a single frame at **1 MiB** (`VKDIST_MAX_FRAME`). A frame
   larger than the cap is a protocol error and the connection is closed. This
   bound makes server-side receive buffers fixed-size and reusable per
-  connection. Large weight/activation transfers are streamed/chunked in P1.
+  connection. Large weight/activation transfers are streamed/chunked in future
+  work.
 - Every **reply** echoes the request opcode and begins with an `i32 VkResult`
   (`0` = `VK_SUCCESS`).
 
@@ -194,22 +209,31 @@ visible to the subsequent compute dispatch; dispatch → `vkWaitForFences` makes
 compute writes visible to the subsequent readback copy. No explicit pipeline
 barriers are required because every stage is separated by a host-side wait on
 the same queue. This trades throughput for correctness and is the documented
-Phase-0 choice; batching and multi-op command buffers with explicit barriers
-are a P1 optimization.
+Phase-0/1 choice; batching and multi-op command buffers with explicit barriers
+are future work.
 
 ## 6. Concurrency
 
 - **Per-connection serialization:** `vkdist_server_run` is a single-threaded
-  request/reply loop. One command buffer and one runtime serve one connection,
-  so there is no concurrent Vulkan access. This matches the contract that
-  `VkBLASContext` is not thread-safe.
-- **One server, many connections (P1+):** the listen socket is multi-accept.
-  Each accepted connection gets its own thread (or polled socket) and — to keep
-  Vulkan serialization trivial — its own command buffer; the `VkBLASContext`
-  and device are shared and must be guarded (mutex around `vkblas_*` calls, or
-  per-connection contexts). The runtime stays per-device in P1.
+  request/reply loop. One command buffer, one runtime, and one remote-buffer
+  table serve one connection, so there is no concurrent Vulkan access. This
+  matches the contract that `VkBLASContext` is not thread-safe.
+- **One server, many connections (Phase 1, implemented):**
+  `vkdist_server_accept_many` accepts N connections (blocking) and
+  `vkdist_server_serve_many` spawns one pthread per connection, each running
+  the same per-connection RPC loop. Per-connection state — transient
+  `VkRuntime`, command pool/buffer/fence, and the buffer-handle table — is
+  created and owned entirely inside `vkdist_server_run`, so the N sessions are
+  independent except for the shared `VkBLASContext`. Because the context is not
+  thread-safe (lazy pipeline cache + descriptor pool), `serve_many` serializes
+  the context-mutating part of each GEMM dispatch with a mutex; queue submits
+  and per-connection command buffers are safe to use concurrently, so
+  uploads/downloads/dispatches of different connections overlap while only the
+  pipeline/descriptor mutation is serialized.
 - **The client API** is safe to call from one thread per socket. Different
-  sockets from different threads are independent.
+  sockets from different threads are independent. `vkdist_sgemm_partitioned`
+  drives one socket per worker and expects each worker connection to be served
+  concurrently (i.e. via `vkdist_server_serve_many`).
 
 ## 7. Fault handling
 
@@ -247,13 +271,12 @@ are a P1 optimization.
 
 | Phase | Scope | Deliverables |
 |-------|-------|--------------|
-| **P0 (this subtree)** | Loopback vertical slice | Design spec, `vkdist` lib, `tests/test_vkdist.c` (local sgemm via TCP, passes) |
-| **P1** | Multi-PC over IP | Bind to LAN IP, streaming/chunked large payloads, multi-connection accept loop + per-connection command buffers, keep-alive/ping, bigger frame budget, per-device (not per-connection) runtime |
-| **P2** | Distributed GEMM | Partition m/n across workers; client-side split of A/B/C; server-side partial GEMM into per-worker C slices; host reduce/sum of beta terms; grid split per worker |
-| **P3** | Attention / KV sharding | Remote KV-cache buffers with incremental upload (cache-miss only), sharded attention (head or sequence partition), weight sharding (row/column split of Q/K/V/O and FFN), fused remote dequant GEMM (`qgemm_q4k`) |
-| **P4** | Rendezvous / discovery + TLS | mDNS/JSON rendezvous to find worker GPUs, health + capability broadcast (VRAM, arch tier), mutual TLS, payload encryption, per-connection auth tokens, quotas |
+| **P0 (done)** | Loopback vertical slice | Design spec, `vkdist` lib, `tests/test_vkdist.c` (local sgemm via TCP, passes) |
+| **P1 (this subtree, done)** | Multi-connection + partitioned GEMM | `vkdist_server_accept_many`/`vkdist_server_serve_many` (N concurrent worker connections, one pthread each, shared-BLAS mutex), `vkdist_sgemm_partitioned` (column split n_i = n/n_workers, last takes remainder; per-worker register/upload of A + B strip + C strip, dispatch, read-back merge), tests (2w [8,8], 3w uneven [5,5,6], beta-accumulation), all passing. Cross-PC: run the server on one host (RX 9070 XT) and the client on another (MacX 6700 XT) — the transport is plain routable TCP, so the same code exercises it |
+| **P2** | Attention / KV sharding | Remote KV-cache buffers with incremental upload (cache-miss only), sharded attention (head or sequence partition), weight sharding (row/column split of Q/K/V/O and FFN), fused remote dequant GEMM (`qgemm_q4k`) |
+| **P3** | Rendezvous / discovery + TLS | mDNS/JSON rendezvous to find worker GPUs, health + capability broadcast (VRAM, arch tier), mutual TLS, payload encryption, per-connection auth tokens, quotas |
 
-### 9.1 Example multi-worker topology (P2 target)
+### 9.1 Example multi-worker topology (Phase 1 implemented)
 
 ```
         ┌──────────────┐  TCP   ┌──────────────┐
@@ -263,22 +286,45 @@ are a P1 optimization.
         └──────────────┘  TCP   └──────────────┘
 ```
 
-Each worker runs a `vkdist_server_run` session; the coordinator dispatches
-`DISPATCH_GEMM` with per-worker n-slices and reduces the partial results. The
-existing buffer/upload/readback primitives carry directly into this design.
+Each worker runs a `vkdist_server_run` session (spawned by
+`vkdist_server_serve_many`); the coordinator's `vkdist_sgemm_partitioned`
+dispatches one `DISPATCH_GEMM` per worker with a per-worker n-slice and merges
+the partial results. The existing buffer/upload/readback primitives carry
+directly into this design.
 
-## 10. Phase-0 limitations (explicit)
+### 9.2 Phase-1 column-partition scheme
 
-1. Single connection served serially; no concurrent sessions.
-2. 1 MiB frame cap (no streaming of multi-GB weights yet).
+For worker i with n_start columns already assigned, the strip width is
+`n_i = n / n_workers` (all workers except the last) and
+`n_i = n - n_start` for the last worker, so any n (including uneven splits) is
+covered exactly. Because B and C are column-major, a column strip is **one
+contiguous block** in host memory starting at `B + n_start*ldb` / `C +
+n_start*ldc` with span `((n_i-1)*ldb + k)*4` / `((n_i-1)*ldc + m)*4` bytes;
+the merge is a single memcpy per worker. A (m x k) is broadcast in full. The
+caller's current C strip is uploaded before dispatch so the beta term
+`C = alpha*A*B + beta*C` reads real data, which makes repeated accumulating
+calls (e.g. beta=0.5 twice) exact. Frame payloads are still capped at 1 MiB
+(`VKDIST_MAX_FRAME`), so very large strips need P1's streaming/chunking work
+below.
+
+## 10. Open limitations (post-Phase-1)
+
+1. ~~Single connection served serially; no concurrent sessions.~~ **Resolved in
+   Phase 1** by `vkdist_server_accept_many` / `vkdist_server_serve_many`
+   (one pthread per connection, shared `VkBLASContext` serialized by a mutex).
+2. 1 MiB frame cap (no streaming of multi-GB weights yet). `vkdist_upload` /
+   `vkdist_readback` / the partitioned GEMM strips are all bounded by it.
+   Streaming/chunked large payloads remain future work.
 3. Descriptor sets are allocated per dispatch from the `VkBLASContext` pool
    (256 max) and never freed; a long-running connection eventually exhausts
-   the pool. P1 frees/reuses sets or moves GEMM dispatch to push descriptors.
+   the pool. Future work frees/reuses sets or moves GEMM dispatch to push
+   descriptors. This is per shared context, so heavy multi-worker use shortens
+   the runway.
 4. Full GPU-idle wait after every upload, dispatch, and readback; no pipelining.
 5. Runtime + command pool are created/destroyed per connection rather than
-   shared per device.
-6. IPv4 only (`inet_pton` AF_INET); IPv6 and hostname resolution deferred to
-   P1.
+   shared per device. Each serve_many thread owns its own transient runtime;
+   a per-device runtime shared by all connections is future work.
+6. IPv4 only (`inet_pton` AF_INET); IPv6 and hostname resolution future work.
 7. Server assumes queue family 0 and uses `vkGetDeviceQueue(dev, 0, 0, ...)`.
 
 ## 11. Files

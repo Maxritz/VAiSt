@@ -61,6 +61,12 @@ typedef struct {
     VkFence          fence;         /**< Dispatch sync fence.              */
     VkRuntime       *runtime;       /**< Transient runtime for this conn.  */
     VkBLASContext   *blas;          /**< Caller-owned BLAS context.        */
+    /* Serializes access to the shared VkBLASContext (which is not
+       thread-safe: pipeline cache + descriptor pool) when a single context
+       is shared by multiple serve_many worker threads. NULL for the
+       single-connection vkdist_server_run path. Type is pthread_mutex_t*;
+       kept opaque here so vkdist_internal.h stays pthread-free. */
+    void            *blas_lock;
     vkdist_remote_buffer_t buffers[VKDIST_MAX_BUFFERS];
     uint32_t         buffer_count;  /**< Live remote buffers.              */
     uint64_t         next_handle;   /**< Monotonic handle allocator.       */
