@@ -5,6 +5,7 @@ cmake-build-*/
 # SPIR-V binaries
 **/*.spv
 **/*.spv.a
+**/*.spv.err
 
 # Generated headers
 generated/
