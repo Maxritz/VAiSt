@@ -1,29 +1,27 @@
-# VAiSt — Vulkan AI Stack
+A Vulkan compute AI stack, built from scratch, implementing BLAS, FFT, RNG and 
+math primitives for AMD RDNA2 (gfx103x) and RDNA4 (gfx1201) GPUs, and really 
+any GPU that speaks Vulkan 1.4.
 
-A ground-up Vulkan compute AI stack that implements BLAS, FFT, RNG, and math
-primitives for AMD RDNA2 (gfx103x) and RDNA4 (gfx1201) GPUs — and any GPU
-that speaks Vulkan 1.4.
-
-**No ROCm. No HIP. No CUDA.** Just Vulkan compute shaders, C99 headers, and
-Vulkan-native handles.
-
+No ROCm. No HIP. No CUDA. Just Vulkan compute shaders, 
+C99 headers, and Vulkan-native handles.
 ---
 
 ## Why This Exists
 
-For years, doing serious GPU-accelerated AI on AMD hardware meant going
-through ROCm. That is fine if you are on Linux with a professional GPU, but
-it leaves RDNA2 and RDNA4 users on Windows completely out of the game —
-Windows drivers do not ship with ROCm support, and HIP-on-Windows is a stub
-at best.
+For years, doing serious GPU-accelerated AI on AMD hardware meant going through
+ROCm, and that meant Linux. That's shifted a bit: AMD shipped ROCm 7.2 in 
+January 2026 with, for the first time, a genuinely unified Windows and Linux 
+release, and the RX 9070 XT (gfx1201) is now officially on AMD's supported 
+Windows list, with native PyTorch and llama.cpp builds to go with it.
 
-I wanted to run LLM inference on my RX 9070 XT and found that the existing
-HIP backends either did not compile on Windows or delivered less than 1 tok/s
-due to a cascade of architectural problems: one command buffer per operation,
-a descriptor-set allocation per kernel dispatch, validation readbacks stalling
-the GPU mid-inference, and per-head attention launches that barely register
-any occupancy. The whole stack was spending more time on CPU driver overhead
-than on actual compute.
+Still, the HIP SDK for Windows itself, the actual toolchain you'd build a project
+like this against, ships without MIOpen, MIGraphX, communication libraries, or 
+CMake HIP language support, and lists "AI Frameworks: Not available" against itself 
+in AMD's own docs as of this writing. The PyTorch path AMD showed off runs through
+a separate consumer distribution, not through the general HIP SDK. So Windows ROCm 
+development is real now, in a way it wasn't a year ago, but it's still a narrower
+stack than what Linux gets, and HIP-on-Windows still has its own rough edges once
+you're outside AMD's specific supported paths.
 
 VAiSt fixes this by starting from first principles:
 
