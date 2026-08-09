@@ -82,7 +82,7 @@ automatically based on GPU capabilities:
 | `vkblas_dgemm` | f64 | Single GEMM |
 | `vkblas_bgemm` | bf16 (f32 accumulate) | Single GEMM |
 | `vkblas_s/h/d/bgemm_strided_batched` | f32/f16/f64/bf16 | Strided batched GEMM |
-| `vkblas_gemm_ex` | f16/f32 | Mixed-precision with compute-type control |
+| `vkblas_gemm_ex` | f16/f32/bf16 | Mixed-precision with compute-type control |
 | `vkblas_sgemm_batched` | f32 | Per-buffer batched GEMM |
 
 API mirrors `hipblasSgemm` parameter order exactly — porting from HIP is a
