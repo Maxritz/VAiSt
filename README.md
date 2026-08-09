@@ -4,7 +4,7 @@
 # VAiSt - Vulkan AI Stack
 
 A ground-up Vulkan compute AI stack that implements BLAS, FFT, RNG, and math
-primitives for AMD RDNA2 (gfx103x) and RDNA4 (gfx1201) GPUs — and any GPU
+primitives for AMD RDNA2 (gfx103x) and RDNA4 (gfx1201) GPUs and any GPU
 that speaks Vulkan 1.4.
 
 **No ROCm. No HIP. No CUDA.** Just Vulkan compute shaders, C99 headers, and
@@ -16,9 +16,9 @@ Vulkan-native handles.
 
 For years, doing serious GPU-accelerated AI on AMD hardware meant going
 through ROCm. That is fine if you are on Linux with a professional GPU, but
-it leaves RDNA2 and RDNA4 users on Windows completely out of the game —
-Windows drivers do not ship with ROCm support, and HIP-on-Windows is a stub
-at best.
+it leaves RDNA2 and RDNA4 users on Windows completely out of the game. 
+Windows drivers do not ship with full ROCm support, and HIP-on-Windows while 
+it is catching up still has its own quirks at best.
 
 I wanted to run LLM inference on my RX 9070 XT and found that the existing
 HIP backends either did not compile on Windows or delivered less than 1 tok/s
