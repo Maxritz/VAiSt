@@ -177,4 +177,72 @@ if(BUILD_TESTING)
     )
     target_link_libraries(test_vkblas_l1l2 PRIVATE vkblas_l1l2 vkblas Vulkan::Vulkan)
     add_test(NAME test_vkblas_l1l2 COMMAND test_vkblas_l1l2)
+
+    # ── VKModel library (GGUF loader) ──────────────────────────────────────
+    add_library(vkmodel STATIC src/vkmodel/vkmodel.c)
+    target_include_directories(vkmodel PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkmodel
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkmodel
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkruntime
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
+    )
+    target_link_libraries(vkmodel PUBLIC vkruntime Vulkan::Vulkan)
+    target_compile_options(vkmodel PRIVATE -Wall -Wextra)
+
+    add_executable(test_vkmodel tests/test_vkmodel.c)
+    target_include_directories(test_vkmodel PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkmodel
+    )
+    target_link_libraries(test_vkmodel PRIVATE vkmodel vkruntime Vulkan::Vulkan)
+    add_test(NAME test_vkmodel COMMAND test_vkmodel)
+
+    # ── VKKV library (cross-model KV transfer) ─────────────────────────────
+    add_library(vkkv STATIC src/vkkv/vkkv.c)
+    target_include_directories(vkkv PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkkv
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkkv
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkruntime
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
+    )
+    target_link_libraries(vkkv PUBLIC vkruntime Vulkan::Vulkan)
+    target_compile_options(vkkv PRIVATE -Wall -Wextra)
+
+    add_executable(test_vkkv tests/test_vkkv.c)
+    target_include_directories(test_vkkv PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkkv
+    )
+    target_link_libraries(test_vkkv PRIVATE vkkv vkruntime Vulkan::Vulkan)
+    add_test(NAME test_vkkv COMMAND test_vkkv)
+
+    # ── VKDist library (distributed compute, loopback Phase 0) ─────────────
+    add_library(vkdist STATIC src/vkdist/vkdist.c)
+    target_include_directories(vkdist PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkdist
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkdist
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkruntime
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkblas
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkblas
+    )
+    target_link_libraries(vkdist PUBLIC vkblas vkruntime Vulkan::Vulkan)
+    target_compile_options(vkdist PRIVATE -Wall -Wextra)
+    if(WIN32)
+        target_link_libraries(vkdist PUBLIC ws2_32)
+    endif()
+
+    add_executable(test_vkdist tests/test_vkdist.c)
+    target_include_directories(test_vkdist PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkdist
+    )
+    target_link_libraries(test_vkdist PRIVATE vkdist vkblas vkruntime Vulkan::Vulkan)
+    if(WIN32)
+        target_link_libraries(test_vkdist PRIVATE ws2_32)
+    endif()
+    add_test(NAME test_vkdist COMMAND test_vkdist)
 endif()

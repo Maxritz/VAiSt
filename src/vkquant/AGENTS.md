@@ -37,21 +37,25 @@ Must match the GLSL push_constant block exactly. uint32/float only — no
 
 Binding 0 = quantized input (bytes), binding 2 = dequantized output (f32).
 
-## Quantization block formats
+### Block formats (dequant, f32 out = num_blocks * block_elems)
+- **Legacy 32-elem blocks** (f16 ggml layouts): Q8_0 (36 B, f32 d),
+  Q4_0 (20 B), Q4_1 (20 B, d+m), Q5_0 (22 B, d+qh), Q5_1 (24 B, d+m+qh),
+  Q8_1 (36 B, d+s), IQ4_NL (18 B, d). Dispatch `ceil(32*blocks/256)`.
+- **K-quants 256-elem blocks**: Q2_K (84 B), Q3_K (110 B), Q4_K (144 B),
+  Q5_K (176 B), Q6_K (210 B). Dispatch `num_blocks`.
+- **IQ 256-elem blocks**: IQ1_S (50 B), IQ1_M (56 B), IQ2_XXS (66 B),
+  IQ2_XS (74 B), IQ2_S (82 B), IQ3_XXS (98 B), IQ3_S (110 B), IQ4_XS (136 B).
+  Grid/ksigns/kvalues tables are embedded as GLSL `const` arrays generated from
+  ggml-common.h (see tests/vkquant_tables.h for the C copies).
+- **TQ 256-elem blocks**: TQ1_0 (54 B), TQ2_0 (66 B).
 
-- **Q8_0**: 36 bytes/block — f32 scale `d` (bytes 0..3) + 32 int8 `qs`
-  (bytes 4..35). `out[i] = d * qs[i]`.
-- **Q4_0**: 20 bytes/block — f32 scale `d` (bytes 0..3) + 16 packed-nibble
-  uint8 (bytes 4..19). `xi = qs[i>>1]`; `nibble = (i&1) ? xi>>4 : xi&0xF`;
-  `out[i] = d * ((int)nibble - 8)`.
-- **Q4_K** (dequant, 144 B/256 elems): ggml `block_q4_K` — f16 `d`,`dmin`,
-  `scales[12]`, `qs[128]`. Per-32-group scale/min decode via ggml
-  `get_scale_min_k4`; `out = d*sc*nib - dmin*mn`.
-- **Q6_K** (dequant, 210 B/256 elems): ggml `block_q6_K` — `ql[128]`,
-  `qh[64]`, int8 `scales[16]`, f16 `d`. `out = d*sc*((ql4|qh2<<4)-32)`.
-- **IQ4_XS** (dequant, 136 B/256 elems): ggml `block_iq4_xs` — f16 `d`,
-  u16 `scales_h`, `scales_l[4]`, `qs[128]`, plus `kvalues_iq4nl` LUT.
-- **Quantize** (Q8_0/Q4_0 forward): f32 source -> our f32-scale formats.
+### Forward quantization (f32 -> block)
+- Existing f32-scale: Q8_0 (36 B), Q4_0 (20 B) — 8 blocks/workgroup.
+- Legacy f16-scale (ggml ref math): Q4_1, Q5_0, Q5_1, Q8_1 — one block per
+  workgroup of 1 thread (thread 0 transliteration of quantize_row_*_ref).
+- K-quants (ggml scale-selection math): Q2_K, Q3_K, Q4_K, Q5_K, Q6_K — one
+  256-elem block per workgroup of 1 thread. Round-trips through the matching
+  dequant. IQ/TQ formats are dequant-only (their quantizers are search-based).
 
 ## Kernel ids
 
@@ -60,6 +64,10 @@ Binding 0 = quantized input (bytes), binding 2 = dequantized output (f32).
 | dequant_q8_0 / q4_0 | 0 / 1 | `ceil(32*blocks/256)` |
 | dequant_q4k / q6k / iq4xs | 2 / 3 / 4 | `num_blocks` (256 elems/block) |
 | quantize_q8_0 / q4_0 | 5 / 6 | `ceil(num_blocks/8)` (8 blocks/wg) |
+| dequant q4_1/q5_0/q5_1/q8_1/iq4_nl | 7..10, 14 | `ceil(32*blocks/256)` |
+| dequant q2k/q3k/q5k/iq1_s/iq1_m/iq2_xs/iq2_s/iq2_xxs/iq3_s/iq3_xxs/tq1_0/tq2_0 | 11..13, 15..23 | `num_blocks` |
+| quantize q4_1/q5_0/q5_1/q8_1 | 24..27 | `num_blocks` (1 block/wg) |
+| quantize q2k/q3k/q4k/q5k/q6k | 28..32 | `num_blocks` (1 block/wg) |
 
 ## Files
 

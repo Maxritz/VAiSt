@@ -25,6 +25,11 @@
  * kernels is f32; the code only selects the dequant-in-matmul shader. */
 #define VKBLAS_DTYPE_QGEMM_Q8_0 5
 #define VKBLAS_DTYPE_QGEMM_Q4K  6
+#define VKBLAS_DTYPE_QGEMM_Q4_0 7
+#define VKBLAS_DTYPE_QGEMM_Q5K  8
+#define VKBLAS_DTYPE_QGEMM_Q6K  9
+#define VKBLAS_DTYPE_QGEMM_Q3K  10
+#define VKBLAS_DTYPE_QGEMM_IQ4XS 11
 
 /* ── Push constant block (must match GLSL push_constant layout, std140) ── */
 

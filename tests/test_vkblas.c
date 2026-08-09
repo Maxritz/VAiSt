@@ -890,6 +890,428 @@ static float dequant_q4k_f32(const uint8_t *blk, int idx)
 }
 
 /* ===========================================================================
+ * Reference quantizers/dequantizers for the new fused qgemm formats.
+ *
+ * Every quantizer produces a block in the canonical ggml (or VAIT) byte
+ * layout that the matching dequantizer AND the shader decode identically, so
+ * the CPU reference and the GPU qgemm consume the same Wq bytes.
+ * ========================================================================== */
+
+/* ── Q4_0: 20 B/block of 32 elems; f32 d + 16 packed nibbles ─────────────── */
+static void quantize_q4_0(const float *src, int32_t num_blocks, uint8_t *dst)
+{
+    for (int32_t b = 0; b < num_blocks; ++b) {
+        const float *xs = src + 32 * b;
+        uint8_t *blk = dst + 20 * b;
+
+        float amax = 0.0f;
+        for (int i = 0; i < 32; ++i) {
+            float a = fabsf(xs[i]);
+            if (a > amax) amax = a;
+        }
+        float d = amax / 8.0f;  /* nib-8 in [-8,7] */
+        memcpy(blk, &d, sizeof(d));
+
+        for (int i = 0; i < 32; ++i) {
+            int nib = (d > 0.0f) ? (int)lroundf(xs[i] / d) + 8 : 8;
+            if (nib > 15) nib = 15;
+            if (nib < 0)  nib = 0;
+            if ((i & 1) == 0) blk[4 + (i >> 1)]  = (uint8_t)nib;
+            else              blk[4 + (i >> 1)] |= (uint8_t)(nib << 4);
+        }
+    }
+}
+
+static float dequant_q4_0(const uint8_t *blk, int idx)
+{
+    float d;
+    memcpy(&d, blk, sizeof(d));
+    uint8_t xi = blk[4 + (idx >> 1)];
+    uint32_t nib = (idx & 1) ? (xi >> 4) : (xi & 0xFu);
+    return d * (float)((int)nib - 8);
+}
+
+/* ── Q5_K: 176 B/block of 256 elems; ggml block_q5_K ─────────────────────── */
+static void quantize_q5k_f32(const float *src, uint8_t *dst)
+{
+    enum { QK = 256 };
+    uint8_t L[QK];
+    float   mins[8], scales[8];
+
+    float max_scale = 0, max_min = 0;
+    for (int j = 0; j < 8; ++j) {
+        scales[j] = make_qkx1_quants(32, 31, src + 32 * j, L + 32 * j,
+                                     &mins[j], 9, 0.5f);
+        if (scales[j] > max_scale) max_scale = scales[j];
+        if (mins[j] > max_min)     max_min = mins[j];
+    }
+
+    float inv_scale = max_scale > 0.0f ? 63.0f / max_scale : 0.0f;
+    float inv_min   = max_min   > 0.0f ? 63.0f / max_min   : 0.0f;
+
+    uint8_t *sc = dst + 4;
+    memset(sc, 0, 12);
+    for (int j = 0; j < 8; ++j) {
+        uint8_t ls = (uint8_t)(int)(inv_scale * scales[j] + 0.5f);
+        uint8_t lm = (uint8_t)(int)(inv_min   * mins[j]   + 0.5f);
+        if (ls > 63) ls = 63;
+        if (lm > 63) lm = 63;
+        if (j < 4) {
+            sc[j] = ls;
+            sc[j + 4] = lm;
+        } else {
+            sc[j + 4] = (uint8_t)((ls & 0xF) | ((lm & 0xF) << 4));
+            sc[j - 4] |= (uint8_t)(((ls >> 4) & 0x3) << 6);
+            sc[j]     |= (uint8_t)(((lm >> 4) & 0x3) << 6);
+        }
+    }
+
+    uint16_t d16  = f32_to_f16(max_scale / 63.0f);
+    uint16_t dm16 = f32_to_f16(max_min   / 63.0f);
+    dst[0] = (uint8_t)(d16 & 0xFF);  dst[1] = (uint8_t)(d16 >> 8);
+    dst[2] = (uint8_t)(dm16 & 0xFF); dst[3] = (uint8_t)(dm16 >> 8);
+
+    for (int j = 0; j < 8; ++j) {
+        uint8_t scs, mns;
+        get_scale_min_k4(j, sc, &scs, &mns);
+        float d = f16_to_f32(d16) * (float)scs;
+        if (d == 0.0f) continue;
+        float dm = f16_to_f32(dm16) * (float)mns;
+        for (int ii = 0; ii < 32; ++ii) {
+            int l = (int)lroundf((src[32 * j + ii] + dm) / d);
+            if (l < 0) l = 0;
+            if (l > 31) l = 31;
+            L[32 * j + ii] = (uint8_t)l;
+        }
+    }
+
+    uint8_t *qh = dst + 16;
+    uint8_t *ql = dst + 48;
+    memset(qh, 0, 32);
+    uint8_t m1 = 1, m2 = 2;
+    for (int n = 0; n < QK; n += 64) {
+        for (int j = 0; j < 32; ++j) {
+            int l1 = L[n + j];
+            if (l1 > 15) { l1 -= 16; qh[j] |= m1; }
+            int l2 = L[n + j + 32];
+            if (l2 > 15) { l2 -= 16; qh[j] |= m2; }
+            ql[j] = (uint8_t)(l1 | (l2 << 4));
+        }
+        m1 <<= 2; m2 <<= 2;
+        ql += 32;
+    }
+}
+
+static float dequant_q5k_f32(const uint8_t *blk, int idx)
+{
+    uint16_t d16  = (uint16_t)(blk[0] | (blk[1] << 8));
+    uint16_t dm16 = (uint16_t)(blk[2] | (blk[3] << 8));
+    float d  = f16_to_f32(d16);
+    float dm = f16_to_f32(dm16);
+
+    uint32_t super = (uint32_t)idx >> 6;
+    uint32_t off   = (uint32_t)idx & 63u;
+    uint32_t hi    = off >> 5;
+    uint32_t l     = off & 31u;
+    uint32_t is    = super * 2u + hi;
+
+    uint8_t scs, mns;
+    get_scale_min_k4((int)is, blk + 4, &scs, &mns);
+
+    uint8_t  qbyte = blk[48 + super * 32 + l];
+    uint32_t nib   = (hi != 0u) ? (qbyte >> 4u) : (qbyte & 0xFu);
+    uint32_t hbit  = (blk[16 + l] >> (2u * super + hi)) & 1u;
+    uint32_t level = nib + (hbit ? 16u : 0u);
+
+    return d * (float)scs * (float)level - dm * (float)mns;
+}
+
+/* ── Q6_K: 210 B/block of 256 elems; ggml block_q6_K ─────────────────────── */
+static void quantize_q6k_f32(const float *src, uint8_t *dst)
+{
+    enum { QK = 256 };
+    int8_t  L[QK];
+    float   scales[16];
+
+    float max_scale = 0.0f;
+    for (int ib = 0; ib < 16; ++ib) {
+        float mx = 0.0f;
+        for (int j = 0; j < 16; ++j) {
+            float a = fabsf(src[16 * ib + j]);
+            if (a > mx) mx = a;
+        }
+        scales[ib] = mx / 31.0f;
+        if (scales[ib] > max_scale) max_scale = scales[ib];
+    }
+
+    float d = (max_scale > 0.0f) ? max_scale / 127.0f : 0.0f;
+    uint16_t d16 = f32_to_f16(d);
+    dst[208] = (uint8_t)(d16 & 0xFF); dst[209] = (uint8_t)(d16 >> 8);
+
+    int8_t *sc = (int8_t *)(dst + 192);
+    for (int ib = 0; ib < 16; ++ib) {
+        int s = (d > 0.0f) ? (int)lroundf(scales[ib] / d) : 0;
+        if (s > 127)  s = 127;
+        if (s < -127) s = -127;
+        sc[ib] = (int8_t)s;
+    }
+
+    for (int j = 0; j < QK; ++j) {
+        int g = j >> 4;
+        float de = f16_to_f32(d16) * (float)sc[g];
+        int l;
+        if (de == 0.0f) l = 0;
+        else {
+            l = (int)lroundf(src[j] / de);
+            if (l < -32) l = -32;
+            if (l > 31)  l = 31;
+        }
+        L[j] = (int8_t)(l + 32);
+    }
+
+    uint8_t *ql = dst;
+    uint8_t *qh = dst + 128;
+    memset(dst, 0, 192);  /* ql + qh */
+    for (int j = 0; j < QK; j += 128) {
+        for (int l = 0; l < 32; ++l) {
+            const uint8_t q1 = (uint8_t)(L[j + l +  0] & 0xF);
+            const uint8_t q2 = (uint8_t)(L[j + l + 32] & 0xF);
+            const uint8_t q3 = (uint8_t)(L[j + l + 64] & 0xF);
+            const uint8_t q4 = (uint8_t)(L[j + l + 96] & 0xF);
+            ql[l +  0] = (uint8_t)(q1 | (q3 << 4));
+            ql[l + 32] = (uint8_t)(q2 | (q4 << 4));
+            qh[l] = (uint8_t)((L[j + l] >> 4) | ((L[j + l + 32] >> 4) << 2) |
+                              ((L[j + l + 64] >> 4) << 4) | ((L[j + l + 96] >> 4) << 6));
+        }
+        ql += 64;
+        qh += 32;
+    }
+}
+
+static float dequant_q6k_f32(const uint8_t *blk, int idx)
+{
+    uint16_t d16 = (uint16_t)(blk[208] | (blk[209] << 8));
+    float d = f16_to_f32(d16);
+
+    uint32_t chunk = (uint32_t)idx >> 7;
+    uint32_t sub   = ((uint32_t)idx >> 5) & 3u;
+    uint32_t l     = (uint32_t)idx & 31u;
+    uint32_t is    = l >> 4;
+
+    uint32_t ql_off = chunk * 64u + l + (sub & 1u) * 32u;
+    uint32_t qh_off = chunk * 32u + l;
+    uint32_t sc_off = chunk * 8u + is + sub * 2u;
+
+    uint8_t  ql = blk[ql_off];
+    uint8_t  qh = blk[128 + qh_off];
+    uint32_t ql4 = (sub == 0u || sub == 1u) ? (ql & 0xFu) : (ql >> 4u);
+    uint32_t qh2 = (qh >> (sub * 2u)) & 3u;
+    int level = (int)(ql4 | (qh2 << 4u)) - 32;
+    int sc = (int)((int8_t)blk[192 + sc_off]);
+    return d * (float)sc * (float)level;
+}
+
+/* ── Q3_K: 110 B/block of 256 elems; ggml block_q3_K ─────────────────────── */
+static void quantize_q3k_f32(const float *src, uint8_t *dst)
+{
+    enum { QK = 256 };
+    int8_t  L[QK];
+    float   scales[16];
+
+    float max_scale = 0.0f;
+    for (int ib = 0; ib < 16; ++ib) {
+        float mx = 0.0f;
+        for (int j = 0; j < 16; ++j) {
+            float a = fabsf(src[16 * ib + j]);
+            if (a > mx) mx = a;
+        }
+        scales[ib] = mx / 3.0f;
+        if (scales[ib] > max_scale) max_scale = scales[ib];
+    }
+
+    float d = (max_scale > 0.0f) ? max_scale / 95.0f : 0.0f;
+    uint16_t d16 = f32_to_f16(d);
+    dst[108] = (uint8_t)(d16 & 0xFF); dst[109] = (uint8_t)(d16 >> 8);
+
+    int8_t sc8[16];
+    for (int ib = 0; ib < 16; ++ib) {
+        int s = (d > 0.0f) ? (int)lroundf(scales[ib] / d) + 32 : 32;
+        if (s < 33)  s = 33;   /* keep the group multiplier >= 1 */
+        if (s > 127) s = 127;
+        sc8[ib] = (int8_t)s;
+    }
+
+    for (int j = 0; j < QK; ++j) {
+        int g = j >> 4;
+        float de = f16_to_f32(d16) * (float)(sc8[g] - 32);
+        int l;
+        if (de == 0.0f) l = 0;
+        else {
+            l = (int)lroundf(src[j] / de);
+            if (l < -4) l = -4;
+            if (l > 3)  l = 3;
+        }
+        L[j] = (int8_t)l;
+    }
+
+    /* Pack the 16 int8 scales into the 12 raw bytes s[0..11]. */
+    uint8_t *s = dst + 96;
+    memset(s, 0, 12);
+    for (int is = 0; is < 16; ++is) {
+        uint8_t v = (uint8_t)sc8[is];
+        if (is < 4) {
+            s[is]     |= (v & 0xF);
+            s[8 + is] |= ((v >> 4) & 3);
+        } else if (is < 8) {
+            s[is]     |= (v & 0xF);
+            s[is + 4] |= ((v >> 4) & 3) << 2;
+        } else if (is < 12) {
+            s[is - 8] |= (v & 0xF) << 4;
+            s[is]     |= ((v >> 4) & 3) << 4;
+        } else {
+            s[is - 8] |= (v & 0xF) << 4;
+            s[is - 4] |= ((v >> 4) & 3) << 6;
+        }
+    }
+
+    /* Pack 2-bit levels into qs[64] and the sign/high bits into hmask[32]. */
+    uint8_t *hm = dst;
+    uint8_t *qs = dst + 32;
+    memset(hm, 0, 32);
+    memset(qs, 0, 64);
+    for (int half = 0; half < 2; ++half) {
+        for (int j = 0; j < 4; ++j) {
+            int shift = 2 * j;
+            int mbit  = j + half * 4;
+            for (int hi = 0; hi < 2; ++hi) {
+                for (int ll = 0; ll < 16; ++ll) {
+                    int idx = half * 128 + j * 32 + hi * 16 + ll;
+                    int lvl = L[idx];
+                    int q2  = lvl & 3;
+                    int q_off = half * 32 + ll + hi * 16;
+                    int h_off = ll + hi * 16;
+                    qs[q_off] |= (uint8_t)(q2 << shift);
+                    if (lvl >= 0) hm[h_off] |= (uint8_t)(1u << mbit);
+                }
+            }
+        }
+    }
+}
+
+static float dequant_q3k_f32(const uint8_t *blk, int idx)
+{
+    uint16_t d16 = (uint16_t)(blk[108] | (blk[109] << 8));
+    float d = f16_to_f32(d16);
+
+    uint32_t half = (uint32_t)idx >> 7;
+    uint32_t pos  = (uint32_t)idx & 127u;
+    uint32_t j    = pos >> 5;
+    uint32_t l    = pos & 31u;
+    uint32_t hi   = l >> 4;
+    uint32_t ll   = l & 15u;
+
+    uint32_t is    = half * 8u + j * 2u + hi;
+    uint32_t shift = 2u * j;
+    uint32_t mbit  = j + (half ? 4u : 0u);
+    uint32_t q_off = half * 32u + ll + (hi ? 16u : 0u);
+    uint32_t h_off = ll + (hi ? 16u : 0u);
+
+    uint32_t q2 = (blk[32 + q_off] >> shift) & 3u;
+    uint32_t hb = (blk[h_off] >> mbit) & 1u;
+    int level = (int)q2 - (hb ? 0 : 4);
+
+    const uint8_t *s = blk + 96;
+    uint32_t s0, s1;
+    if (is < 4)       { s0 = s[is] & 0xFu;        s1 = s[8 + is] & 3u; }
+    else if (is < 8)  { s0 = s[is] & 0xFu;        s1 = (s[is + 4] >> 2) & 3u; }
+    else if (is < 12) { s0 = s[is - 8] >> 4u;     s1 = (s[is] >> 4) & 3u; }
+    else              { s0 = s[is - 8] >> 4u;     s1 = (s[is - 4] >> 6) & 3u; }
+    int sc = (int)(s0 | (s1 << 4u)) - 32;
+    return d * (float)sc * (float)level;
+}
+
+/* ── IQ4_XS: 136 B/block of 256 elems; ggml block_iq4_xs ─────────────────── */
+static const int iq4nl_lut[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10,
+      1,   13,  25,  38,  53,  69,  89, 113
+};
+
+static void quantize_iq4xs_f32(const float *src, uint8_t *dst)
+{
+    enum { QK = 256 };
+    float dls[8];
+    float max_dl = 0.0f;
+
+    for (int ib = 0; ib < 8; ++ib) {
+        float mx = 0.0f;
+        for (int j = 0; j < 32; ++j) {
+            float a = fabsf(src[32 * ib + j]);
+            if (a > mx) mx = a;
+        }
+        dls[ib] = mx / 113.0f;   /* 113 = largest |iq4nl| value */
+        if (dls[ib] > max_dl) max_dl = dls[ib];
+    }
+
+    float d = (max_dl > 0.0f) ? max_dl / 31.0f : 0.0f;
+    uint16_t d16 = f32_to_f16(d);
+    dst[0] = (uint8_t)(d16 & 0xFF); dst[1] = (uint8_t)(d16 >> 8);
+
+    uint16_t scales_h = 0;
+    uint8_t  scales_l[4];
+    memset(scales_l, 0, 4);
+    for (int ib = 0; ib < 8; ++ib) {
+        int ls = (d > 0.0f) ? (int)lroundf(dls[ib] / d) + 32 : 32;
+        if (ls < 32) ls = 32;
+        if (ls > 63) ls = 63;
+        scales_l[ib >> 1] |= (uint8_t)((ls & 0xF) << (4 * (ib & 1)));
+        scales_h |= (uint16_t)(((ls >> 4) & 3) << (2 * ib));
+    }
+    dst[2] = (uint8_t)(scales_h & 0xFF); dst[3] = (uint8_t)(scales_h >> 8);
+    dst[4] = scales_l[0]; dst[5] = scales_l[1];
+    dst[6] = scales_l[2]; dst[7] = scales_l[3];
+
+    uint8_t *qs = dst + 8;
+    memset(qs, 0, 128);
+    for (int ib = 0; ib < 8; ++ib) {
+        int ls = (int)(scales_l[ib >> 1] >> (4 * (ib & 1)) & 0xF) |
+                 ((int)((scales_h >> (2 * ib)) & 3) << 4);
+        float dl = f16_to_f32(d16) * (float)(ls - 32);
+        if (dl == 0.0f) continue;
+        for (int j = 0; j < 32; ++j) {
+            float x = src[32 * ib + j];
+            int best = 0;
+            float best_err = fabsf(x - dl * (float)iq4nl_lut[0]);
+            for (int n = 1; n < 16; ++n) {
+                float e = fabsf(x - dl * (float)iq4nl_lut[n]);
+                if (e < best_err) { best_err = e; best = n; }
+            }
+            if (j < 16) qs[ib * 16 + j] |= (uint8_t)best;
+            else        qs[ib * 16 + (j - 16)] |= (uint8_t)(best << 4);
+        }
+    }
+}
+
+static float dequant_iq4xs_f32(const uint8_t *blk, int idx)
+{
+    uint16_t d16 = (uint16_t)(blk[0] | (blk[1] << 8));
+    float d = f16_to_f32(d16);
+    uint16_t scales_h = (uint16_t)(blk[2] | (blk[3] << 8));
+
+    uint32_t ib = (uint32_t)idx >> 5;
+    uint32_t j  = (uint32_t)idx & 15u;
+    uint32_t hi = ((uint32_t)idx >> 4) & 1u;
+
+    uint32_t ls_l = (blk[4 + (ib >> 1)] >> (4 * (ib & 1))) & 0xFu;
+    uint32_t ls_h = (scales_h >> (2 * ib)) & 3u;
+    int ls = (int)(ls_l | (ls_h << 4));
+    float dl = d * (float)(ls - 32);
+
+    uint8_t qbyte = blk[8 + ib * 16 + j];
+    uint32_t nib = (hi != 0u) ? (qbyte >> 4u) : (qbyte & 0xFu);
+    return dl * (float)iq4nl_lut[nib];
+}
+
+/* ===========================================================================
  * main
  * ========================================================================== */
 
@@ -937,10 +1359,12 @@ int main(void)
     gemm_buffers_t bt64b;
     double C64in[TEST_GEMM_M * TEST_GEMM_N];
     double Dbt_expected[TEST_GEMM_M * TEST_GEMM_N];
-    /* fused quantized GEMM cases: Q8_0 (k=32, k=64) and Q4_K (k=256) */
+    /* fused quantized GEMM cases: Q8_0 (k=32, k=64), Q4_K (k=256), plus
+       Q4_0 (k=32, k=64), Q5_K, Q6_K, Q3_K, IQ4_XS (k=256) */
     qgemm_buffers_t q8_32, q8_64, q4k;
-    /* CPU references for the three qgemm cases, filled in section 10b. */
-    static float qg_yexp[3][8 * 8];
+    qgemm_buffers_t q40_32, q40_64, q5k, q6k, q3k, iq4xs;
+    /* CPU references for the nine qgemm cases, filled in section 10b. */
+    static float qg_yexp[9][8 * 8];
 
     memset(&f32b, 0, sizeof(f32b));
     memset(&f16b, 0, sizeof(f16b));
@@ -955,6 +1379,12 @@ int main(void)
     memset(&q8_32, 0, sizeof(q8_32));
     memset(&q8_64, 0, sizeof(q8_64));
     memset(&q4k, 0, sizeof(q4k));
+    memset(&q40_32, 0, sizeof(q40_32));
+    memset(&q40_64, 0, sizeof(q40_64));
+    memset(&q5k, 0, sizeof(q5k));
+    memset(&q6k, 0, sizeof(q6k));
+    memset(&q3k, 0, sizeof(q3k));
+    memset(&iq4xs, 0, sizeof(iq4xs));
 
     int overall_pass = 1;
     VkResult r;
@@ -1254,6 +1684,79 @@ int main(void)
         if (r != VK_SUCCESS) goto cleanup;
         r = create_sub_buffer(h.device, h.mem, q4k.off_y, qgn * qgm * sizeof(float), &q4k.y);
         if (r != VK_SUCCESS) goto cleanup;
+
+        /* Q4_0 k=32: ldw = 20, Wq = 8*20 B. */
+        q40_32.off_Wq = take_region(&h.cursor, h.align, qgn * 20);
+        q40_32.off_x  = take_region(&h.cursor, h.align, 32 * qgm * sizeof(float));
+        q40_32.off_y  = take_region(&h.cursor, h.align, qgn * qgm * sizeof(float));
+        q40_32.off_readback = take_region(&h.cursor, h.align, qgn * qgm * sizeof(float));
+        /* Q4_0 k=64: ldw = 40, Wq = 8*40 B. */
+        q40_64.off_Wq = take_region(&h.cursor, h.align, qgn * 40);
+        q40_64.off_x  = take_region(&h.cursor, h.align, 64 * qgm * sizeof(float));
+        q40_64.off_y  = take_region(&h.cursor, h.align, qgn * qgm * sizeof(float));
+        q40_64.off_readback = take_region(&h.cursor, h.align, qgn * qgm * sizeof(float));
+        /* Q5_K k=256: ldw = 176, Wq = 8*176 B. */
+        q5k.off_Wq = take_region(&h.cursor, h.align, qgn * 176);
+        q5k.off_x  = take_region(&h.cursor, h.align, q4k_k * qgm * sizeof(float));
+        q5k.off_y  = take_region(&h.cursor, h.align, qgn * qgm * sizeof(float));
+        q5k.off_readback = take_region(&h.cursor, h.align, qgn * qgm * sizeof(float));
+        /* Q6_K k=256: ldw = 210, Wq = 8*210 B. */
+        q6k.off_Wq = take_region(&h.cursor, h.align, qgn * 210);
+        q6k.off_x  = take_region(&h.cursor, h.align, q4k_k * qgm * sizeof(float));
+        q6k.off_y  = take_region(&h.cursor, h.align, qgn * qgm * sizeof(float));
+        q6k.off_readback = take_region(&h.cursor, h.align, qgn * qgm * sizeof(float));
+        /* Q3_K k=256: ldw = 110, Wq = 8*110 B. */
+        q3k.off_Wq = take_region(&h.cursor, h.align, qgn * 110);
+        q3k.off_x  = take_region(&h.cursor, h.align, q4k_k * qgm * sizeof(float));
+        q3k.off_y  = take_region(&h.cursor, h.align, qgn * qgm * sizeof(float));
+        q3k.off_readback = take_region(&h.cursor, h.align, qgn * qgm * sizeof(float));
+        /* IQ4_XS k=256: ldw = 136, Wq = 8*136 B. */
+        iq4xs.off_Wq = take_region(&h.cursor, h.align, qgn * 136);
+        iq4xs.off_x  = take_region(&h.cursor, h.align, q4k_k * qgm * sizeof(float));
+        iq4xs.off_y  = take_region(&h.cursor, h.align, qgn * qgm * sizeof(float));
+        iq4xs.off_readback = take_region(&h.cursor, h.align, qgn * qgm * sizeof(float));
+
+        r = create_sub_buffer(h.device, h.mem, q40_32.off_Wq, qgn * 20, &q40_32.Wq);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, q40_32.off_x, 32 * qgm * sizeof(float), &q40_32.x);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, q40_32.off_y, qgn * qgm * sizeof(float), &q40_32.y);
+        if (r != VK_SUCCESS) goto cleanup;
+
+        r = create_sub_buffer(h.device, h.mem, q40_64.off_Wq, qgn * 40, &q40_64.Wq);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, q40_64.off_x, 64 * qgm * sizeof(float), &q40_64.x);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, q40_64.off_y, qgn * qgm * sizeof(float), &q40_64.y);
+        if (r != VK_SUCCESS) goto cleanup;
+
+        r = create_sub_buffer(h.device, h.mem, q5k.off_Wq, qgn * 176, &q5k.Wq);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, q5k.off_x, q4k_k * qgm * sizeof(float), &q5k.x);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, q5k.off_y, qgn * qgm * sizeof(float), &q5k.y);
+        if (r != VK_SUCCESS) goto cleanup;
+
+        r = create_sub_buffer(h.device, h.mem, q6k.off_Wq, qgn * 210, &q6k.Wq);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, q6k.off_x, q4k_k * qgm * sizeof(float), &q6k.x);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, q6k.off_y, qgn * qgm * sizeof(float), &q6k.y);
+        if (r != VK_SUCCESS) goto cleanup;
+
+        r = create_sub_buffer(h.device, h.mem, q3k.off_Wq, qgn * 110, &q3k.Wq);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, q3k.off_x, q4k_k * qgm * sizeof(float), &q3k.x);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, q3k.off_y, qgn * qgm * sizeof(float), &q3k.y);
+        if (r != VK_SUCCESS) goto cleanup;
+
+        r = create_sub_buffer(h.device, h.mem, iq4xs.off_Wq, qgn * 136, &iq4xs.Wq);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, iq4xs.off_x, q4k_k * qgm * sizeof(float), &iq4xs.x);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = create_sub_buffer(h.device, h.mem, iq4xs.off_y, qgn * qgm * sizeof(float), &iq4xs.y);
+        if (r != VK_SUCCESS) goto cleanup;
     }
 
     /* ── 10. Fill inputs + references (column-major) ────────────────────── */
@@ -1526,6 +2029,127 @@ int main(void)
         memcpy(qg_yexp[0], yexp8_32, sizeof(yexp8_32));
         memcpy(qg_yexp[1], yexp8_64, sizeof(yexp8_64));
         memcpy(qg_yexp[2], yexp4k,   sizeof(yexp4k));
+
+        /* ── Q4_0 (k=32, k=64) + Q5_K / Q6_K / Q3_K / IQ4_XS (k=256) ──── */
+        static float W40_32[8 * 32], W40_64[8 * 64];
+        static float W5k[8 * 256], W6k[8 * 256], W3k[8 * 256], Wiq[8 * 256];
+        static float yexp40_32[8 * 8], yexp40_64[8 * 8];
+        static float yexp5k[8 * 8], yexp6k[8 * 8], yexp3k[8 * 8], yexpiq[8 * 8];
+        uint8_t Wq40_32[8 * 20], Wq40_64[8 * 40];
+        uint8_t Wq5k[8 * 176], Wq6k[8 * 210], Wq3k[8 * 110], Wqiq[8 * 136];
+
+        for (uint32_t r = 0; r < qgn; ++r) {
+            for (uint32_t t = 0; t < 32; ++t)
+                W40_32[r * 32 + t] = ((float)((r * 11 + t * 7) % 21) - 10.0f) * 0.3f;
+            for (uint32_t t = 0; t < 64; ++t)
+                W40_64[r * 64 + t] = ((float)((r * 13 + t * 5) % 31) - 15.0f) * 0.25f;
+            for (uint32_t t = 0; t < 256; ++t)
+                W5k[r * 256 + t] = ((float)((r * 17 + t * 11) % 43) - 21.0f) * 0.2f;
+            for (uint32_t t = 0; t < 256; ++t)
+                W6k[r * 256 + t] = ((float)((r * 19 + t * 13) % 61) - 30.0f) * 0.15f;
+            for (uint32_t t = 0; t < 256; ++t)
+                W3k[r * 256 + t] = ((float)((r * 23 + t * 17) % 41) - 20.0f) * 0.25f;
+            for (uint32_t t = 0; t < 256; ++t)
+                Wiq[r * 256 + t] = ((float)((r * 29 + t * 19) % 53) - 26.0f) * 0.2f;
+        }
+
+        /* Q4_0 k=32, alpha=1, beta=0. */
+        quantize_q4_0(W40_32, 8, Wq40_32);
+        for (uint32_t r = 0; r < qgn; ++r) {
+            for (uint32_t c = 0; c < qgm; ++c) {
+                double acc = 0.0;
+                for (uint32_t t = 0; t < 32; ++t)
+                    acc += (double)dequant_q4_0(Wq40_32 + r * 20 + ((t >> 5) * 20), (int)(t & 31u))
+                         * (double)x32[t + c * 32];
+                yexp40_32[r + c * 8] = (float)acc;
+            }
+        }
+        memcpy((char *)h.mapped + q40_32.off_Wq, Wq40_32, sizeof(Wq40_32));
+        memcpy((char *)h.mapped + q40_32.off_x, x32, sizeof(x32));
+        memset((char *)h.mapped + q40_32.off_y, 0, qgn * qgm * sizeof(float));
+
+        /* Q4_0 k=64, alpha=0.75, beta=0.5 (beta/C read path). */
+        quantize_q4_0(W40_64, 16, Wq40_64);
+        for (uint32_t r = 0; r < qgn; ++r) {
+            for (uint32_t c = 0; c < qgm; ++c) {
+                double acc = 0.0;
+                for (uint32_t t = 0; t < 64; ++t)
+                    acc += (double)dequant_q4_0(Wq40_64 + r * 40 + ((t >> 5) * 20), (int)(t & 31u))
+                         * (double)x64[t + c * 64];
+                yexp40_64[r + c * 8] = (float)(0.75 * acc + 0.5 * (double)yinit[r + c * 8]);
+            }
+        }
+        memcpy((char *)h.mapped + q40_64.off_Wq, Wq40_64, sizeof(Wq40_64));
+        memcpy((char *)h.mapped + q40_64.off_x, x64, sizeof(x64));
+        memcpy((char *)h.mapped + q40_64.off_y, yinit, sizeof(yinit));
+
+        /* Q5_K k=256, alpha=1, beta=0. */
+        for (uint32_t r = 0; r < qgn; ++r)
+            quantize_q5k_f32(W5k + r * 256, Wq5k + r * 176);
+        for (uint32_t r = 0; r < qgn; ++r) {
+            for (uint32_t c = 0; c < qgm; ++c) {
+                double acc = 0.0;
+                for (uint32_t t = 0; t < 256; ++t)
+                    acc += (double)dequant_q5k_f32(Wq5k + r * 176, (int)t) * (double)x256[t + c * 256];
+                yexp5k[r + c * 8] = (float)acc;
+            }
+        }
+        memcpy((char *)h.mapped + q5k.off_Wq, Wq5k, sizeof(Wq5k));
+        memcpy((char *)h.mapped + q5k.off_x, x256, sizeof(x256));
+        memset((char *)h.mapped + q5k.off_y, 0, qgn * qgm * sizeof(float));
+
+        /* Q6_K k=256, alpha=1, beta=0. */
+        for (uint32_t r = 0; r < qgn; ++r)
+            quantize_q6k_f32(W6k + r * 256, Wq6k + r * 210);
+        for (uint32_t r = 0; r < qgn; ++r) {
+            for (uint32_t c = 0; c < qgm; ++c) {
+                double acc = 0.0;
+                for (uint32_t t = 0; t < 256; ++t)
+                    acc += (double)dequant_q6k_f32(Wq6k + r * 210, (int)t) * (double)x256[t + c * 256];
+                yexp6k[r + c * 8] = (float)acc;
+            }
+        }
+        memcpy((char *)h.mapped + q6k.off_Wq, Wq6k, sizeof(Wq6k));
+        memcpy((char *)h.mapped + q6k.off_x, x256, sizeof(x256));
+        memset((char *)h.mapped + q6k.off_y, 0, qgn * qgm * sizeof(float));
+
+        /* Q3_K k=256, alpha=1, beta=0. */
+        for (uint32_t r = 0; r < qgn; ++r)
+            quantize_q3k_f32(W3k + r * 256, Wq3k + r * 110);
+        for (uint32_t r = 0; r < qgn; ++r) {
+            for (uint32_t c = 0; c < qgm; ++c) {
+                double acc = 0.0;
+                for (uint32_t t = 0; t < 256; ++t)
+                    acc += (double)dequant_q3k_f32(Wq3k + r * 110, (int)t) * (double)x256[t + c * 256];
+                yexp3k[r + c * 8] = (float)acc;
+            }
+        }
+        memcpy((char *)h.mapped + q3k.off_Wq, Wq3k, sizeof(Wq3k));
+        memcpy((char *)h.mapped + q3k.off_x, x256, sizeof(x256));
+        memset((char *)h.mapped + q3k.off_y, 0, qgn * qgm * sizeof(float));
+
+        /* IQ4_XS k=256, alpha=1, beta=0. */
+        for (uint32_t r = 0; r < qgn; ++r)
+            quantize_iq4xs_f32(Wiq + r * 256, Wqiq + r * 136);
+        for (uint32_t r = 0; r < qgn; ++r) {
+            for (uint32_t c = 0; c < qgm; ++c) {
+                double acc = 0.0;
+                for (uint32_t t = 0; t < 256; ++t)
+                    acc += (double)dequant_iq4xs_f32(Wqiq + r * 136, (int)t) * (double)x256[t + c * 256];
+                yexpiq[r + c * 8] = (float)acc;
+            }
+        }
+        memcpy((char *)h.mapped + iq4xs.off_Wq, Wqiq, sizeof(Wqiq));
+        memcpy((char *)h.mapped + iq4xs.off_x, x256, sizeof(x256));
+        memset((char *)h.mapped + iq4xs.off_y, 0, qgn * qgm * sizeof(float));
+
+        /* Store the references for the check phase. */
+        memcpy(qg_yexp[3], yexp40_32, sizeof(yexp40_32));
+        memcpy(qg_yexp[4], yexp40_64, sizeof(yexp40_64));
+        memcpy(qg_yexp[5], yexp5k,    sizeof(yexp5k));
+        memcpy(qg_yexp[6], yexp6k,    sizeof(yexp6k));
+        memcpy(qg_yexp[7], yexp3k,    sizeof(yexp3k));
+        memcpy(qg_yexp[8], yexpiq,    sizeof(yexpiq));
     }
 
     /* ── 11. Record all GEMM dispatches into one command buffer ─────────── */
@@ -1706,6 +2330,48 @@ int main(void)
                                  &qa1, q4k.Wq, 144, q4k.x, 256,
                                  &qb0, q4k.y, 8),
             "qgemm q4k k=256");
+
+        overall_pass &= record_dispatch(
+            vkblas_qgemm_q4_0_f32(h.blas_ctx, h.cmd,
+                                  (int32_t)qgm, (int32_t)qgn, 32,
+                                  &qa1, q40_32.Wq, 20, q40_32.x, 32,
+                                  &qb0, q40_32.y, 8),
+            "qgemm q4_0 k=32");
+
+        overall_pass &= record_dispatch(
+            vkblas_qgemm_q4_0_f32(h.blas_ctx, h.cmd,
+                                  (int32_t)qgm, (int32_t)qgn, 64,
+                                  &qa2, q40_64.Wq, 40, q40_64.x, 64,
+                                  &qb2, q40_64.y, 8),
+            "qgemm q4_0 k=64");
+
+        overall_pass &= record_dispatch(
+            vkblas_qgemm_q5k_f32(h.blas_ctx, h.cmd,
+                                 (int32_t)qgm, (int32_t)qgn, 256,
+                                 &qa1, q5k.Wq, 176, q5k.x, 256,
+                                 &qb0, q5k.y, 8),
+            "qgemm q5k k=256");
+
+        overall_pass &= record_dispatch(
+            vkblas_qgemm_q6k_f32(h.blas_ctx, h.cmd,
+                                 (int32_t)qgm, (int32_t)qgn, 256,
+                                 &qa1, q6k.Wq, 210, q6k.x, 256,
+                                 &qb0, q6k.y, 8),
+            "qgemm q6k k=256");
+
+        overall_pass &= record_dispatch(
+            vkblas_qgemm_q3k_f32(h.blas_ctx, h.cmd,
+                                 (int32_t)qgm, (int32_t)qgn, 256,
+                                 &qa1, q3k.Wq, 110, q3k.x, 256,
+                                 &qb0, q3k.y, 8),
+            "qgemm q3k k=256");
+
+        overall_pass &= record_dispatch(
+            vkblas_qgemm_iq4xs_f32(h.blas_ctx, h.cmd,
+                                   (int32_t)qgm, (int32_t)qgn, 256,
+                                   &qa1, iq4xs.Wq, 136, iq4xs.x, 256,
+                                   &qb0, iq4xs.y, 8),
+            "qgemm iq4xs k=256");
     }
 
     /* ── 12. Make shader writes visible to the transfer readbacks ───────── */
@@ -1742,6 +2408,18 @@ int main(void)
     record_copy_readback(h.cmd, q8_64.y, h.staging, q8_64.off_readback,
                          8 * 8 * sizeof(float));
     record_copy_readback(h.cmd, q4k.y, h.staging, q4k.off_readback,
+                         8 * 8 * sizeof(float));
+    record_copy_readback(h.cmd, q40_32.y, h.staging, q40_32.off_readback,
+                         8 * 8 * sizeof(float));
+    record_copy_readback(h.cmd, q40_64.y, h.staging, q40_64.off_readback,
+                         8 * 8 * sizeof(float));
+    record_copy_readback(h.cmd, q5k.y, h.staging, q5k.off_readback,
+                         8 * 8 * sizeof(float));
+    record_copy_readback(h.cmd, q6k.y, h.staging, q6k.off_readback,
+                         8 * 8 * sizeof(float));
+    record_copy_readback(h.cmd, q3k.y, h.staging, q3k.off_readback,
+                         8 * 8 * sizeof(float));
+    record_copy_readback(h.cmd, iq4xs.y, h.staging, iq4xs.off_readback,
                          8 * 8 * sizeof(float));
 
     r = vkEndCommandBuffer(h.cmd);
@@ -1847,6 +2525,24 @@ int main(void)
     overall_pass &= check_output_f32("qgemm q4k k=256", h.mapped,
                                      q4k.off_readback, qg_yexp[2],
                                      8 * 8, 1e-2f);
+    overall_pass &= check_output_f32("qgemm q4_0 k=32", h.mapped,
+                                     q40_32.off_readback, qg_yexp[3],
+                                     8 * 8, TEST_F32_TOLERANCE);
+    overall_pass &= check_output_f32("qgemm q4_0 k=64", h.mapped,
+                                     q40_64.off_readback, qg_yexp[4],
+                                     8 * 8, TEST_F32_TOLERANCE);
+    overall_pass &= check_output_f32("qgemm q5k k=256", h.mapped,
+                                     q5k.off_readback, qg_yexp[5],
+                                     8 * 8, 1e-2f);
+    overall_pass &= check_output_f32("qgemm q6k k=256", h.mapped,
+                                     q6k.off_readback, qg_yexp[6],
+                                     8 * 8, 1e-2f);
+    overall_pass &= check_output_f32("qgemm q3k k=256", h.mapped,
+                                     q3k.off_readback, qg_yexp[7],
+                                     8 * 8, 1e-2f);
+    overall_pass &= check_output_f32("qgemm iq4xs k=256", h.mapped,
+                                     iq4xs.off_readback, qg_yexp[8],
+                                     8 * 8, 1e-2f);
 
 cleanup:
     if (h.blas_ctx) vkblas_destroy_context(h.blas_ctx);
@@ -1884,6 +2580,24 @@ cleanup:
     if (q4k.Wq) vkDestroyBuffer(h.device, q4k.Wq, NULL);
     if (q4k.x) vkDestroyBuffer(h.device, q4k.x, NULL);
     if (q4k.y) vkDestroyBuffer(h.device, q4k.y, NULL);
+    if (q40_32.Wq) vkDestroyBuffer(h.device, q40_32.Wq, NULL);
+    if (q40_32.x) vkDestroyBuffer(h.device, q40_32.x, NULL);
+    if (q40_32.y) vkDestroyBuffer(h.device, q40_32.y, NULL);
+    if (q40_64.Wq) vkDestroyBuffer(h.device, q40_64.Wq, NULL);
+    if (q40_64.x) vkDestroyBuffer(h.device, q40_64.x, NULL);
+    if (q40_64.y) vkDestroyBuffer(h.device, q40_64.y, NULL);
+    if (q5k.Wq) vkDestroyBuffer(h.device, q5k.Wq, NULL);
+    if (q5k.x) vkDestroyBuffer(h.device, q5k.x, NULL);
+    if (q5k.y) vkDestroyBuffer(h.device, q5k.y, NULL);
+    if (q6k.Wq) vkDestroyBuffer(h.device, q6k.Wq, NULL);
+    if (q6k.x) vkDestroyBuffer(h.device, q6k.x, NULL);
+    if (q6k.y) vkDestroyBuffer(h.device, q6k.y, NULL);
+    if (q3k.Wq) vkDestroyBuffer(h.device, q3k.Wq, NULL);
+    if (q3k.x) vkDestroyBuffer(h.device, q3k.x, NULL);
+    if (q3k.y) vkDestroyBuffer(h.device, q3k.y, NULL);
+    if (iq4xs.Wq) vkDestroyBuffer(h.device, iq4xs.Wq, NULL);
+    if (iq4xs.x) vkDestroyBuffer(h.device, iq4xs.x, NULL);
+    if (iq4xs.y) vkDestroyBuffer(h.device, iq4xs.y, NULL);
     if (h.staging) vkDestroyBuffer(h.device, h.staging, NULL);
     if (h.mapped)  vkUnmapMemory(h.device, h.mem);
     if (h.mem != VK_NULL_HANDLE) vkFreeMemory(h.device, h.mem, NULL);

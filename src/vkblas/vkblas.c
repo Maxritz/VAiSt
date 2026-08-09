@@ -147,6 +147,21 @@ static const uint32_t* vkblas_select_spirv(VkBLASContext* ctx,
         case VKBLAS_DTYPE_QGEMM_Q4K:
             *out_size = vkblas_spv_baseline_qgemm_q4k_size;
             return vkblas_spv_baseline_qgemm_q4k;
+        case VKBLAS_DTYPE_QGEMM_Q4_0:
+            *out_size = vkblas_spv_baseline_qgemm_q4_0_size;
+            return vkblas_spv_baseline_qgemm_q4_0;
+        case VKBLAS_DTYPE_QGEMM_Q5K:
+            *out_size = vkblas_spv_baseline_qgemm_q5k_size;
+            return vkblas_spv_baseline_qgemm_q5k;
+        case VKBLAS_DTYPE_QGEMM_Q6K:
+            *out_size = vkblas_spv_baseline_qgemm_q6k_size;
+            return vkblas_spv_baseline_qgemm_q6k;
+        case VKBLAS_DTYPE_QGEMM_Q3K:
+            *out_size = vkblas_spv_baseline_qgemm_q3k_size;
+            return vkblas_spv_baseline_qgemm_q3k;
+        case VKBLAS_DTYPE_QGEMM_IQ4XS:
+            *out_size = vkblas_spv_baseline_qgemm_iq4xs_size;
+            return vkblas_spv_baseline_qgemm_iq4xs;
         default:
             return NULL;
         }
@@ -1083,7 +1098,8 @@ VkResult vkblas_gemm_ex_strided_batched(VkBLASContext* context, VkCommandBuffer 
 }
 
 /* ══════════════════════════════════════════════════════════════════════════ *
- * Fused quantized GEMM — dequant-in-matmul (Q8_0 / Q4_K weights)
+ * Fused quantized GEMM — dequant-in-matmul (Q8_0 / Q4_K / Q4_0 / Q5_K /
+ * Q6_K / Q3_K / IQ4_XS weights)
  * ══════════════════════════════════════════════════════════════════════════ */
 
 /* Resolve the dequant-in-matmul pipeline for a quantized weight format.
@@ -1095,25 +1111,48 @@ static VkResult vkblas_qgemm_ensure_pipeline(VkBLASContext* ctx,
                                              uint32_t kernel,
                                              VkPipeline* out_pipeline)
 {
-    /* Only the two fused kernels have pipelines; anything else fails. */
+    /* Only the fused kernels have pipelines; anything else fails. */
     uint32_t dtype;
-    if (kernel == VKBLAS_DTYPE_QGEMM_Q8_0) {
+    switch (kernel) {
+    case VKBLAS_DTYPE_QGEMM_Q8_0:
         dtype = VKBLAS_DTYPE_QGEMM_Q8_0;
-    } else if (kernel == VKBLAS_DTYPE_QGEMM_Q4K) {
+        break;
+    case VKBLAS_DTYPE_QGEMM_Q4K:
         dtype = VKBLAS_DTYPE_QGEMM_Q4K;
-    } else {
+        break;
+    case VKBLAS_DTYPE_QGEMM_Q4_0:
+        dtype = VKBLAS_DTYPE_QGEMM_Q4_0;
+        break;
+    case VKBLAS_DTYPE_QGEMM_Q5K:
+        dtype = VKBLAS_DTYPE_QGEMM_Q5K;
+        break;
+    case VKBLAS_DTYPE_QGEMM_Q6K:
+        dtype = VKBLAS_DTYPE_QGEMM_Q6K;
+        break;
+    case VKBLAS_DTYPE_QGEMM_Q3K:
+        dtype = VKBLAS_DTYPE_QGEMM_Q3K;
+        break;
+    case VKBLAS_DTYPE_QGEMM_IQ4XS:
+        dtype = VKBLAS_DTYPE_QGEMM_IQ4XS;
+        break;
+    default:
         return VK_ERROR_FEATURE_NOT_PRESENT;
     }
     return vkblas_ensure_pipeline(ctx, dtype, 0, 0, VK_FALSE, out_pipeline);
 }
 
-/* Shared dispatch for both fused quantized GEMMs.
+/* Shared dispatch for all fused quantized GEMMs.
  *
  * Layout contract (documented in vkblas.h):
  *   - Wq is the weight matrix (n rows x k cols) stored as quantized blocks,
  *     row-major per row: row r starts at byte offset r * ldw.
- *       Q8_0: 36 B/block of 32 elems (f32 d + 32 int8). n*ceil(k/32) blocks.
- *       Q4_K: 144 B/block of 256 elems (ggml).      n*ceil(k/256) blocks.
+ *       Q8_0:   36 B/block of  32 elems (f32 d + 32 int8).
+ *       Q4_0:   20 B/block of  32 elems (f32 d + 16 packed nibbles).
+ *       Q4_K:  144 B/block of 256 elems (ggml).
+ *       Q5_K:  176 B/block of 256 elems (ggml).
+ *       Q6_K:  210 B/block of 256 elems (ggml).
+ *       Q3_K:  110 B/block of 256 elems (ggml).
+ *       IQ4_XS:136 B/block of 256 elems (ggml).
  *   - x is f32 (k x m), column-major; y is f32 (n x m), column-major.
  *
  * Descriptor binding mirrors the plain GEMM 4-binding layout:
@@ -1214,5 +1253,85 @@ VkResult vkblas_qgemm_q4k_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
 
     return vkblas_qgemm_common(ctx, cmd, m, n, k,
                                VKBLAS_DTYPE_QGEMM_Q4K,
+                               alpha, Wq, ldw, x, ldx, beta, y, ldy);
+}
+
+VkResult vkblas_qgemm_q4_0_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                               int32_t m, int32_t n, int32_t k,
+                               const float* alpha, VkBuffer Wq, int32_t ldw,
+                               VkBuffer x, int32_t ldx,
+                               const float* beta, VkBuffer y, int32_t ldy)
+{
+    if (!ctx || !cmd || !Wq || !x || !y || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m <= 0 || n <= 0 || k <= 0)
+        return VK_SUCCESS;  /* no-op for zero-size matrices */
+
+    return vkblas_qgemm_common(ctx, cmd, m, n, k,
+                               VKBLAS_DTYPE_QGEMM_Q4_0,
+                               alpha, Wq, ldw, x, ldx, beta, y, ldy);
+}
+
+VkResult vkblas_qgemm_q5k_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                              int32_t m, int32_t n, int32_t k,
+                              const float* alpha, VkBuffer Wq, int32_t ldw,
+                              VkBuffer x, int32_t ldx,
+                              const float* beta, VkBuffer y, int32_t ldy)
+{
+    if (!ctx || !cmd || !Wq || !x || !y || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m <= 0 || n <= 0 || k <= 0)
+        return VK_SUCCESS;  /* no-op for zero-size matrices */
+
+    return vkblas_qgemm_common(ctx, cmd, m, n, k,
+                               VKBLAS_DTYPE_QGEMM_Q5K,
+                               alpha, Wq, ldw, x, ldx, beta, y, ldy);
+}
+
+VkResult vkblas_qgemm_q6k_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                              int32_t m, int32_t n, int32_t k,
+                              const float* alpha, VkBuffer Wq, int32_t ldw,
+                              VkBuffer x, int32_t ldx,
+                              const float* beta, VkBuffer y, int32_t ldy)
+{
+    if (!ctx || !cmd || !Wq || !x || !y || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m <= 0 || n <= 0 || k <= 0)
+        return VK_SUCCESS;  /* no-op for zero-size matrices */
+
+    return vkblas_qgemm_common(ctx, cmd, m, n, k,
+                               VKBLAS_DTYPE_QGEMM_Q6K,
+                               alpha, Wq, ldw, x, ldx, beta, y, ldy);
+}
+
+VkResult vkblas_qgemm_q3k_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                              int32_t m, int32_t n, int32_t k,
+                              const float* alpha, VkBuffer Wq, int32_t ldw,
+                              VkBuffer x, int32_t ldx,
+                              const float* beta, VkBuffer y, int32_t ldy)
+{
+    if (!ctx || !cmd || !Wq || !x || !y || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m <= 0 || n <= 0 || k <= 0)
+        return VK_SUCCESS;  /* no-op for zero-size matrices */
+
+    return vkblas_qgemm_common(ctx, cmd, m, n, k,
+                               VKBLAS_DTYPE_QGEMM_Q3K,
+                               alpha, Wq, ldw, x, ldx, beta, y, ldy);
+}
+
+VkResult vkblas_qgemm_iq4xs_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                                int32_t m, int32_t n, int32_t k,
+                                const float* alpha, VkBuffer Wq, int32_t ldw,
+                                VkBuffer x, int32_t ldx,
+                                const float* beta, VkBuffer y, int32_t ldy)
+{
+    if (!ctx || !cmd || !Wq || !x || !y || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m <= 0 || n <= 0 || k <= 0)
+        return VK_SUCCESS;  /* no-op for zero-size matrices */
+
+    return vkblas_qgemm_common(ctx, cmd, m, n, k,
+                               VKBLAS_DTYPE_QGEMM_IQ4XS,
                                alpha, Wq, ldw, x, ldx, beta, y, ldy);
 }

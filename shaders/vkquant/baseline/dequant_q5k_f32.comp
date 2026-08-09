@@ -1,0 +1,74 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Q5_K block dequantization to f32 (ggml block_q5_K, 176 bytes/block, 256 elems).
+// Layout: ggml_half d @0, ggml_half dmin @2, uint8_t scales[12] @4,
+//         uint8_t qh[32] @16, uint8_t qs[128] @48.
+// Dequant (canonical ggml dequantize_row_q5_K / get_scale_min_k4):
+//   4 super-blocks of 64 elements. Scale/min pair per 32-element group:
+//   get_scale_min_k4(is):  is<4: sc=scales[is]&63, mn=scales[is+4]&63
+//     else: sc=(scales[is+4]&0xF)|((scales[is-4]>>6)<<4)
+//           mn=(scales[is+4]>>4)|((scales[is]>>6)<<4)
+//   y = d1*((ql nib) + (qh bit ? 16 : 0)) - m1, bit = 1 << (2*block64 + sub)
+// One thread per output element; block = idx >> 8, lane = idx & 255.
+
+layout(push_constant) uniform PC {
+    uint num_blocks;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn {
+    uint8_t raw[];
+};
+layout(scalar, set = 0, binding = 2) writeonly buffer BufOut {
+    float out_f32[];
+};
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = pc.num_blocks * 256u;
+    if (idx >= total) { return; }
+
+    uint block = idx >> 8;
+    uint lane  = idx & 255u;
+    uint base  = block * 176u;
+
+    uint d_bits = uint(raw[base]) | (uint(raw[base + 1u]) << 8u);
+    uint m_bits = uint(raw[base + 2u]) | (uint(raw[base + 3u]) << 8u);
+    float d  = unpackHalf2x16(d_bits).x;
+    float dm = unpackHalf2x16(m_bits).x;
+
+    uint block64 = (lane >> 6) & 3u;
+    uint sub     = (lane >> 5) & 1u;
+    uint l       = lane & 31u;
+    uint is      = block64 * 2u + sub;
+
+    uint sc_base = base + 4u;
+    uint sc, mn;
+    if (is < 4u) {
+        sc = uint(raw[sc_base + is]) & 63u;
+        mn = uint(raw[sc_base + is + 4u]) & 63u;
+    } else {
+        sc = (uint(raw[sc_base + is + 4u]) & 0xFu) |
+             ((uint(raw[sc_base + is - 4u]) >> 6u) << 4u);
+        mn = (uint(raw[sc_base + is + 4u]) >> 4u) |
+             ((uint(raw[sc_base + is]) >> 6u) << 4u);
+    }
+
+    float d1 = d * float(sc);
+    float m1 = dm * float(mn);
+
+    uint qlbyte = uint(raw[base + 48u + block64 * 32u + l]);
+    uint qhbyte = uint(raw[base + 16u + l]);
+    uint bit    = 1u << (block64 * 2u + sub);
+
+    uint nib = (sub == 0u) ? (qlbyte & 0xFu) : (qlbyte >> 4u);
+    uint high = ((qhbyte & bit) != 0u) ? 16u : 0u;
+
+    out_f32[idx] = d1 * float(nib + high) - m1;
+}

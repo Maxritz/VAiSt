@@ -484,7 +484,8 @@ VkResult vkblas_gemm_ex_strided_batched(VkBLASContext*       context,
                                         VkBLASGemmFlags_t    flags);
 
 /* ===========================================================================
- * GEMM — fused quantized (dequant-in-matmul): Q8_0 / Q4_K weights
+ * GEMM — fused quantized (dequant-in-matmul): Q8_0 / Q4_K / Q4_0 / Q5_K /
+ * Q6_K / Q3_K / IQ4_XS weights
  * ========================================================================== */
 
 /**
@@ -573,6 +574,223 @@ VkResult vkblas_qgemm_q4k_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
                               const float* alpha, VkBuffer Wq, int32_t ldw,
                               VkBuffer x, int32_t ldx,
                               const float* beta, VkBuffer y, int32_t ldy);
+
+/**
+ * \brief Fused Q4_0 quantized GEMM: y = alpha * (dequant(Wq) * x) + beta * y.
+ *
+ * Weight matrix dequantized *inside* the matmul kernel using the VAIT Q4_0
+ * block format. Same dispatch semantics as vkblas_qgemm_q8_0_f32.
+ *
+ * \par Weight layout (Wq)
+ * W is n rows x k columns, stored row-major in blocks of 32 elements.
+ * A Q4_0 block is 20 bytes: an f32 scale `d` (bytes 0..3) followed by 16
+ * uint8 packed nibbles (bytes 4..19). For element i in [0,32):
+ *   nib = qs[i>>1] >> (4*(i&1)) & 0xF;  dequant(i) = d * (nib - 8).
+ * Row r occupies byte offset r * ldw; its blocks are contiguous, so a row
+ * needs ceil(k/32) blocks. ldw is the byte stride between rows
+ * (>= ceil(k/32) * 20, a multiple of 4).
+ *
+ * \param ctx   Valid VkBLASContext.
+ * \param cmd   Command buffer to record into (recording state).
+ * \param m     Columns of x and y (activation/batch dimension).
+ * \param n     Rows of W and y (output dimension).
+ * \param k     Columns of W, rows of x (contraction dimension).
+ * \param alpha Host pointer to scalar alpha.
+ * \param Wq    VkBuffer holding the Q4_0-quantized weight matrix.
+ * \param ldw   Byte stride between weight rows.
+ * \param x     VkBuffer holding activation x (k x m f32).
+ * \param ldx   Leading dimension of x (>= k).
+ * \param beta  Host pointer to scalar beta.
+ * \param y     VkBuffer holding output y (n x m f32); read + written.
+ * \param ldy   Leading dimension of y (>= n).
+ * \retval VK_SUCCESS On success.
+ */
+VkResult vkblas_qgemm_q4_0_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                               int32_t m, int32_t n, int32_t k,
+                               const float* alpha, VkBuffer Wq, int32_t ldw,
+                               VkBuffer x, int32_t ldx,
+                               const float* beta, VkBuffer y, int32_t ldy);
+
+/**
+ * \brief Fused Q5_K quantized GEMM: y = alpha * (dequant(Wq) * x) + beta * y.
+ *
+ * Weight matrix dequantized *inside* the matmul kernel using the canonical
+ * ggml Q5_K block format. Same dispatch semantics as vkblas_qgemm_q8_0_f32.
+ *
+ * \par Weight layout (Wq)
+ * W is n rows x k columns, stored row-major in blocks of 256 elements.
+ * A Q5_K block is 176 bytes in ggml block_q5_K order:
+ *   bytes   0..1   f16 d
+ *   bytes   2..3   f16 dmin
+ *   bytes   4..15  uint8 scales[12]
+ *   bytes  16..47  uint8 qh[32]   (5th bits)
+ *   bytes  48..175 uint8 qs[128]  (packed 4-bit nibbles)
+ * Row r occupies byte offset r * ldw; its blocks are contiguous, so a row
+ * needs ceil(k/256) blocks. ldw is the byte stride between rows
+ * (>= ceil(k/256) * 176, a multiple of 4).
+ *
+ * Per-32-element-group dequant (canonical ggml dequantize_row_q5_K):
+ *   super = i>>6, hi = (i>>5)&1, l = i&31, is = super*2 + hi
+ *   sc/mn = get_scale_min_k4(is)  (6-bit scale/min pair, same packing as Q4_K)
+ *   nib = low/high nibble of qs[32*super + l]
+ *   level = nib + ((qh[l] >> (2*super + hi)) & 1 ? 16 : 0)
+ *   out = d*sc*level - dmin*mn
+ *
+ * \param ctx   Valid VkBLASContext.
+ * \param cmd   Command buffer to record into (recording state).
+ * \param m     Columns of x and y (activation/batch dimension).
+ * \param n     Rows of W and y (output dimension).
+ * \param k     Columns of W, rows of x (contraction dimension).
+ * \param alpha Host pointer to scalar alpha.
+ * \param Wq    VkBuffer holding the Q5_K-quantized weight matrix.
+ * \param ldw   Byte stride between weight rows.
+ * \param x     VkBuffer holding activation x (k x m f32).
+ * \param ldx   Leading dimension of x (>= k).
+ * \param beta  Host pointer to scalar beta.
+ * \param y     VkBuffer holding output y (n x m f32); read + written.
+ * \param ldy   Leading dimension of y (>= n).
+ * \retval VK_SUCCESS On success.
+ */
+VkResult vkblas_qgemm_q5k_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                              int32_t m, int32_t n, int32_t k,
+                              const float* alpha, VkBuffer Wq, int32_t ldw,
+                              VkBuffer x, int32_t ldx,
+                              const float* beta, VkBuffer y, int32_t ldy);
+
+/**
+ * \brief Fused Q6_K quantized GEMM: y = alpha * (dequant(Wq) * x) + beta * y.
+ *
+ * Weight matrix dequantized *inside* the matmul kernel using the canonical
+ * ggml Q6_K block format. Same dispatch semantics as vkblas_qgemm_q8_0_f32.
+ *
+ * \par Weight layout (Wq)
+ * W is n rows x k columns, stored row-major in blocks of 256 elements.
+ * A Q6_K block is 210 bytes in ggml block_q6_K order:
+ *   bytes   0..127   uint8 ql[128]   (low 4 bits)
+ *   bytes 128..191   uint8 qh[64]    (high 2 bits)
+ *   bytes 192..207   int8 scales[16]
+ *   bytes 208..209   f16 d
+ * Row r occupies byte offset r * ldw; its blocks are contiguous, so a row
+ * needs ceil(k/256) blocks. ldw is the byte stride between rows
+ * (>= ceil(k/256) * 210, a multiple of 4).
+ *
+ * Dequant (canonical ggml dequantize_row_q6_K):
+ *   chunk = i>>7, sub = (i>>5)&3, l = i&31, is = l>>4
+ *   ql4 = (sub<2 ? ql&0xF : ql>>4); qh2 = (qh >> (sub*2)) & 3
+ *   level = (ql4 | (qh2 << 4)) - 32
+ *   out = d * scales[chunk*8 + is + sub*2] * level
+ *
+ * \param ctx   Valid VkBLASContext.
+ * \param cmd   Command buffer to record into (recording state).
+ * \param m     Columns of x and y (activation/batch dimension).
+ * \param n     Rows of W and y (output dimension).
+ * \param k     Columns of W, rows of x (contraction dimension).
+ * \param alpha Host pointer to scalar alpha.
+ * \param Wq    VkBuffer holding the Q6_K-quantized weight matrix.
+ * \param ldw   Byte stride between weight rows.
+ * \param x     VkBuffer holding activation x (k x m f32).
+ * \param ldx   Leading dimension of x (>= k).
+ * \param beta  Host pointer to scalar beta.
+ * \param y     VkBuffer holding output y (n x m f32); read + written.
+ * \param ldy   Leading dimension of y (>= n).
+ * \retval VK_SUCCESS On success.
+ */
+VkResult vkblas_qgemm_q6k_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                              int32_t m, int32_t n, int32_t k,
+                              const float* alpha, VkBuffer Wq, int32_t ldw,
+                              VkBuffer x, int32_t ldx,
+                              const float* beta, VkBuffer y, int32_t ldy);
+
+/**
+ * \brief Fused Q3_K quantized GEMM: y = alpha * (dequant(Wq) * x) + beta * y.
+ *
+ * Weight matrix dequantized *inside* the matmul kernel using the canonical
+ * ggml Q3_K block format. Same dispatch semantics as vkblas_qgemm_q8_0_f32.
+ *
+ * \par Weight layout (Wq)
+ * W is n rows x k columns, stored row-major in blocks of 256 elements.
+ * A Q3_K block is 110 bytes in ggml block_q3_K order:
+ *   bytes   0..31    uint8 hmask[32]  (high/sign bits)
+ *   bytes  32..95    uint8 qs[64]     (2-bit levels, 4 per byte)
+ *   bytes  96..107   uint8 scales[12] (16 x 6-bit packed int8 scales)
+ *   bytes 108..109   f16 d
+ * Row r occupies byte offset r * ldw; its blocks are contiguous, so a row
+ * needs ceil(k/256) blocks. ldw is the byte stride between rows
+ * (>= ceil(k/256) * 110, a multiple of 4).
+ *
+ * Dequant (canonical ggml dequantize_row_q3_K):
+ *   half = i>>7, j = (i&127)>>5, hi = (i>>4)&1, ll = i&15
+ *   q2 = (qs[half*32 + ll + hi*16] >> 2*j) & 3
+ *   level = q2 - ((hmask[ll + hi*16] >> (j + half*4)) & 1 ? 0 : 4)
+ *   the 16 x int8 scales are recovered from the 12 packed bytes; see
+ *   shaders/vkblas/baseline/qgemm_q3k.comp for the bit math.
+ *   out = d * (sc - 32) * level
+ *
+ * \param ctx   Valid VkBLASContext.
+ * \param cmd   Command buffer to record into (recording state).
+ * \param m     Columns of x and y (activation/batch dimension).
+ * \param n     Rows of W and y (output dimension).
+ * \param k     Columns of W, rows of x (contraction dimension).
+ * \param alpha Host pointer to scalar alpha.
+ * \param Wq    VkBuffer holding the Q3_K-quantized weight matrix.
+ * \param ldw   Byte stride between weight rows.
+ * \param x     VkBuffer holding activation x (k x m f32).
+ * \param ldx   Leading dimension of x (>= k).
+ * \param beta  Host pointer to scalar beta.
+ * \param y     VkBuffer holding output y (n x m f32); read + written.
+ * \param ldy   Leading dimension of y (>= n).
+ * \retval VK_SUCCESS On success.
+ */
+VkResult vkblas_qgemm_q3k_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                              int32_t m, int32_t n, int32_t k,
+                              const float* alpha, VkBuffer Wq, int32_t ldw,
+                              VkBuffer x, int32_t ldx,
+                              const float* beta, VkBuffer y, int32_t ldy);
+
+/**
+ * \brief Fused IQ4_XS quantized GEMM: y = alpha * (dequant(Wq) * x) + beta*y.
+ *
+ * Weight matrix dequantized *inside* the matmul kernel using the canonical
+ * ggml IQ4_XS block format (non-linear 4-bit lookup). Same dispatch
+ * semantics as vkblas_qgemm_q8_0_f32.
+ *
+ * \par Weight layout (Wq)
+ * W is n rows x k columns, stored row-major in blocks of 256 elements.
+ * A IQ4_XS block is 136 bytes in ggml block_iq4_xs order:
+ *   bytes   0..1    f16 d
+ *   bytes   2..3    uint16 scales_h
+ *   bytes   4..7    uint8 scales_l[4]
+ *   bytes   8..135  uint8 qs[128]  (packed nibbles)
+ * Row r occupies byte offset r * ldw; its blocks are contiguous, so a row
+ * needs ceil(k/256) blocks. ldw is the byte stride between rows
+ * (>= ceil(k/256) * 136, a multiple of 4).
+ *
+ * Dequant (canonical ggml dequantize_row_iq4_xs):
+ *   ib = i>>5, j = i&15, hi = (i>>4)&1
+ *   ls = (scales_l[ib>>1] >> 4*(ib&1) & 0xF) | ((scales_h >> 2*ib) & 3) << 4
+ *   out = d * (ls - 32) * iq4nl[low/high nibble of qs[ib*16 + j]]
+ *   iq4nl = kvalues_iq4nl (ggml-common.h).
+ *
+ * \param ctx   Valid VkBLASContext.
+ * \param cmd   Command buffer to record into (recording state).
+ * \param m     Columns of x and y (activation/batch dimension).
+ * \param n     Rows of W and y (output dimension).
+ * \param k     Columns of W, rows of x (contraction dimension).
+ * \param alpha Host pointer to scalar alpha.
+ * \param Wq    VkBuffer holding the IQ4_XS-quantized weight matrix.
+ * \param ldw   Byte stride between weight rows.
+ * \param x     VkBuffer holding activation x (k x m f32).
+ * \param ldx   Leading dimension of x (>= k).
+ * \param beta  Host pointer to scalar beta.
+ * \param y     VkBuffer holding output y (n x m f32); read + written.
+ * \param ldy   Leading dimension of y (>= n).
+ * \retval VK_SUCCESS On success.
+ */
+VkResult vkblas_qgemm_iq4xs_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                                int32_t m, int32_t n, int32_t k,
+                                const float* alpha, VkBuffer Wq, int32_t ldw,
+                                VkBuffer x, int32_t ldx,
+                                const float* beta, VkBuffer y, int32_t ldy);
 
 /* ===========================================================================
  * Pointer mode control

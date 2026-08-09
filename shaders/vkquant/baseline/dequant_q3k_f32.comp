@@ -1,0 +1,79 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Q3_K block dequantization to f32 (ggml block_q3_K, 110 bytes/block, 256 elems).
+// Layout: uint8_t hmask[32] @0, uint8_t qs[64] @32, uint8_t scales[12] @96,
+//         ggml_half d @108.
+// Dequant (canonical ggml dequantize_row_q3_K):
+//   16 scales decoded from 12 bytes (6 bits each):
+//     s[i]    = (scales[i]&0xF) | ((scales[8+i]&0x3)<<4)          i in 0..3
+//     s[4+i]  = (scales[4+i]&0xF) | ((scales[8+i]>>2&0x3)<<4)
+//     s[8+i]  = (scales[i]>>4)    | ((scales[8+i]>>4&0x3)<<4)
+//     s[12+i] = (scales[4+i]>>4)  | ((scales[8+i]>>6&0x3)<<4)
+//   dl = d * (s[is] - 32)
+//   level = ((q[l+sub*16] >> 2*j) & 3) - (hmask[l+sub*16] & (1 << (n*4+j)) ? 0 : 4)
+//   y = dl * level
+// One thread per output element; block = idx >> 8, lane = idx & 255.
+
+layout(push_constant) uniform PC {
+    uint num_blocks;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn {
+    uint8_t raw[];
+};
+layout(scalar, set = 0, binding = 2) writeonly buffer BufOut {
+    float out_f32[];
+};
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+int decode_scale(uint is, uint sc_base) {
+    uint v;
+    if (is < 4u) {
+        uint i = is;
+        v = (uint(raw[sc_base + i]) & 0xFu) | ((uint(raw[sc_base + 8u + i]) & 0x3u) << 4u);
+    } else if (is < 8u) {
+        uint i = is - 4u;
+        v = (uint(raw[sc_base + 4u + i]) & 0xFu) | (((uint(raw[sc_base + 8u + i]) >> 2u) & 0x3u) << 4u);
+    } else if (is < 12u) {
+        uint i = is - 8u;
+        v = (uint(raw[sc_base + i]) >> 4u) | (((uint(raw[sc_base + 8u + i]) >> 4u) & 0x3u) << 4u);
+    } else {
+        uint i = is - 12u;
+        v = (uint(raw[sc_base + 4u + i]) >> 4u) | (((uint(raw[sc_base + 8u + i]) >> 6u) & 0x3u) << 4u);
+    }
+    return int(v);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = pc.num_blocks * 256u;
+    if (idx >= total) { return; }
+
+    uint block = idx >> 8;
+    uint lane  = idx & 255u;
+    uint base  = block * 110u;
+
+    uint d_bits = uint(raw[base + 108u]) | (uint(raw[base + 109u]) << 8u);
+    float d = unpackHalf2x16(d_bits).x;
+
+    uint n   = lane >> 7;
+    uint j   = (lane >> 5) & 3u;
+    uint sub = (lane >> 4) & 1u;
+    uint l   = lane & 15u;
+
+    uint is  = n * 8u + j * 2u + sub;
+    float dl = d * float(decode_scale(is, base + 96u) - 32);
+
+    uint qbyte = uint(raw[base + 32u + n * 32u + l + sub * 16u]);
+    uint hmbyte = uint(raw[base + l + sub * 16u]);
+    uint mask = 1u << (n * 4u + j);
+
+    int level = int((qbyte >> (j * 2u)) & 3u) - ((hmbyte & mask) != 0u ? 0 : 4);
+    out_f32[idx] = dl * float(level);
+}

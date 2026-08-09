@@ -1,0 +1,112 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Forward quantization f32 -> Q6_K (ggml block_q6_K, 210 bytes/block, 256 elems).
+// ggml quantize_row_q6_K_ref scale selection (make_qx_quants per 16-group,
+// symmetric signed levels -32..31) + int8 block-relative scale encoding.
+// Bytes round-trip through dequant_q6k_f32 (out = d*sc*((ql4|qh2<<4)-32)).
+// One workgroup of 1 thread handles one block (transliteration of the ref).
+
+layout(push_constant) uniform PC {
+    uint num_blocks;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn {
+    float x[];
+};
+layout(scalar, set = 0, binding = 2) writeonly buffer BufOut {
+    uint8_t obytes[];
+};
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+shared float sx[256];
+shared int   sL[256];
+shared float ssc[16];
+shared int   sscb[16];
+
+void main() {
+    uint gblk = gl_WorkGroupID.x;
+    uint base_in = gblk * 256u;
+    uint base_out = gblk * 210u;
+
+    for (uint i = 0u; i < 256u; ++i) {
+        sx[i] = (gblk < pc.num_blocks) ? x[base_in + i] : 0.0f;
+        sL[i] = 0;
+    }
+
+    float max_scale = 0.0f;
+    float max_abs_scale = 0.0f;
+    for (int ib = 0; ib < 16; ++ib) {
+        float amax = 0.0f;
+        float mx = 0.0f;
+        for (int i = 0; i < 16; ++i) {
+            float av = abs(sx[ib * 16 + i]);
+            if (av > amax) { amax = av; mx = sx[ib * 16 + i]; }
+        }
+        float scale;
+        if (amax < 1e-5f) {
+            scale = 0.0f;
+            for (int i = 0; i < 16; ++i) sL[ib * 16 + i] = 32;
+        } else {
+            float iscale = -32.0f / mx;
+            for (int i = 0; i < 16; ++i) {
+                int l = clamp(int(round(iscale * sx[ib * 16 + i])), -32, 31);
+                sL[ib * 16 + i] = l + 32;
+            }
+            scale = 1.0f / iscale;
+        }
+        ssc[ib] = scale;
+        float as = abs(scale);
+        if (as > max_abs_scale) { max_abs_scale = as; max_scale = scale; }
+    }
+
+    if (max_abs_scale < 1e-5f) {
+        for (uint i = 0u; i < 210u; ++i) obytes[base_out + i] = uint8_t(0u);
+        return;
+    }
+
+    float iscale = -128.0f / max_scale;
+    float d = 1.0f / iscale;
+    float d_f16 = unpackHalf2x16(packHalf2x16(vec2(d, 0.0f))).x;
+
+    for (int ib = 0; ib < 16; ++ib) {
+        int sc = min(127, int(round(iscale * ssc[ib])));
+        sscb[ib] = sc;
+        obytes[base_out + 192u + uint(ib)] = uint8_t(sc & 0xFF);
+    }
+
+    for (int j = 0; j < 16; ++j) {
+        float dg = d_f16 * float(sscb[j]);
+        if (dg == 0.0f) continue;
+        for (int ii = 0; ii < 16; ++ii) {
+            int l = clamp(int(round(sx[j * 16 + ii] / dg)), -32, 31);
+            sL[j * 16 + ii] = l + 32;
+        }
+    }
+
+    for (int j = 0; j < 256; j += 128) {
+        for (int l = 0; l < 32; ++l) {
+            int q1 = sL[j + l + 0] & 0xF;
+            int q2 = sL[j + l + 32] & 0xF;
+            int q3 = sL[j + l + 64] & 0xF;
+            int q4 = sL[j + l + 96] & 0xF;
+            uint chunk = uint(j / 128);
+            obytes[base_out + chunk * 64u + uint(l)]          = uint8_t(uint(q1 | (q3 << 4)));
+            obytes[base_out + chunk * 64u + uint(l) + 32u]    = uint8_t(uint(q2 | (q4 << 4)));
+            obytes[base_out + 128u + chunk * 32u + uint(l)]   =
+                uint8_t(uint((sL[j + l + 0]  >> 4)) |
+                        uint((sL[j + l + 32] >> 4) << 2) |
+                        uint((sL[j + l + 64] >> 4) << 4) |
+                        uint((sL[j + l + 96] >> 4) << 6));
+        }
+    }
+
+    uint dh = packHalf2x16(vec2(d, 0.0f));
+    obytes[base_out + 208u] = uint8_t(dh & 0xFFu);
+    obytes[base_out + 209u] = uint8_t((dh >> 8u) & 0xFFu);
+}

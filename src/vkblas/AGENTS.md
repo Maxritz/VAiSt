@@ -10,7 +10,8 @@ Child of root `AGENTS.md` and `include/vkblas/AGENTS.md`.
 - Hash key: (data_type, transA, transB, is_strided, tier_index, tile_m, tile_n, tile_k)
 - No malloc per lookup; fixed-size cache array
 - Fused quantized GEMMs use dedicated `data_type` codes
-  (`VKBLAS_DTYPE_QGEMM_Q8_0` / `VKBLAS_DTYPE_QGEMM_Q4K` in `vkblas_internal.h`)
+  (`VKBLAS_DTYPE_QGEMM_Q8_0` / `VKBLAS_DTYPE_QGEMM_Q4K` / `Q4_0` / `Q5K` /
+  `Q6K` / `Q3K` / `IQ4XS` in `vkblas_internal.h`)
   so their cache keys never collide with the plain f32/f16/bf16/i8/f64 GEMMs.
   Only the baseline tier ships qgemm blobs; the `ensure_pipeline` fallback walk
   resolves them there.
@@ -53,8 +54,10 @@ Total: 104 bytes (fits in minPushConstantsSize = 128)
 *(binding 4 reserved for future UBO; currently all push constants)*
 
 ### Fused quantized GEMM (dequant-in-matmul)
-`vkblas_qgemm_q8_0_f32` / `vkblas_qgemm_q4k_f32` dequantize the weight matrix
-*inside* the matmul kernel (see `shaders/vkblas/AGENTS.md` for the shaders).
+`vkblas_qgemm_q8_0_f32` / `vkblas_qgemm_q4k_f32` / `vkblas_qgemm_q4_0_f32` /
+`vkblas_qgemm_q5k_f32` / `vkblas_qgemm_q6k_f32` / `vkblas_qgemm_q3k_f32` /
+`vkblas_qgemm_iq4xs_f32` dequantize the weight matrix *inside* the matmul
+kernel (see `shaders/vkblas/AGENTS.md` for the shaders).
 Dispatch mirrors `vkblas_gemm_common` (lazy pipeline, descriptor set,
 push constants, tiled grid) with these differences:
 
@@ -75,11 +78,31 @@ push constants, tiled grid) with these differences:
 - **Q8_0** (`qgemm_q8_0_f32`): 36 B/block of 32 elems — f32 `d` (bytes 0..3)
   + 32 x int8 `qs` (bytes 4..35). `dequant(i) = d * qs[i]`. Row needs
   `ceil(k/32)` blocks.
+- **Q4_0** (`qgemm_q4_0_f32`): 20 B/block of 32 elems — f32 `d` (bytes 0..3)
+  + 16 x uint8 packed nibbles (bytes 4..19).
+  `dequant(i) = d * ((nib & 0xF) - 8)`. Row needs `ceil(k/32)` blocks.
 - **Q4_K** (`qgemm_q4k_f32`): 144 B/block of 256 elems, canonical ggml
   `block_q4_K` — f16 `d` (0..1), f16 `dmin` (2..3), `scales[12]` (4..15),
   `qs[128]` nibbles (16..143). Per-32-group `get_scale_min_k4` decode:
   `out = d*sc*nib - dmin*mn` (see shader/header for the bit math). Row needs
   `ceil(k/256)` blocks.
+- **Q5_K** (`qgemm_q5k_f32`): 176 B/block of 256 elems, canonical ggml
+  `block_q5_K` — f16 `d` (0..1), f16 `dmin` (2..3), `scales[12]` (4..15),
+  `qh[32]` (16..47), `qs[128]` (48..175). Per-32-group `get_scale_min_k4`
+  scale/min pair plus a 5th bit from `qh`:
+  `out = d*sc*level - dmin*mn`. Row needs `ceil(k/256)` blocks.
+- **Q6_K** (`qgemm_q6k_f32`): 210 B/block of 256 elems, canonical ggml
+  `block_q6_K` — `ql[128]` (0..127), `qh[64]` (128..191), int8 `scales[16]`
+  (192..207), f16 `d` (208..209). `out = d*sc*(level-32)`. Row needs
+  `ceil(k/256)` blocks.
+- **Q3_K** (`qgemm_q3k_f32`): 110 B/block of 256 elems, canonical ggml
+  `block_q3_K` — `hmask[32]` (0..31), `qs[64]` (32..95), `scales[12]`
+  (96..107), f16 `d` (108..109). 16 x int8 scales recovered from the 12 packed
+  bytes; `out = d*(sc-32)*level`. Row needs `ceil(k/256)` blocks.
+- **IQ4_XS** (`qgemm_iq4xs_f32`): 136 B/block of 256 elems, canonical ggml
+  `block_iq4_xs` — f16 `d` (0..1), `scales_h` (2..3), `scales_l[4]` (4..7),
+  `qs[128]` (8..135). `out = d*(ls-32)*iq4nl[nib]` (kvalues_iq4nl LUT).
+  Row needs `ceil(k/256)` blocks.
 
 ## Files
 

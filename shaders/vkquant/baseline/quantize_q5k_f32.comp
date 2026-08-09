@@ -1,0 +1,152 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Forward quantization f32 -> Q5_K (ggml block_q5_K, 176 bytes/block, 256 elems).
+// ggml quantize_row_q5_K_ref scale selection (make_qkx1 per 32-group, nmax=31)
+// + get_scale_min_k4-packed scale/min encoding + qh bit plane.
+// Bytes round-trip through dequant_q5k_f32 (out = d*sc*((ql nib)+qh*16)-dmin*mn).
+// One workgroup of 1 thread handles one block (transliteration of the ref).
+
+layout(push_constant) uniform PC {
+    uint num_blocks;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn {
+    float x[];
+};
+layout(scalar, set = 0, binding = 2) writeonly buffer BufOut {
+    uint8_t obytes[];
+};
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+shared float sx[256];
+shared int   sL[256];
+shared float ssc[8];
+shared float smi[8];
+shared int   ssb[12];
+shared int   ssh[32];
+
+float make_qkx1(int n, int nmax, int off, out float the_min) {
+    float mn = sx[off];
+    float mx = sx[off];
+    for (int i = 1; i < n; ++i) {
+        mn = min(mn, sx[off + i]);
+        mx = max(mx, sx[off + i]);
+    }
+    if (mx == mn) {
+        for (int i = 0; i < n; ++i) sL[off + i] = 0;
+        the_min = 0.0f;
+        return 0.0f;
+    }
+    if (mn > 0.0f) mn = 0.0f;
+    float iscale = float(nmax) / (mx - mn);
+    float scale  = 1.0f / iscale;
+    for (int itry = 0; itry < 9; ++itry) {
+        float sumlx = 0.0f;
+        int   suml2 = 0;
+        bool  did_change = false;
+        for (int i = 0; i < n; ++i) {
+            int l = clamp(int(round(iscale * (sx[off + i] - mn))), 0, nmax);
+            if (l != sL[off + i]) { sL[off + i] = l; did_change = true; }
+            sumlx += (sx[off + i] - mn) * float(l);
+            suml2 += l * l;
+        }
+        scale = (suml2 > 0) ? (sumlx / float(suml2)) : 0.0f;
+        float sum = 0.0f;
+        for (int i = 0; i < n; ++i) sum += sx[off + i] - scale * float(sL[off + i]);
+        mn = 0.5f * mn + 0.5f * (sum / float(n));
+        if (mn > 0.0f) mn = 0.0f;
+        iscale = (scale != 0.0f) ? (1.0f / scale) : 0.0f;
+        if (!did_change) break;
+    }
+    the_min = -mn;
+    return scale;
+}
+
+void get_scale_min_k4(int j, out int d, out int m) {
+    if (j < 4) {
+        d = ssb[j] & 63; m = ssb[j + 4] & 63;
+    } else {
+        d = (ssb[j + 4] & 0xF) | ((ssb[j - 4] >> 6) << 4);
+        m = (ssb[j + 4] >> 4)  | ((ssb[j - 0] >> 6) << 4);
+    }
+}
+
+void main() {
+    uint gblk = gl_WorkGroupID.x;
+    uint base_in = gblk * 256u;
+    uint base_out = gblk * 176u;
+
+    for (uint i = 0u; i < 256u; ++i) {
+        sx[i] = (gblk < pc.num_blocks) ? x[base_in + i] : 0.0f;
+        sL[i] = 0;
+    }
+    for (int i = 0; i < 12; ++i) ssb[i] = 0;
+    for (int i = 0; i < 32; ++i) ssh[i] = 0;
+
+    float max_scale = 0.0f;
+    float max_min   = 0.0f;
+    for (int j = 0; j < 8; ++j) {
+        float sc = make_qkx1(32, 31, j * 32, smi[j]);
+        ssc[j] = sc;
+        max_scale = max(max_scale, sc);
+        max_min   = max(max_min, smi[j]);
+    }
+
+    float inv_scale = (max_scale > 0.0f) ? (63.0f / max_scale) : 0.0f;
+    float inv_min   = (max_min   > 0.0f) ? (63.0f / max_min)   : 0.0f;
+    for (int j = 0; j < 8; ++j) {
+        int ls = clamp(int(round(inv_scale * ssc[j])), 0, 63);
+        int lm = clamp(int(round(inv_min   * smi[j])), 0, 63);
+        if (j < 4) {
+            ssb[j]     = ls;
+            ssb[j + 4] = lm;
+        } else {
+            ssb[j + 4] = (ls & 0xF) | ((lm & 0xF) << 4);
+            ssb[j - 4] |= ((ls >> 4) << 6);
+            ssb[j - 0] |= ((lm >> 4) << 6);
+        }
+    }
+
+    float d    = unpackHalf2x16(packHalf2x16(vec2(max_scale / 63.0f, 0.0f))).x;
+    float dmin = unpackHalf2x16(packHalf2x16(vec2(max_min   / 63.0f, 0.0f))).x;
+
+    for (int j = 0; j < 8; ++j) {
+        int sc, mn;
+        get_scale_min_k4(j, sc, mn);
+        float dg = d * float(sc);
+        if (dg == 0.0f) continue;
+        float mg = dmin * float(mn);
+        for (int ii = 0; ii < 32; ++ii) {
+            int l = clamp(int(round((sx[j * 32 + ii] + mg) / dg)), 0, 31);
+            sL[j * 32 + ii] = l;
+        }
+    }
+
+    int m1 = 1, m2 = 2;
+    for (int j = 0; j < 256; j += 64) {
+        for (int l = 0; l < 32; ++l) {
+            int l1 = sL[j + l];
+            if (l1 > 15) { l1 -= 16; ssh[l] |= m1; }
+            int l2 = sL[j + l + 32];
+            if (l2 > 15) { l2 -= 16; ssh[l] |= m2; }
+            obytes[base_out + 48u + uint((j / 64) * 32 + l)] = uint8_t(uint(l1 | (l2 << 4)));
+        }
+        m1 <<= 2; m2 <<= 2;
+    }
+
+    for (int i = 0; i < 32; ++i) obytes[base_out + 16u + uint(i)] = uint8_t(ssh[i] & 0xFF);
+    for (int i = 0; i < 12; ++i) obytes[base_out + 4u + uint(i)] = uint8_t(ssb[i] & 0xFF);
+
+    uint dh = packHalf2x16(vec2(max_scale / 63.0f, 0.0f));
+    uint mh = packHalf2x16(vec2(max_min   / 63.0f, 0.0f));
+    obytes[base_out + 0u] = uint8_t(dh & 0xFFu);
+    obytes[base_out + 1u] = uint8_t((dh >> 8u) & 0xFFu);
+    obytes[base_out + 2u] = uint8_t(mh & 0xFFu);
+    obytes[base_out + 3u] = uint8_t((mh >> 8u) & 0xFFu);
+}

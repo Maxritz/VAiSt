@@ -201,14 +201,60 @@ contexts on VKRuntime: capability detection, descriptor pool, pipeline layout
 and pipeline cache are created via `vkr_*` helpers instead of duplicated
 inline Vulkan code.
 
+### VKModel (implemented)
+
+GGUF model loader — parses gguf metadata + tensor infos and uploads every
+tensor's raw bytes into device buffers via VKRuntime, as ready-to-use
+components.
+
+| Function | Description |
+|----------|-------------|
+| `vkmodel_load` / `vkmodel_destroy` | Load/free a GGUF model (all metadata value types, streamed tensor upload) |
+| `vkmodel_get_kv_count/_key/_string` | Host-side metadata access |
+| `vkmodel_get_tensor_count/_name/_dtype/_nelems/_buffer/_size` | Tensor info + device buffer access |
+| `vkmodel_block_elems` | ggml_type → elements-per-block |
+
+### VKKV (implemented)
+
+Cross-model KV cache transfer per arXiv:2608.03893 — per-head closed-form
+ridge mapper that maps a source model's K/V cache to a target so prefill can
+be skipped when swapping same-family models.
+
+| Function | Description |
+|----------|-------------|
+| `vkkv_create_transfer` / `vkkv_destroy_transfer` | Per-head ridge mapper (host-side fit, GPU apply) |
+| `vkkv_fit_cpu` | Fit `W = (X^T X + λI)^-1 X^T Y` per head from a calibration set |
+| `vkkv_apply` | Map source KV → target KV on GPU (one compute dispatch/head) |
+
+RoPE stripping and top-k layer selection are the caller's responsibility.
+
+### VKDist (implemented, Phase 0)
+
+Distributed compute over TCP — run compute on another PC's Vulkan card.
+Phase 0 is a loopback vertical slice (client ↔ server RPC: register buffers,
+upload, dispatch remote `vkblas_sgemm`, read back). Design + phased roadmap
+(multi-PC, distributed GEMM partition, attention/KV sharding, TLS/discovery)
+in `specs/VKDIST-DESIGN.md`.
+
+| Function | Description |
+|----------|-------------|
+| `vkdist_server_start` / `vkdist_server_accept` / `vkdist_server_run` | TCP server hosting a Vulkan device |
+| `vkdist_client_connect` | TCP client to a remote GPU endpoint |
+| `vkdist_register_buffer` / `vkdist_upload` / `vkdist_readback` | Remote buffer lifecycle |
+| `vkdist_sgemm` | Remote `vkblas_sgemm` dispatch |
+
 ### In Progress
 
 - **Real cooperative-matrix GEMM on this driver** — the coopmat path is
   implemented and compiled but dormant (env `VAIT_COOPMATRIX=1` to enable);
   the AMD 26.7.1 driver crashes on `coopMatMulAddKHR`. Testable on a newer
   driver or via `ssh rr@macx`.
-- **Forward quantization of Q4_K/Q6_K/IQ4_XS** — only Q8_0/Q4_0 forward
-  quantize is implemented so far.
+- **VKDist Phase 1+** — multi-PC over IP, distributed GEMM partition across
+  workers, attention/KV sharding, TLS + discovery (roadmap in
+  `specs/VKDIST-DESIGN.md`).
+- **VKModel safetensors** — only GGUF is supported so far.
+- **IQ/TQ forward quantization** — dequant-only (their quantizers are
+  search/heuristic-based).
 
 ---
 

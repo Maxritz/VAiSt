@@ -1,0 +1,140 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Forward quantization f32 -> Q2_K (ggml block_q2_K, 84 bytes/block, 256 elems).
+// ggml quantize_row_q2_K_ref scale selection (make_qkx1 per 16-group) + 4-bit
+// scale/min block encoding. Bytes round-trip through dequant_q2k_f32
+// (out = d*(sc&0xF)*level - dmin*(sc>>4)*level).
+// One workgroup of 1 thread handles one block (transliteration of the ref).
+
+layout(push_constant) uniform PC {
+    uint num_blocks;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn {
+    float x[];
+};
+layout(scalar, set = 0, binding = 2) writeonly buffer BufOut {
+    uint8_t obytes[];
+};
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+shared float sx[256];
+shared int   sL[256];
+shared float ssc[16];
+shared float smi[16];
+shared int   ssb[16];
+
+float make_qkx1(int n, int nmax, int off, out float the_min) {
+    float mn = sx[off];
+    float mx = sx[off];
+    for (int i = 1; i < n; ++i) {
+        mn = min(mn, sx[off + i]);
+        mx = max(mx, sx[off + i]);
+    }
+    if (mx == mn) {
+        for (int i = 0; i < n; ++i) sL[off + i] = 0;
+        the_min = 0.0f;
+        return 0.0f;
+    }
+    if (mn > 0.0f) mn = 0.0f;
+    float iscale = float(nmax) / (mx - mn);
+    float scale  = 1.0f / iscale;
+    for (int itry = 0; itry < 9; ++itry) {
+        float sumlx = 0.0f;
+        int   suml2 = 0;
+        bool  did_change = false;
+        for (int i = 0; i < n; ++i) {
+            int l = clamp(int(round(iscale * (sx[off + i] - mn))), 0, nmax);
+            if (l != sL[off + i]) { sL[off + i] = l; did_change = true; }
+            sumlx += (sx[off + i] - mn) * float(l);
+            suml2 += l * l;
+        }
+        scale = (suml2 > 0) ? (sumlx / float(suml2)) : 0.0f;
+        float sum = 0.0f;
+        for (int i = 0; i < n; ++i) sum += sx[off + i] - scale * float(sL[off + i]);
+        mn = 0.5f * mn + 0.5f * (sum / float(n));
+        if (mn > 0.0f) mn = 0.0f;
+        iscale = (scale != 0.0f) ? (1.0f / scale) : 0.0f;
+        if (!did_change) break;
+    }
+    the_min = -mn;
+    return scale;
+}
+
+void main() {
+    uint gblk = gl_WorkGroupID.x;
+    uint base_in = gblk * 256u;
+    uint base_out = gblk * 84u;
+
+    for (uint i = 0u; i < 256u; ++i) {
+        sx[i] = (gblk < pc.num_blocks) ? x[base_in + i] : 0.0f;
+        sL[i] = 0;
+    }
+
+    float max_scale = 0.0f;
+    float max_min   = 0.0f;
+    for (int j = 0; j < 16; ++j) {
+        float sc = make_qkx1(16, 3, j * 16, smi[j]);
+        ssc[j] = sc;
+        max_scale = max(max_scale, sc);
+        max_min   = max(max_min, smi[j]);
+    }
+
+    const float q4scale = 15.0f;
+    for (int i = 0; i < 16; ++i) ssb[i] = 0;
+
+    float d = 0.0f;
+    if (max_scale > 0.0f) {
+        float iscale = q4scale / max_scale;
+        for (int j = 0; j < 16; ++j) ssb[j] = clamp(int(round(iscale * ssc[j])), 0, 15);
+        d = max_scale / q4scale;
+    }
+    float dmin = 0.0f;
+    if (max_min > 0.0f) {
+        float iscale = q4scale / max_min;
+        for (int j = 0; j < 16; ++j) {
+            int lm = clamp(int(round(iscale * smi[j])), 0, 15);
+            ssb[j] |= (lm << 4);
+        }
+        dmin = max_min / q4scale;
+    }
+
+    float d_f16    = unpackHalf2x16(packHalf2x16(vec2(d, 0.0f))).x;
+    float dmin_f16 = unpackHalf2x16(packHalf2x16(vec2(dmin, 0.0f))).x;
+
+    for (int j = 0; j < 16; ++j) {
+        float dg = d_f16 * float(ssb[j] & 0xF);
+        if (dg == 0.0f) continue;
+        float mg = dmin_f16 * float((ssb[j] >> 4) & 0xF);
+        for (int ii = 0; ii < 16; ++ii) {
+            int l = clamp(int(round((sx[j * 16 + ii] + mg) / dg)), 0, 3);
+            sL[j * 16 + ii] = l;
+        }
+    }
+
+    for (int j = 0; j < 256; j += 128) {
+        for (int l = 0; l < 32; ++l) {
+            uint b = uint(j / 4 + l);
+            obytes[base_out + 16u + b] =
+                uint8_t(uint(sL[j + l] & 0x3) |
+                        uint((sL[j + l + 32] & 0x3) << 2) |
+                        uint((sL[j + l + 64] & 0x3) << 4) |
+                        uint((sL[j + l + 96] & 0x3) << 6));
+        }
+    }
+
+    for (int i = 0; i < 16; ++i) obytes[base_out + uint(i)] = uint8_t(ssb[i] & 0xFF);
+
+    uint dh = packHalf2x16(vec2(d, 0.0f));
+    uint mh = packHalf2x16(vec2(dmin, 0.0f));
+    obytes[base_out + 80u] = uint8_t(dh & 0xFFu);
+    obytes[base_out + 81u] = uint8_t((dh >> 8u) & 0xFFu);
+    obytes[base_out + 82u] = uint8_t(mh & 0xFFu);
+    obytes[base_out + 83u] = uint8_t((mh >> 8u) & 0xFFu);
+}
