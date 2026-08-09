@@ -1,3 +1,5 @@
+<img width="1440" height="720" alt="VAiSt" src="https://github.com/user-attachments/assets/a3568ee1-3ae0-4715-a571-85c49169313b" />
+
 # VAiSt - Vulkan AI Stack
 
 A ground-up Vulkan compute AI stack that implements BLAS, FFT, RNG, and math
