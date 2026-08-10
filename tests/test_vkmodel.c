@@ -19,6 +19,10 @@
  *       plus an odd-offset I8 [33] tensor) to verify the safetensors loader:
  *       header-length/JSON parsing, dtype name + ggml mapping, metadata KV
  *       exposure, and verbatim non-aligned data_offsets.
+ *   (g) loads a synthetic OpenVINO IR v11 pair (.xml + .bin) with f32/f16/
+ *       bf16/legacy-<weights>/opaque-u8 tensors: asserts names, dtypes,
+ *       dtype names, nelems, sizes and byte-exact vkr_download round-trips,
+ *       then rejects size-mismatch and sub-byte-dtype IRs.
  *
  * This is a header-only test: it includes only <vulkan/vulkan.h> and the
  * public vkmodel.h header. No internal headers are pulled.
@@ -40,6 +44,11 @@
 #define TEST_FILE_B "test_vkmodel_b.gguf"   /**< Odd-size (33-byte) tensor. */
 #define TEST_FILE_SF    "test_vkmodel.safetensors"     /**< 2-tensor + metadata. */
 #define TEST_FILE_SF_ODD "test_vkmodel_odd.safetensors" /**< Non-aligned odd-size. */
+#define TEST_FILE_OV_XML   "test_vkmodel_ov.xml"         /**< OpenVINO IR topology. */
+#define TEST_FILE_OV_BIN   "test_vkmodel_ov.bin"         /**< OpenVINO IR weights.  */
+#define TEST_FILE_OV_BAD_BIN    "test_vkmodel_ov_bad.bin"    /**< Tiny stub .bin.     */
+#define TEST_FILE_OV_BAD_SIZE_XML "test_vkmodel_ov_bad_size.xml"   /**< Size-mismatch IR. */
+#define TEST_FILE_OV_BAD_DTYPE_XML "test_vkmodel_ov_bad_dtype.xml" /**< Sub-byte dtype IR. */
 
 #define GGUF_MAGIC_LE 0x46554747u           /**< "GGUF" little-endian.      */
 #define GGUF_VERSION  3u
@@ -366,6 +375,112 @@ static int write_file_b(const char* path)
         pos += 33;
     }
 
+    fclose(f);
+    return 1;
+}
+
+/* ===========================================================================
+ * OpenVINO IR writer (.xml topology + .bin weights)
+ * ========================================================================== */
+
+/**
+ * \brief Write the synthetic IR v11 pair (one .xml + one .bin, 5 tensors).
+ *
+ * Layout of the .bin (386 bytes total):
+ *   conv1/weights     f32 [2,3,4]  @0    size 96
+ *   scalar_bias       f16 [] (scalar) @96 size 2
+ *   bf16_scale        bf16 [8]      @98  size 16
+ *   legacy_fc_weights f32 [8,8]     @114 size 256 (via <weights>; the output
+ *                                   port supplies precision + dims)
+ *   u8_lut            u8 [16]       @370 size 16  (opaque dtype)
+ *
+ * \retval 1 on success, 0 on write failure.
+ */
+static int write_ov_ir(void)
+{
+    FILE* f = fopen(TEST_FILE_OV_BIN, "wb");
+    if (!f) return 0;
+    uint8_t buf[386];
+    fill_pattern(buf, 96, 131);
+    fill_pattern(buf + 96, 2, 67);
+    fill_pattern(buf + 98, 16, 55);
+    fill_pattern(buf + 114, 256, 97);
+    fill_pattern(buf + 370, 16, 91);
+    fwrite(buf, 1, sizeof(buf), f);
+    fclose(f);
+
+    f = fopen(TEST_FILE_OV_XML, "wb");
+    if (!f) return 0;
+    fputs(
+        "<?xml version=\"1.0\"?>\n"
+        "<net name=\"test_ov\" version=\"11\">\n"
+        "  <layers>\n"
+        "    <layer id=\"0\" name=\"input\" type=\"Parameter\" version=\"opset1\">\n"
+        "      <data element_type=\"f32\" shape=\"1,3,8,8\"/>\n"
+        "    </layer>\n"
+        "    <layer id=\"1\" name=\"conv1/weights\" type=\"Const\" version=\"opset1\">\n"
+        "      <data element_type=\"f32\" shape=\"2,3,4\" offset=\"0\" size=\"96\"/>\n"
+        "      <output><port id=\"0\" precision=\"FP32\"><dim>2</dim><dim>3</dim><dim>4</dim></port></output>\n"
+        "    </layer>\n"
+        "    <layer id=\"2\" name=\"scalar_bias\" type=\"Const\" version=\"opset1\">\n"
+        "      <data element_type=\"f16\" shape=\"\" offset=\"96\" size=\"2\"/>\n"
+        "      <output><port id=\"0\" precision=\"FP16\"/></output>\n"
+        "    </layer>\n"
+        "    <layer id=\"3\" name=\"bf16_scale\" type=\"Const\" version=\"opset1\">\n"
+        "      <data element_type=\"bf16\" shape=\"8\" offset=\"98\" size=\"16\"/>\n"
+        "      <output><port id=\"0\" precision=\"BF16\"><dim>8</dim></port></output>\n"
+        "    </layer>\n"
+        "    <layer id=\"4\" name=\"legacy_fc\" type=\"FullyConnected\" version=\"opset1\">\n"
+        "      <data strides=\"1,1\"/>\n"
+        "      <output><port id=\"0\" precision=\"FP32\"><dim>8</dim><dim>8</dim></port></output>\n"
+        "      <weights offset=\"114\" size=\"256\"/>\n"
+        "    </layer>\n"
+        "    <layer id=\"5\" name=\"u8_lut\" type=\"Const\" version=\"opset1\">\n"
+        "      <data element_type=\"u8\" shape=\"16\" offset=\"370\" size=\"16\"/>\n"
+        "      <output><port id=\"0\" precision=\"U8\"><dim>16</dim></port></output>\n"
+        "    </layer>\n"
+        "  </layers>\n"
+        "  <edges/>\n"
+        "</net>\n", f);
+    fclose(f);
+    return 1;
+}
+
+/**
+ * \brief Write two malformed IRs + a tiny shared stub .bin for negative tests.
+ *
+ * bad_size:  f32 [4,4] declares size=100 but 16 elements x 4 B = 64 bytes.
+ * bad_dtype: element_type "i4" (sub-byte packed, no derivable element size).
+ * Both must be rejected by the loader before any .bin data is read.
+ *
+ * \retval 1 on success, 0 on write failure.
+ */
+static int write_ov_bad(void)
+{
+    FILE* f = fopen(TEST_FILE_OV_BAD_BIN, "wb");
+    if (!f) return 0;
+    {
+        uint8_t z[4] = { 0, 0, 0, 0 };
+        fwrite(z, 1, sizeof(z), f);
+    }
+    fclose(f);
+
+    f = fopen(TEST_FILE_OV_BAD_SIZE_XML, "wb");
+    if (!f) return 0;
+    fputs("<net name=\"bad\" version=\"11\"><layers>\n"
+          "<layer id=\"0\" name=\"bad_weights\" type=\"Const\" version=\"opset1\">\n"
+          "<data element_type=\"f32\" shape=\"4,4\" offset=\"0\" size=\"100\"/>\n"
+          "</layer>\n"
+          "</layers></net>\n", f);
+    fclose(f);
+
+    f = fopen(TEST_FILE_OV_BAD_DTYPE_XML, "wb");
+    if (!f) return 0;
+    fputs("<net name=\"bad2\" version=\"11\"><layers>\n"
+          "<layer id=\"0\" name=\"sub_byte\" type=\"Const\" version=\"opset1\">\n"
+          "<data element_type=\"i4\" shape=\"8\" offset=\"0\" size=\"4\"/>\n"
+          "</layer>\n"
+          "</layers></net>\n", f);
     fclose(f);
     return 1;
 }
@@ -733,6 +848,135 @@ int main(void)
     }
 
     /* ── 9. Error path: missing file ────────────────────────────────────── */
+    /* ---- 8.75 OpenVINO IR loader ---- */
+    printf("  --- OpenVINO IR writer ---\n");
+    if (!write_ov_ir()) {
+        fprintf(stderr, "test_vkmodel: failed to write %s\n", TEST_FILE_OV_XML);
+        overall_pass = 0;
+        goto cleanup;
+    }
+    overall_pass &= report(1, "wrote OpenVINO IR pair");
+
+    printf("  --- OpenVINO IR load + metadata ---\n");
+    r = vkmodel_load_openvino(rt, TEST_FILE_OV_XML, TEST_FILE_OV_BIN, &model);
+    overall_pass &= report(r == VK_SUCCESS, "vkmodel_load_openvino");
+
+    if (r == VK_SUCCESS) {
+        overall_pass &= report(vkmodel_get_tensor_count(model) == 5,
+                               "ov tensor_count == 5");
+
+        overall_pass &= report(
+            vkmodel_get_tensor_name(model, 0) != NULL &&
+            strcmp(vkmodel_get_tensor_name(model, 0), "conv1/weights") == 0,
+            "ov t0 name == conv1/weights");
+        overall_pass &= report(vkmodel_get_tensor_dtype(model, 0) == 0,
+                               "ov t0 dtype == F32");
+        {
+            const char* dn = vkmodel_get_tensor_dtype_name(model, 0);
+            overall_pass &= report(dn != NULL && strcmp(dn, "f32") == 0,
+                                   "ov t0 dtype name == f32");
+        }
+        overall_pass &= report(vkmodel_get_tensor_nelems(model, 0) == 24,
+                               "ov t0 nelems == 24");
+        overall_pass &= report(vkmodel_get_tensor_size(model, 0) == 96,
+                               "ov t0 size == 96");
+
+        overall_pass &= report(
+            vkmodel_get_tensor_name(model, 1) != NULL &&
+            strcmp(vkmodel_get_tensor_name(model, 1), "scalar_bias") == 0,
+            "ov t1 name == scalar_bias");
+        overall_pass &= report(vkmodel_get_tensor_dtype(model, 1) == 1,
+                               "ov t1 dtype == F16");
+        overall_pass &= report(vkmodel_get_tensor_nelems(model, 1) == 1,
+                               "ov t1 nelems == 1");
+        overall_pass &= report(vkmodel_get_tensor_size(model, 1) == 2,
+                               "ov t1 size == 2");
+
+        overall_pass &= report(
+            vkmodel_get_tensor_name(model, 2) != NULL &&
+            strcmp(vkmodel_get_tensor_name(model, 2), "bf16_scale") == 0,
+            "ov t2 name == bf16_scale");
+        overall_pass &= report(vkmodel_get_tensor_dtype(model, 2) == 30,
+                               "ov t2 dtype == BF16");
+        overall_pass &= report(vkmodel_get_tensor_nelems(model, 2) == 8,
+                               "ov t2 nelems == 8");
+        overall_pass &= report(vkmodel_get_tensor_size(model, 2) == 16,
+                               "ov t2 size == 16");
+
+        overall_pass &= report(
+            vkmodel_get_tensor_name(model, 3) != NULL &&
+            strcmp(vkmodel_get_tensor_name(model, 3),
+                   "legacy_fc_weights") == 0,
+            "ov t3 name == legacy_fc_weights");
+        overall_pass &= report(vkmodel_get_tensor_dtype(model, 3) == 0,
+                               "ov t3 dtype == F32");
+        overall_pass &= report(vkmodel_get_tensor_nelems(model, 3) == 64,
+                               "ov t3 nelems == 64");
+        overall_pass &= report(vkmodel_get_tensor_size(model, 3) == 256,
+                               "ov t3 size == 256");
+
+        overall_pass &= report(
+            vkmodel_get_tensor_name(model, 4) != NULL &&
+            strcmp(vkmodel_get_tensor_name(model, 4), "u8_lut") == 0,
+            "ov t4 name == u8_lut");
+        overall_pass &= report(vkmodel_get_tensor_dtype(model, 4) == 0xFFFFFFFFu,
+                               "ov t4 dtype == opaque");
+        {
+            const char* dn = vkmodel_get_tensor_dtype_name(model, 4);
+            overall_pass &= report(dn != NULL && strcmp(dn, "u8") == 0,
+                                   "ov t4 dtype name == u8");
+        }
+        overall_pass &= report(vkmodel_get_tensor_nelems(model, 4) == 16,
+                               "ov t4 nelems == 16");
+        overall_pass &= report(vkmodel_get_tensor_size(model, 4) == 16,
+                               "ov t4 size == 16");
+
+        printf("  --- OpenVINO IR upload round-trips ---\n");
+        {
+            static const unsigned ov_seed[5] = { 131, 67, 55, 97, 91 };
+            uint8_t ref[256];
+            uint8_t got[256];
+            uint32_t tc = vkmodel_get_tensor_count(model);
+            for (uint32_t i = 0; i < tc && i < 5; i++) {
+                size_t sz = (size_t)vkmodel_get_tensor_size(model, i);
+                if (sz == 0 || sz > sizeof(got)) {
+                    overall_pass &= report(0, "ov tensor size in range");
+                    continue;
+                }
+                fill_pattern(ref, sz, ov_seed[i]);
+                memset(got, 0xAA, sizeof(got));
+                r = vkr_download(rt, harness_cmd, queue,
+                                 vkmodel_get_tensor_buffer(model, i), 0,
+                                 got, sz);
+                overall_pass &= report(r == VK_SUCCESS, "ov download");
+                overall_pass &= report(memcmp(ref, got, sz) == 0,
+                                       "ov tensor byte-identical");
+            }
+        }
+
+        vkmodel_destroy(model);
+        model = NULL;
+        overall_pass &= report(1, "vkmodel_destroy OpenVINO model");
+    }
+
+    printf("  --- OpenVINO IR rejection ---\n");
+    if (!write_ov_bad()) {
+        fprintf(stderr, "test_vkmodel: failed to write malformed IR\n");
+        overall_pass = 0;
+        goto cleanup;
+    }
+    {
+        VkModel* bad = NULL;
+        r = vkmodel_load_openvino(rt, TEST_FILE_OV_BAD_SIZE_XML,
+                                  TEST_FILE_OV_BAD_BIN, &bad);
+        overall_pass &= report(r != VK_SUCCESS && bad == NULL,
+                               "ov size-mismatch IR rejected");
+        r = vkmodel_load_openvino(rt, TEST_FILE_OV_BAD_DTYPE_XML,
+                                  TEST_FILE_OV_BAD_BIN, &bad);
+        overall_pass &= report(r != VK_SUCCESS && bad == NULL,
+                               "ov sub-byte dtype IR rejected");
+    }
+
     printf("  --- error path ---\n");
     {
         VkModel* bad = NULL;
@@ -747,6 +991,11 @@ cleanup:
     remove(TEST_FILE_B);
     remove(TEST_FILE_SF);
     remove(TEST_FILE_SF_ODD);
+    remove(TEST_FILE_OV_XML);
+    remove(TEST_FILE_OV_BIN);
+    remove(TEST_FILE_OV_BAD_BIN);
+    remove(TEST_FILE_OV_BAD_SIZE_XML);
+    remove(TEST_FILE_OV_BAD_DTYPE_XML);
     if (harness_cmd != VK_NULL_HANDLE && harness_pool != VK_NULL_HANDLE)
         vkFreeCommandBuffers(device, harness_pool, 1, &harness_cmd);
     if (harness_pool != VK_NULL_HANDLE)

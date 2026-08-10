@@ -24,6 +24,13 @@
 #define VKMODEL_MAX_DIMS     4u            /**< GGML_MAX_DIMS.                */
 #define VKMODEL_MAX_STRING   (64u << 20)   /**< Sanity cap on string/array.   */
 
+/* OpenVINO IR loader limits (malformed-file guards) */
+#define VKMODEL_OV_IR_VERSION_MIN 10u      /**< First IR version accepted.    */
+#define VKMODEL_OV_IR_VERSION_MAX 12u      /**< Last IR version accepted.     */
+#define VKMODEL_OV_MAX_LAYERS  (1u << 20)  /**< Sanity cap on <layer> count.  */
+#define VKMODEL_OV_MAX_BLOBS   8u          /**< Max weights/biases per layer. */
+#define VKMODEL_OV_MAX_DEPTH   64u         /**< Max XML nesting depth.        */
+
 /* Sentinel ggml_type for safetensors dtypes that have no 1:1 ggml mapping
  * (unsigned ints, BOOL, F8). Stored in VkModelTensor::dtype and reported by
  * vkmodel_get_tensor_dtype(); vkmodel_get_tensor_dtype_name() still returns

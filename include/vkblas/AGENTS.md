@@ -18,11 +18,19 @@ Child of root `AGENTS.md`. Governs the public API surface under `include/vkblas/
 - Fused quantized GEMM: `vkblas_qgemm_q8_0_f32`, `vkblas_qgemm_q4k_f32`,
   `vkblas_qgemm_q4_0_f32`, `vkblas_qgemm_q5k_f32`, `vkblas_qgemm_q6k_f32`,
   `vkblas_qgemm_q3k_f32`, `vkblas_qgemm_iq4xs_f32`
-  (`y = alpha*(dequant(W)*x) + beta*y`, in place). The weight layout contract
-  (Q8_0: 36 B/block of 32 elems; Q4_0: 20 B/block of 32 elems; Q4_K: ggml
-  144 B/block of 256 elems; Q5_K/Q6_K/Q3_K/IQ4_XS: ggml 176/210/110/136
+  (`y = alpha*(dequant(W)*x) + beta*y`, in place), plus an fp16-output-storage
+  twin of each: `vkblas_qgemm_q8_0_f16`, `vkblas_qgemm_q4k_f16`,
+  `vkblas_qgemm_q4_0_f16`, `vkblas_qgemm_q5k_f16`, `vkblas_qgemm_q6k_f16`,
+  `vkblas_qgemm_q3k_f16`, `vkblas_qgemm_iq4xs_f16`
+  (same math, f32 accumulate, y/z stored as `float16_t`). The weight layout
+  contract (Q8_0: 36 B/block of 32 elems; Q4_0: 20 B/block of 32 elems; Q4_K:
+  ggml 144 B/block of 256 elems; Q5_K/Q6_K/Q3_K/IQ4_XS: ggml 176/210/110/136
   B/block of 256 elems; row r at byte offset `r*ldw`) is documented on each
-  function in `vkblas.h`.
+  function in `vkblas.h`. `vkblas_qgemm_get_tier(ctx, format, &tier)` reports
+  the resolved execution tier per weight format (values match the internal
+  dtype codes; all seven formats resolve to the subgroup tier on
+  subgroup-capable devices, which requires `storageBuffer16BitAccess` +
+  `scalarBlockLayout` for the `_f16` outputs).
 
 ### No heap allocation in hot paths
 - All dispatch functions take pointers, never allocate

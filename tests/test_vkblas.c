@@ -182,6 +182,15 @@ typedef struct {
     VkDeviceSize off_readback;
 } qgemm_buffers_t;
 
+/** FP16-output qgemm case: a distinct y16 buffer (fp16 bits) + readback.
+    Reuses the matching f32 case's Wq/x buffers; only the output buffer is
+    separate because the f32 and f16 dispatches all run in one command buffer. */
+typedef struct {
+    VkBuffer y16;
+    VkDeviceSize off_y16;
+    VkDeviceSize off_readback16;
+} qgemm_f16_buffers_t;
+
 /* ===========================================================================
  * Bootstrap helpers
  * ========================================================================== */
@@ -1363,6 +1372,8 @@ int main(void)
        Q4_0 (k=32, k=64), Q5_K, Q6_K, Q3_K, IQ4_XS (k=256) */
     qgemm_buffers_t q8_32, q8_64, q4k;
     qgemm_buffers_t q40_32, q40_64, q5k, q6k, q3k, iq4xs;
+    /* fp16-output qgemm cases (index mirrors qg_yexp[] / the f32 dispatch set). */
+    qgemm_f16_buffers_t qg_f16[9];
     /* CPU references for the nine qgemm cases, filled in section 10b. */
     static float qg_yexp[9][8 * 8];
 
@@ -1386,6 +1397,7 @@ int main(void)
     memset(&q6k, 0, sizeof(q6k));
     memset(&q3k, 0, sizeof(q3k));
     memset(&iq4xs, 0, sizeof(iq4xs));
+    memset(&qg_f16, 0, sizeof(qg_f16));
 
     int overall_pass = 1;
     VkResult r;
@@ -1767,6 +1779,22 @@ int main(void)
         if (r != VK_SUCCESS) goto cleanup;
         r = create_sub_buffer(h.device, h.mem, iq4xs.off_y, qgn * qgm * sizeof(float), &iq4xs.y);
         if (r != VK_SUCCESS) goto cleanup;
+    }
+
+    /* fp16-output qgemm cases: one distinct y16 buffer + readback per case
+       (Wq/x are shared with the f32 cases above). Gated on f16 features. */
+    if (h.test_f16) {
+        for (int i = 0; i < 9; ++i) {
+            qg_f16[i].off_y16        = take_region(&h.cursor, h.align,
+                                                   qgn * qgm * sizeof(uint16_t));
+            qg_f16[i].off_readback16 = take_region(&h.cursor, h.align,
+                                                   qgn * qgm * sizeof(uint16_t));
+        }
+        for (int i = 0; i < 9; ++i) {
+            r = create_sub_buffer(h.device, h.mem, qg_f16[i].off_y16,
+                                  qgn * qgm * sizeof(uint16_t), &qg_f16[i].y16);
+            if (r != VK_SUCCESS) goto cleanup;
+        }
     }
 
     /* ── 10. Fill inputs + references (column-major) ────────────────────── */
@@ -2160,6 +2188,21 @@ int main(void)
         memcpy(qg_yexp[6], yexp6k,    sizeof(yexp6k));
         memcpy(qg_yexp[7], yexp3k,    sizeof(yexp3k));
         memcpy(qg_yexp[8], yexpiq,    sizeof(yexpiq));
+
+        /* fp16-output cases: expected[i] = f16(f32 reference); the two beta
+           cases (q8_0 k=64, q4_0 k=64) get y16 prefilled with f16(yinit). */
+        if (h.test_f16) {
+            uint16_t yinit16[8 * 8];
+            for (uint32_t r = 0; r < qgn; ++r)
+                for (uint32_t c = 0; c < qgm; ++c)
+                    yinit16[r + c * 8] = f32_to_f16(yinit[r + c * 8]);
+
+            for (int i = 0; i < 9; ++i)
+                memset((char *)h.mapped + qg_f16[i].off_y16, 0,
+                       qgn * qgm * sizeof(uint16_t));
+            memcpy((char *)h.mapped + qg_f16[1].off_y16, yinit16, sizeof(yinit16));
+            memcpy((char *)h.mapped + qg_f16[4].off_y16, yinit16, sizeof(yinit16));
+        }
     }
 
     /* ── 11. Record all GEMM dispatches into one command buffer ─────────── */
@@ -2395,6 +2438,106 @@ int main(void)
                                    &qa1, iq4xs.Wq, 136, iq4xs.x, 256,
                                    &qb0, iq4xs.y, 8),
             "qgemm iq4xs k=256");
+
+        /* fp16-output storage path: same Wq/x/alpha/beta as the f32 cases,
+           but y16 (fp16 bits) is written instead of y (f32). Exercises the
+           float16_t BufY/BufZ bindings and the f32->f16 rounding at the store.
+           Runs only when the harness enabled the 16-bit storage features. */
+        if (h.test_f16) {
+            overall_pass &= record_dispatch(
+                vkblas_qgemm_q8_0_f16(h.blas_ctx, h.cmd,
+                                      (int32_t)qgm, (int32_t)qgn, 32,
+                                      &qa1, q8_32.Wq, 36, q8_32.x, 32,
+                                      &qb0, qg_f16[0].y16, 8),
+                "qgemm q8_0 k=32 f16");
+            overall_pass &= record_dispatch(
+                vkblas_qgemm_q8_0_f16(h.blas_ctx, h.cmd,
+                                      (int32_t)qgm, (int32_t)qgn, 64,
+                                      &qa2, q8_64.Wq, 72, q8_64.x, 64,
+                                      &qb2, qg_f16[1].y16, 8),
+                "qgemm q8_0 k=64 f16");
+            overall_pass &= record_dispatch(
+                vkblas_qgemm_q4k_f16(h.blas_ctx, h.cmd,
+                                     (int32_t)qgm, (int32_t)qgn, 256,
+                                     &qa1, q4k.Wq, 144, q4k.x, 256,
+                                     &qb0, qg_f16[2].y16, 8),
+                "qgemm q4k k=256 f16");
+            overall_pass &= record_dispatch(
+                vkblas_qgemm_q4_0_f16(h.blas_ctx, h.cmd,
+                                      (int32_t)qgm, (int32_t)qgn, 32,
+                                      &qa1, q40_32.Wq, 20, q40_32.x, 32,
+                                      &qb0, qg_f16[3].y16, 8),
+                "qgemm q4_0 k=32 f16");
+            overall_pass &= record_dispatch(
+                vkblas_qgemm_q4_0_f16(h.blas_ctx, h.cmd,
+                                      (int32_t)qgm, (int32_t)qgn, 64,
+                                      &qa2, q40_64.Wq, 40, q40_64.x, 64,
+                                      &qb2, qg_f16[4].y16, 8),
+                "qgemm q4_0 k=64 f16");
+            overall_pass &= record_dispatch(
+                vkblas_qgemm_q5k_f16(h.blas_ctx, h.cmd,
+                                     (int32_t)qgm, (int32_t)qgn, 256,
+                                     &qa1, q5k.Wq, 176, q5k.x, 256,
+                                     &qb0, qg_f16[5].y16, 8),
+                "qgemm q5k k=256 f16");
+            overall_pass &= record_dispatch(
+                vkblas_qgemm_q6k_f16(h.blas_ctx, h.cmd,
+                                     (int32_t)qgm, (int32_t)qgn, 256,
+                                     &qa1, q6k.Wq, 210, q6k.x, 256,
+                                     &qb0, qg_f16[6].y16, 8),
+                "qgemm q6k k=256 f16");
+            overall_pass &= record_dispatch(
+                vkblas_qgemm_q3k_f16(h.blas_ctx, h.cmd,
+                                     (int32_t)qgm, (int32_t)qgn, 256,
+                                     &qa1, q3k.Wq, 110, q3k.x, 256,
+                                     &qb0, qg_f16[7].y16, 8),
+                "qgemm q3k k=256 f16");
+            overall_pass &= record_dispatch(
+                vkblas_qgemm_iq4xs_f16(h.blas_ctx, h.cmd,
+                                       (int32_t)qgm, (int32_t)qgn, 256,
+                                       &qa1, iq4xs.Wq, 136, iq4xs.x, 256,
+                                       &qb0, qg_f16[8].y16, 8),
+                "qgemm iq4xs k=256 f16");
+        }
+    }
+
+    /* ── 11f. Fused qgemm execution-tier routing ───────────────────────────
+       Verifies the subgroup tier is actually dispatched for every quantized
+       weight format (decode hot path) on subgroup-capable devices. On
+       non-subgroup hardware all formats must resolve to the baseline tier.
+       arch index == active tier (0/1/2). */
+    {
+        uint32_t qtier = 0;
+        uint32_t arch  = vkblas_get_arch_index(h.blas_ctx);
+        uint32_t expect_tier = arch >= 1 ? 1u : 0u;
+
+        const uint32_t all_fmts[] = {
+            (uint32_t)VKBLAS_QGEMM_Q8_0,  (uint32_t)VKBLAS_QGEMM_Q4K,
+            (uint32_t)VKBLAS_QGEMM_Q4_0,  (uint32_t)VKBLAS_QGEMM_Q5K,
+            (uint32_t)VKBLAS_QGEMM_Q6K,   (uint32_t)VKBLAS_QGEMM_Q3K,
+            (uint32_t)VKBLAS_QGEMM_IQ4XS,
+        };
+        const char* all_names[] = {
+            "qgemm q8_0", "qgemm q4k", "qgemm q4_0", "qgemm q5k",
+            "qgemm q6k", "qgemm q3k", "qgemm iq4xs",
+        };
+        uint32_t q8_tier = 0;
+        for (int i = 0; i < 7; ++i) {
+            r = vkblas_qgemm_get_tier(h.blas_ctx,
+                                      (VkBLASQGemmFormat_t)all_fmts[i], &qtier);
+            if (r != VK_SUCCESS || qtier != expect_tier) {
+                fprintf(stderr, "FAIL: %s resolved tier=%u expected=%u "
+                                "(arch=%u)\n", all_names[i], qtier,
+                        expect_tier, arch);
+                overall_pass = 0;
+            }
+            if (i == 0)
+                q8_tier = qtier;
+        }
+        printf("test_vkblas: qgemm tier routing checked (all 7 formats=%s)\n",
+               expect_tier == 1 ? "subgroup" : "baseline");
+        printf("test_vkblas: qgemm q8_0 tier=%u (%s)\n", q8_tier,
+               q8_tier == 1 ? "subgroup" : "baseline");
     }
 
     /* ── 12. Make shader writes visible to the transfer readbacks ───────── */
@@ -2447,6 +2590,12 @@ int main(void)
                          8 * 8 * sizeof(float));
     record_copy_readback(h.cmd, iq4xs.y, h.staging, iq4xs.off_readback,
                          8 * 8 * sizeof(float));
+    if (h.test_f16) {
+        for (int i = 0; i < 9; ++i)
+            record_copy_readback(h.cmd, qg_f16[i].y16, h.staging,
+                                 qg_f16[i].off_readback16,
+                                 8 * 8 * sizeof(uint16_t));
+    }
 
     r = vkEndCommandBuffer(h.cmd);
     if (r != VK_SUCCESS) {
@@ -2576,6 +2725,26 @@ int main(void)
                                      iq4xs.off_readback, qg_yexp[8],
                                      8 * 8, 1e-2f);
 
+    /* fp16-output qgemm checks: expected = f16(f32 reference). The tolerance
+       absorbs the f32 reference vs f32 shader diff (1e-3..1e-2 for the
+       quantized formats) plus one f16 ULP of rounding at the store and the
+       f16-rounded beta input on the two beta cases. */
+    if (h.test_f16) {
+        static const char* qg_f16_names[9] = {
+            "qgemm q8_0 k=32 f16", "qgemm q8_0 k=64 f16", "qgemm q4k k=256 f16",
+            "qgemm q4_0 k=32 f16", "qgemm q4_0 k=64 f16", "qgemm q5k k=256 f16",
+            "qgemm q6k k=256 f16", "qgemm q3k k=256 f16", "qgemm iq4xs k=256 f16",
+        };
+        uint16_t exp16[8 * 8];
+        for (int i = 0; i < 9; ++i) {
+            for (uint32_t e = 0; e < 8 * 8; ++e)
+                exp16[e] = f32_to_f16(qg_yexp[i][e]);
+            overall_pass &= check_output_f16(qg_f16_names[i], h.mapped,
+                                             qg_f16[i].off_readback16, exp16,
+                                             8 * 8, 1e-2f);
+        }
+    }
+
 cleanup:
     if (h.blas_ctx) vkblas_destroy_context(h.blas_ctx);
     if (f32b.A) vkDestroyBuffer(h.device, f32b.A, NULL);
@@ -2631,6 +2800,8 @@ cleanup:
     if (iq4xs.Wq) vkDestroyBuffer(h.device, iq4xs.Wq, NULL);
     if (iq4xs.x) vkDestroyBuffer(h.device, iq4xs.x, NULL);
     if (iq4xs.y) vkDestroyBuffer(h.device, iq4xs.y, NULL);
+    for (int i = 0; i < 9; ++i)
+        if (qg_f16[i].y16) vkDestroyBuffer(h.device, qg_f16[i].y16, NULL);
     if (h.staging) vkDestroyBuffer(h.device, h.staging, NULL);
     if (h.mapped)  vkUnmapMemory(h.device, h.mem);
     if (h.mem != VK_NULL_HANDLE) vkFreeMemory(h.device, h.mem, NULL);

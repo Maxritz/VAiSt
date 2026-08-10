@@ -13,8 +13,10 @@ Child of root `AGENTS.md` and `include/vkblas/AGENTS.md`.
   (`VKBLAS_DTYPE_QGEMM_Q8_0` / `VKBLAS_DTYPE_QGEMM_Q4K` / `Q4_0` / `Q5K` /
   `Q6K` / `Q3K` / `IQ4XS` in `vkblas_internal.h`)
   so their cache keys never collide with the plain f32/f16/bf16/i8/f64 GEMMs.
-  Only the baseline tier ships qgemm blobs; the `ensure_pipeline` fallback walk
-  resolves them there.
+  All seven qgemm formats ship **subgroup-tier** blobs
+  (`subgroup/qgemm_<fmt>.comp` + `subgroup/qgemm_<fmt>_f16.comp`, fp16 output
+  storage) in addition to baseline; the `ensure_pipeline` fallback walk
+  resolves baseline for devices without subgroups.
 
 ### Capability detection at context creation
 Delegated to VKRuntime's `vkr_detect_capabilities()` (see `src/vkruntime/`):
@@ -70,7 +72,19 @@ push constants, tiled grid) with these differences:
   `pc.m` = weight rows (= API n), `pc.n` = activation cols (= API m),
   `pc.k` = depth. `pc.lda` = weight row byte stride (ldw), `pc.ldb` = ldx,
   `pc.ldc` = `pc.ldd` = ldy. `transA = transB = 0`.
-- **Grid:** ceil(n/16) x ceil(m/16) (one workgroup per 16x16 output block).
+- **Grid:** tier-dependent. Baseline: ceil(n/16) x ceil(m/16) (one workgroup
+  per 16x16 output block). Subgroup: ceil(n/32) x ceil(m/8) (one 32-lane
+  subgroup per 32x8 block, all seven formats). The resolved tier is read from
+  the pipeline-cache entry via `vkblas_qgemm_resolved_tier`;
+  `vkblas_qgemm_tile_dims` maps (kernel, tier) -> tile and the baseline grid
+  is bit-for-bit unchanged.
+- **fp16 output storage:** `vkblas_qgemm_<fmt>_f16` (private dtype codes
+  32..38, see `vkblas.c`) store the f32 accumulator as `float16_t` into
+  y/z (beta read + write in place), requiring only
+  `storageBuffer16BitAccess` + `scalarBlockLayout` on the device.
+- `vkblas_qgemm_get_tier(ctx, format, &tier)` (public, `vkblas.h`) reports the
+  resolved execution tier (0/1/2) per quantized weight format for harness
+  verification of the subgroup dispatch.
 
 #### Weight layout (authoritative)
 - W is n rows x k columns, stored row-major in blocks. Row r starts at byte

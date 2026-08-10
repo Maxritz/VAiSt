@@ -118,6 +118,56 @@ VkResult vkmodel_load_safetensors(VkRuntime* rt, const char* path,
                                   VkModel** pModel);
 
 /**
+ * \brief Parse an OpenVINO IR pair (.xml topology + .bin weights) and upload
+ * all constant weight/bias tensors to the GPU.
+ *
+ * Reads the UTF-8 XML topology with a self-contained tag scanner (attribute-
+ * and self-closing-tag aware, decodes the five standard entities + numeric
+ * char refs; no external XML dependency) and the raw little-endian .bin
+ * weights blob. Every constant is materialized as a tensor, from either of
+ * two IR idioms:
+ *   - IR v10-v12: a <layer type="Const"> whose <data> carries
+ *     element_type, shape, offset, size -> one tensor named after the layer;
+ *   - legacy: <weights offset size/> / <biases offset size/> child elements
+ *     -> one tensor named "<layer>_weights" / "<layer>_biases".
+ * No computation graph is built (the loader only materializes weights and
+ * constants; Parameter layers and the <edges> section are ignored), matching
+ * the GGUF/safetensors "does NOT graph-build" contract. Each tensor's bytes
+ * are read from the .bin at its verbatim offset in bounded streaming chunks
+ * and uploaded with vkr_upload() through the same model-owned command
+ * pool/buffer as the other loaders.
+ *
+ * Element types: f32/f16/bf16/f64/i8/i16/i32/i64 map to their ggml_type
+ * equivalents (0/1/30/28/24/25/26/27); u8/u16/u32/u64/boolean/f8e4m3/f8e5m2/
+ * f8e8m0 are stored as opaque bytes with VKMODEL_DTYPE_UNKNOWN (the dtype
+ * name getter still reports the IR element type). Sub-byte packed types
+ * (i4/u1/u2/u3/u4/u6/nf4/f4e2m1) and string/dynamic/undefined fail the load.
+ * The element type may be given as the IR string name ("f32", ...) or the
+ * numeric ov::element::Type_t enum value. For legacy <weights>/<biases>
+ * blobs the layer's port-precision string ("FP32", "FP16", "BF16", "I8",
+ * "BOOL", "FP8E4M3", ...) is accepted as an alias of the matching IR element
+ * type name. Tensor byte size is validated to
+ * equal shape-product x element-size and the referenced .bin slice must lie
+ * inside the file.
+ *
+ * \param rt      Runtime providing device/queue/allocator. Its queue is
+ *                assumed to live on queue family 0.
+ * \param xml_path Path to the .xml IR topology file.
+ * \param bin_path Path to the .bin weights blob file.
+ * \param pModel  Receives the loaded model on success.
+ * \retval VK_SUCCESS
+ * \retval VK_ERROR_INITIALIZATION_FAILED Malformed XML, missing/unknown/
+ *         unsupported element type, size mismatch, OOB .bin slice, bad IR
+ *         version, or an unreadable file.
+ * \retval VK_ERROR_OUT_OF_HOST_MEMORY Host bookkeeping allocation failed.
+ * \retval VK_ERROR_OUT_OF_DEVICE_MEMORY Device buffer / staging allocation
+ *         failed (propagated from vkr_malloc / vkr_upload).
+ * \retval VK_ERROR_FEATURE_NOT_PRESENT Staging buffer could not be mapped.
+ */
+VkResult vkmodel_load_openvino(VkRuntime* rt, const char* xml_path,
+                               const char* bin_path, VkModel** pModel);
+
+/**
  * \brief Destroy a loaded model and release every resource it owns.
  *
  * Frees the host metadata/tensor arrays and vkr_free()s every tensor device

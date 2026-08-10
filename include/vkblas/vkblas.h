@@ -792,6 +792,127 @@ VkResult vkblas_qgemm_iq4xs_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
                                 VkBuffer x, int32_t ldx,
                                 const float* beta, VkBuffer y, int32_t ldy);
 
+/**
+ * \brief Fused quantized-GEMM weight formats (argument to
+ *        vkblas_qgemm_get_tier).
+ *
+ * The numeric values match the internal VKBLAS dtype codes so a format value
+ * can be passed through to the dispatcher unchanged.
+ */
+typedef enum VkBLASQGemmFormat_t {
+    VKBLAS_QGEMM_Q8_0  = 5,  /**< Q8_0 weights (36 B/block of 32) */
+    VKBLAS_QGEMM_Q4K   = 6,  /**< Q4_K weights (ggml, 144 B/block of 256) */
+    VKBLAS_QGEMM_Q4_0  = 7,  /**< Q4_0 weights (20 B/block of 32) */
+    VKBLAS_QGEMM_Q5K   = 8,  /**< Q5_K weights (ggml, 176 B/block of 256) */
+    VKBLAS_QGEMM_Q6K   = 9,  /**< Q6_K weights (ggml, 210 B/block of 256) */
+    VKBLAS_QGEMM_Q3K   = 10, /**< Q3_K weights (ggml, 110 B/block of 256) */
+    VKBLAS_QGEMM_IQ4XS = 11, /**< IQ4_XS weights (ggml, 136 B/block of 256) */
+} VkBLASQGemmFormat_t;
+
+/**
+ * \brief Report the execution tier a fused qgemm kernel resolves to.
+ *
+ * Execution tiers: 0 = baseline (portable shared-memory), 1 = subgroup
+ * (one subgroup per output tile, subgroup-shuffle broadcasts), 2 = coopmatrix
+ * (dormant by default, see context capabilities).
+ *
+ * The reported value reflects the pipeline actually in use for the format:
+ * on a subgroup-capable device, qgemm Q8_0 resolves to the subgroup tier,
+ * while the remaining formats (Q4_K/Q4_0/Q5_K/Q6_K/Q3_K/IQ4_XS) still resolve
+ * to the baseline tier. If a higher-tier pipeline failed to create on a given
+ * driver, the reported tier is the fallback actually dispatched, not the
+ * theoretical active tier.
+ *
+ * \param ctx      Valid VkBLASContext.
+ * \param format   Quantized weight format to query.
+ * \param out_tier Receives the resolved tier index (0/1/2).
+ * \retval VK_SUCCESS On success.
+ * \retval VK_ERROR_FEATURE_NOT_PRESENT If format is not a valid qgemm format.
+ */
+VkResult vkblas_qgemm_get_tier(VkBLASContext* ctx, VkBLASQGemmFormat_t format,
+                               uint32_t* out_tier);
+
+/* ═════════════════════════════════════════════════════════════════════════
+ * Fused quantized GEMM — FP16 output storage
+ * ═════════════════════════════════════════════════════════════════════════
+ *
+ * The vkblas_qgemm_*_f16 functions compute the same fused quantized GEMM as
+ * their *_f32 counterparts but store the output y as IEEE-754 half (fp16)
+ * instead of f32. Everything else is identical:
+ *   - Wq layout and ldw are byte-for-byte the format contract on the *_f32
+ *     functions (Q8_0 36 B/block of 32, Q4_0 20 B/block of 32, Q4_K/Q5_K/
+ *     Q6_K/Q3_K/IQ4_XS ggml 144/176/210/110/136 B/block of 256).
+ *   - x is f32 (k x m), column-major; ldx >= k.
+ *   - y16 is the output (n x m), column-major, element type uint16_t holding
+ *     fp16 bits; ldy >= n. It is read for the beta term and written in place,
+ *     exactly like y in the *_f32 variants.
+ *   - alpha/beta are f32 host scalars; accumulation happens in f32 and the
+ *     result is rounded to fp16 only at the final store (no fp16 arithmetic
+ *     inside the kernel).
+ *
+ * \par Device requirements
+ * The fp16 output path is a subgroup-tier feature: the kernels dispatch from
+ * the subgroup shaders (one 32-lane subgroup per 32x8 output tile) and need
+ * storageBuffer16BitAccess + scalarBlockLayout on the device/queue (the
+ * shaderFloat16 feature is NOT required — fp16 is only stored, never
+ * arithmetically computed). On devices that resolve qgemm to the baseline
+ * tier, these functions return VK_ERROR_FEATURE_NOT_PRESENT. See
+ * vkblas_qgemm_get_tier to query tier support.
+ *
+ * \param ctx   Valid VkBLASContext.
+ * \param cmd   Command buffer to record into (recording state).
+ * \param m     Columns of x and y16 (activation/batch dimension).
+ * \param n     Rows of W and y16 (output dimension).
+ * \param k     Columns of W, rows of x (contraction dimension).
+ * \param alpha Host pointer to scalar alpha (f32).
+ * \param Wq    VkBuffer holding the quantized weight matrix (format layout
+ *              identical to the corresponding *_f32 function).
+ * \param ldw   Byte stride between weight rows.
+ * \param x     VkBuffer holding activation x (k x m f32).
+ * \param ldx   Leading dimension of x (>= k).
+ * \param beta  Host pointer to scalar beta (f32).
+ * \param y16   VkBuffer holding output y16 (n x m fp16 bits); read + written.
+ * \param ldy   Leading dimension of y16 (>= n).
+ * \retval VK_SUCCESS On success.
+ * \retval VK_ERROR_FEATURE_NOT_PRESENT If the device resolves qgemm to the
+ *         baseline tier (no subgroup fp16-output kernel available).
+ */
+VkResult vkblas_qgemm_q8_0_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                               int32_t m, int32_t n, int32_t k,
+                               const float* alpha, VkBuffer Wq, int32_t ldw,
+                               VkBuffer x, int32_t ldx,
+                               const float* beta, VkBuffer y16, int32_t ldy);
+VkResult vkblas_qgemm_q4k_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                              int32_t m, int32_t n, int32_t k,
+                              const float* alpha, VkBuffer Wq, int32_t ldw,
+                              VkBuffer x, int32_t ldx,
+                              const float* beta, VkBuffer y16, int32_t ldy);
+VkResult vkblas_qgemm_q4_0_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                               int32_t m, int32_t n, int32_t k,
+                               const float* alpha, VkBuffer Wq, int32_t ldw,
+                               VkBuffer x, int32_t ldx,
+                               const float* beta, VkBuffer y16, int32_t ldy);
+VkResult vkblas_qgemm_q5k_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                              int32_t m, int32_t n, int32_t k,
+                              const float* alpha, VkBuffer Wq, int32_t ldw,
+                              VkBuffer x, int32_t ldx,
+                              const float* beta, VkBuffer y16, int32_t ldy);
+VkResult vkblas_qgemm_q6k_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                              int32_t m, int32_t n, int32_t k,
+                              const float* alpha, VkBuffer Wq, int32_t ldw,
+                              VkBuffer x, int32_t ldx,
+                              const float* beta, VkBuffer y16, int32_t ldy);
+VkResult vkblas_qgemm_q3k_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                              int32_t m, int32_t n, int32_t k,
+                              const float* alpha, VkBuffer Wq, int32_t ldw,
+                              VkBuffer x, int32_t ldx,
+                              const float* beta, VkBuffer y16, int32_t ldy);
+VkResult vkblas_qgemm_iq4xs_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                                int32_t m, int32_t n, int32_t k,
+                                const float* alpha, VkBuffer Wq, int32_t ldw,
+                                VkBuffer x, int32_t ldx,
+                                const float* beta, VkBuffer y16, int32_t ldy);
+
 /* ===========================================================================
  * Pointer mode control
  * ========================================================================== */

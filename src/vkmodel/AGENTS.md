@@ -49,6 +49,39 @@ Child of root `AGENTS.md` and `include/vkmodel/AGENTS.md`.
   classic ggml layout for the remaining types. Unknown/removed enum values
   yield size 0 → load fails.
 
+### OpenVINO IR parser (same file)
+- `vkmodel_load_openvino(rt, xml_path, bin_path, &m)`: opens the `.bin`
+  (fseek/ftell size, capped at 64 MiB) then tag-scans the `.xml` with the
+  shared `vkmodel_reader_t` + a small `vkmodel_ov_tag_t` scanner
+  (`<name>`/`</name>`/`<name/>`/attributes). No external XML dependency.
+- Const layer → tensor: `type="Const"` (any opset, incl. opset10 `Const` with
+  embedded data and `version="opset1"`). Element type + shape + span from
+  `<data element_type shape offset size>`; the legacy path resolves layers
+  with `<weights offset size>` / `<biases offset size>` elements, whose
+  dtype/dims fall back to the output `<port id="0">` `precision` + `<dim>`
+  list. Port-precision strings ("FP32"/"FP16"/"BF16"/"I8"/"BOOL"/"FP8E4M3"/...)
+  are resolved through `vkmodel_ov_port_aliases` to the matching IR element
+  type name before the dtype lookup. Layers with neither Const nor
+  weights/biases are
+  skipped (e.g. `Parameter`). The IR `<dim>` order maps 1:1 to the GGUF dim
+  order; a scalar (empty shape) has nelems 1.
+- Element-type map lives in `vkmodel_ov_dtypes` (f32/f16→ggml 0/1,
+  i8/i16/i32/i64→24/25/26/27, i4/u4/f8/bool→reject). bf16 and the unsigned
+  widths map to `VKMODEL_DTYPE_UNKNOWN` with size 2 (bf16) / 1..8 (uN) so the
+  loader still uploads the raw bytes; `_dtype_name()` reports the file element
+  type. Sub-byte packed types fail (element size underivable).
+- Validation (per tensor, in `vkmodel_ov_fill_tensor`): dtype resolvable and
+  whole-byte (`i4`/`u1`..`u6`/`nf4`/`f4e2m1`/`string`/`dynamic`/`undefined`
+  fail) → nelems from `<data shape>` (empty shape = scalar, nelems 1; no
+  shape → output-port `<dim>`s) → declared `size` must EXACTLY equal
+  `nelems × element_size` (line 2112) → span `offset + size` must fit inside
+  the `.bin`. Any failure returns `VK_ERROR_INITIALIZATION_FAILED` and leaves
+  `*pModel` NULL. The `.bin` may be larger than the total tensor span; there
+  is no file-size vs declared-size check.
+- Upload reuses the shared `vkmodel_upload_tensor` (streamed chunked `vkr_upload`
+  into the same model-owned device buffers). Host structs (`VkModelOvLayer`)
+  are freed by `vkmodel_destroy`.
+
 ### Streamed upload
 - Per tensor: `vkr_malloc` a device buffer (STORAGE|TRANSFER_SRC/DST), then
   read the data region in `VKMODEL_STREAM_CHUNK` (64 MiB) slices via
@@ -113,10 +146,26 @@ Child of root `AGENTS.md` and `include/vkmodel/AGENTS.md`.
 metadata, tensor info, block map, F32 download memcmp, 33-byte odd-size
 offset-verbatim download; safetensors load of F32/F16 tensors + __metadata__
 KV exposure + dtype name/enum mapping + 2-tensor byte-identical download +
-non-aligned odd-offset I8 [33] verbatim download).
+non-aligned odd-offset I8 [33] verbatim download; OpenVINO IR v11 load of a
+5-tensor .xml+.bin — f32 Conv [2,3,4], scalar f16, bf16 [8], legacy
+<weights> f32 [8,8] resolved via output-port precision/dims, opaque u8 [16] —
+with dtype/dtype_name/nelems/size asserts and byte-exact vkr_download
+round-trips per tensor, plus rejection of a size-mismatch IR and a sub-byte
+i4 IR).
+
+### OpenVINO rejection truth table
+| Input IR                                             | Expected                            | Actual |
+|------------------------------------------------------|-------------------------------------|--------|
+| `<data size>` ≠ element_size × nelems (f32 4×4 size=100) | VK_ERROR_INITIALIZATION_FAILED   | ✅ test |
+| element_type `i4` (sub-byte, no esize)               | VK_ERROR_INITIALIZATION_FAILED      | ✅ test |
+| `offset+size` past .bin EOF                          | VK_ERROR_INITIALIZATION_FAILED      | ✅ code path |
+| Const with `<data>` + no output port                 | dtype/shape from `<data>`, size validated | ✅ code path |
+| layer with `<weights>` but no resolvable dtype/dims (no port) | VK_ERROR_INITIALIZATION_FAILED | ✅ code path |
+| `.bin` larger than needed (unused tail bytes)        | accepted (only per-tensor span checked) | ✅ code path |
+| `<data>` without `size` attribute (size = 0)         | rejected (0 != nelems×esize)        | ✅ code path |
 
 ## Files
 | File | Purpose |
 |------|---------|
 | `vkmodel_internal.h` | Model struct, value/tensor/KV storage, constants |
-| `vkmodel.c` | GGUF reader/parser, self-contained JSON parser, safetensors loader, streamed upload, public API, type tables |
+| `vkmodel.c` | GGUF reader/parser, self-contained JSON parser, safetensors loader, OpenVINO IR v11 loader, streamed upload, public API, type tables |

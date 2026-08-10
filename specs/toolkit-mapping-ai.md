@@ -15,7 +15,7 @@
 | VKFFT      | vkfft   | `vkfft_create_plan*`, `vkfft_execute{_inverse}_{f32,f16}`, `vkfft_execute_2d*` | Radix-2 FFT forward+inverse (f16/f32, 2D) |
 | VKRAND     | vkrand  | `vkrand_uniform_f32`, `vkrand_threefry_uniform_f32`, `vkrand_normal_f32`, `vkrand_uniform_uint32` | PRNG (Threefry) + uniform/normal sampling |
 | VKQuant    | vkquant | `vkquant_dequant_<fmt>_f32` (23 fmt), `vkquant_quantize_<fmt>_f32` (22 fmt) | Block-quant dequant + forward (encode) quantize; q4_0..tq2_0, iq1s..iq4xs |
-| VKMath     | vkmath  | `vkmath_relu/silu/gelu/tanh/sigmoid{_f16}`, `vkmath_add/mul/add_mul/scale{_f16}`, `vkmath_{max|sum}_reduce_dim_f32`, `vkmath_softmax/rms_norm/layernorm_f32`, `vkmath_argmax/argmin_f32`, `vkmath_cumsum_f32`, `vkmath_clip/abs/sign/exp/log/sqrt/rsqrt/pow_f32` | Elementwise unary/binary, reductions, norms, activations |
+| VKMath     | vkmath  | `vkmath_relu/silu/gelu/tanh/sigmoid{_f16}`, `vkmath_add/mul/add_mul/scale{_f16}`, `vkmath_{max|sum}_reduce_dim_f32`, `vkmath_softmax/rms_norm/layernorm_f32`, `vkmath_argmax/argmin_f32`, `vkmath_cumsum_f32`, `vkmath_clip/abs/sign/exp/log/sqrt/rsqrt/pow_f32`, `vkmath_cast_f32_to_bf16`/`vkmath_cast_bf16_to_f32` | Elementwise unary/binary, reductions, norms, activations, bf16 casts |
 | VKKV       | vkkv    | `vkkv_create_transfer`, `vkkv_fit_cpu`, `vkkv_apply` | LLM KV-cache: ridge-fit new keys into cache basis (host double Gauss-Jordan), GPU apply |
 | VKDIST     | vkdist  | `vkdist_server_run`, `vkdist_server_serve_many`, `vkdist_register_buffer`, `vkdist_upload`, `vkdist_sgemm*`, `vkdist_readback`, `vkdist_close` | Distributed inference transport (TCP, u32-LE length+opcode framing, <=1 MiB frames) |
 | VKModel    | vkmodel | `vkmodel_load_gguf`, `vkmodel_load_safetensors` -> `VkModelTensor[]` | Model/weight loading (GGUF + safetensors) |
@@ -30,7 +30,7 @@
 | BLAS L1/L2 (axpy, scal, dot, nrm2, asum, amax, gemv) | cuBLAS | rocBLAS | — | VKBLAS-L1L2 | exists |
 | FFT | cuFFT | rocFFT | OV runtime FFT ops | VKFFT | exists (radix-2 f16/f32, 2D) |
 | RNG / distribution sampling | cuRAND | rocRAND / rocPRIM | (OV runtime RNG) | VKRAND | exists (Threefry + uniform/normal) |
-| Elementwise / activations / reductions / softmax | (kernels/CUB) | rocPRIM + MIOpen | ngraph ops | VKMath | exists; **no bf16 elementwise/cast ops** (gap) |
+| Elementwise / activations / reductions / softmax | (kernels/CUB) | rocPRIM + MIOpen | ngraph ops | VKMath | exists; **bf16 elementwise compute ops integrated** (`add/mul/add_mul/scale`, uint16_t bf16 I/O, f32 compute) — no bf16 activations/reductions; f16 add/mul/scale public APIs lack blobs → `VK_ERROR_FEATURE_NOT_PRESENT` |
 | Weight quantization (block formats) | cuTensor/cuQuant (via) | MIOpen | NNCF | VKQuant | exists (dequant 23 + forward-quant 22 formats) |
 | Sparse BLAS | cuSPARSE | rocSPARSE | — | (none) | gap |
 | Signal/image processing | NPP | rocAL | — | (none) | gap |
@@ -81,12 +81,10 @@ VKKDIST: u32-LE length+opcode framing, OS-agnostic sockets, <=1 MiB frames, `vkd
 ## Verified gaps (priority order)
 1. **qgemm + f16/bf16/f64 GEMM: baseline shared-mem tiled only** — no subgroup/coopmatrix dequant+MAC tier. qgemm is the decode hot path (>80 tok/s goal); RX 9070 XT (coopmatrix) can host this tier. **Highest perf priority.**
 2. **qgemm outputs f32 only** — no fp16 output storage path (all writes f32).
-3. **VKMath: no bf16 elementwise/cast ops** — bf16 tensors load (safetensors, ggml BF16=30) and `gemm_bf16` inline-converts, but there is no reusable `cast_f32_to_bf16`/`cast_bf16_to_f32` op or bf16 elementwise. **Smallest bounded new-module target.**
+3. **VKMath: bf16 elementwise ops integrated** — `vkmath_add_bf16`/`vkmath_mul_bf16`/`vkmath_add_mul_bf16`/`vkmath_scale_bf16` (`baseline/{add,mul,add_mul,scale}_bf16.comp`, uint16_t bf16 I/O, f32 compute, truncate) PASS on RX 9070 XT; bf16 casts already integrated. Remaining VKMath: bf16 activations/reductions; f16 add/mul/scale public APIs lack `(KERNEL, DTYPE_F16)` table entries → `VK_ERROR_FEATURE_NOT_PRESENT`.
 4. No cuSPARSE-equivalent (sparse BLAS) / no NPP-equivalent (signal/image).
 5. No runtime JIT (NVRTC/hipRTC) — offline shader compile only.
-6. No OpenVINO IR (.xml/.bin) loader in VKModel.
 
 ## Next action queue
-1. (STARTING) **VKMath bf16 cast op** — `cast_f32_to_bf16` + `cast_bf16_to_f32`, reusing the proven bf16 bit-conversion math in `shaders/vkblas/baseline/gemm_bf16.comp`; truth table -> GLSL -> `vkmath_internal.h` kernel enum -> `s_shader_table` -> `vkmath.h` API -> test against host reference; GPU-verified on RX 9070 XT.
-2. **qgemm subgroup/coopmatrix dequant+MAC tier** (RX 9070 XT), then f16/bf16/f64 GEMM tier — the >80 tok/s path.
-3. (optional) OpenVINO IR loader; sparse BLAS; runtime JIT — lower priority.
+1. (STARTING) **qgemm subgroup/coopmatrix dequant+MAC tier** (RX 9070 XT), then f16/bf16/f64 GEMM tier — the >80 tok/s path.
+2. (optional) OpenVINO IR loader; sparse BLAS; runtime JIT — lower priority.

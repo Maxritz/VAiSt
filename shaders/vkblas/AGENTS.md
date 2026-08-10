@@ -74,15 +74,34 @@ Layout follows std140 packing rules. `int64_t` requires `shaderInt64` feature
 - `qgemm_q3k.comp`  — fused quantized GEMM, Q3_K weights (dequant-in-matmul)
 - `qgemm_iq4xs.comp` — fused quantized GEMM, IQ4_XS weights (dequant-in-matmul)
 
-Each variant exists in all three tier directories.
+Each variant is declared per tier directory; not every (kernel, tier) pair has
+a blob — the runtime falls back to the highest tier that ships one. Today:
+plain GEMM ships `baseline` + `subgroup` twins for f32/f16/bf16/f64 (plus a
+`coopmatrix` variant for f32); all seven `qgemm_*` formats ship `baseline` +
+`subgroup` (each subgroup kernel in an f32-output and an `_f16` fp16-output
+storage variant). The `_f16` kernels write the f32 accumulator as `float16_t`
+to y/z and are selected by the private dtype codes 32..38 in `vkblas.c`.
 
-## Fused quantized GEMM shaders (baseline only)
+## Fused quantized GEMM shaders
 
-The `qgemm_*.comp` shaders reuse the gemm_f32 16x16 tiled structure
-(shared `As`/`Bs`, k-loop with zero-fill, m/n write-guard) but the A-tile load
-**dequantizes the quantized weight blocks into f32 shared memory** instead of
-loading f32. The dequant math is ported verbatim from the vkquant shaders /
-ggml-common.h:
+The `qgemm_*.comp` shaders reuse the gemm_f32 tiled structure with the A-tile
+load **dequantizing the quantized weight blocks into f32** instead of loading
+f32. Two execution models exist:
+
+- **Baseline** (`baseline/qgemm_*.comp`, all 7 formats): the 16x16 shared-memory
+  tiled structure (`shared As`/`Bs`, k-loop with zero-fill, m/n write-guard).
+- **Subgroup** (`subgroup/qgemm_<fmt>.comp`, all 7 formats; `_f16` twin for
+  fp16 output storage): a 32x8 warp-tiled
+  kernel with one 32-lane workgroup per output tile, lane = output row with 8
+  register accumulators, x broadcast to all lanes via `subgroupShuffle`
+  (lanes 0..7 load, 31 shuffle recipients), W dequant in per-lane registers —
+  **no shared memory, no barriers**. Tile spec constants use `constant_id` 7/8
+  because the host fixates ids 0..6 at 16/16/16 for every tier; the subgroup
+  kernel therefore keeps its 32/8 defaults. Requires
+  `GL_KHR_shader_subgroup_basic` + `GL_KHR_shader_subgroup_shuffle` (core
+  `GroupNonUniformShuffle` in Vulkan 1.1+).
+
+The dequant math is ported verbatim from the vkquant shaders / ggml-common.h:
 
 - **Q8_0**: 36 B/block of 32 (f32 `d` + 32 int8). `As = d * qs[i]`.
 - **Q4_0**: 20 B/block of 32 (f32 `d` + 16 packed nibbles). `As = d * (nib - 8)`.

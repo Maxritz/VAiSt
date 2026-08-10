@@ -62,3 +62,28 @@ For unary ops, only bindings 0 and 2 are bound.
 ### f16 shaders
 Use `GL_EXT_shader_explicit_arithmetic_types` and `GL_EXT_scalar_block_layout`.
 SSBOs use `layout(scalar)` for tight float16_t packing.
+
+### bf16 cast shaders (`cast_f32_to_bf16.comp`, `cast_bf16_to_f32.comp`)
+bf16 is stored as `uint16_t` in `layout(scalar)` SSBOs (low 16 bits = truncated
+f32 top bits), bit-compatible with `gemm_bf16.comp`. Math:
+- `f32 -> bf16`: `uint16_t(floatBitsToUint(f) >> 16)` (truncation, NOT RNE)
+- `bf16 -> f32`: `uintBitsToFloat(uint(b) << 16)` (exact)
+
+These shaders declare `StorageBuffer16BitAccess` (no `Int16` — they only
+load/store `uint16_t`, no 16-bit arithmetic), so the device must enable
+`storageBuffer16BitAccess` + `scalarBlockLayout`. Baseline-only tier; no
+subgroup variant (elementwise, no benefit).
+
+### bf16 elementwise shaders (`add_bf16.comp`, `mul_bf16.comp`,
+`add_mul_bf16.comp`, `scale_bf16.comp`)
+Same bf16 representation as the casts: `uint16_t` in `layout(scalar)` SSBOs,
+`StorageBuffer16BitAccess`. Compute runs in f32, results truncate back to bf16:
+```
+float  a  = uintBitsToFloat(uint(data_a[idx]) << 16);
+float  b  = uintBitsToFloat(uint(data_b[idx]) << 16);
+float  r  = /* op in f32 (add / mul / (a+b)*alpha / alpha*a) */;
+data_out[idx] = uint16_t(floatBitsToUint(r) >> 16);
+```
+Push-constant block identical to the f32/f16 shaders (`pc.num_elements`,
+`pc.alpha` used by add_mul/scale). `add_mul_bf16.comp` and `scale_bf16.comp`
+apply `pc.alpha` for the `(a+b)*alpha` / `alpha*a` forms. Baseline-only tier.

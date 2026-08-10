@@ -267,6 +267,43 @@ VkResult vkmath_scale_f16(VkMathContext* ctx,
                           VkBuffer output);
 
 /* ===========================================================================
+ * Elementwise binary ops (bf16)
+ *
+ * bf16 is stored as uint16_t (top 16 bits of the f32 value, truncated).
+ * Compute runs in f32, results truncate back to bf16. Requires
+ * storageBuffer16BitAccess + scalarBlockLayout.
+ * ========================================================================== */
+
+VkResult vkmath_add_bf16(VkMathContext* ctx,
+                         VkCommandBuffer cmd,
+                         uint32_t num_elements,
+                         VkBuffer a,
+                         VkBuffer b,
+                         VkBuffer output);
+
+VkResult vkmath_mul_bf16(VkMathContext* ctx,
+                         VkCommandBuffer cmd,
+                         uint32_t num_elements,
+                         VkBuffer a,
+                         VkBuffer b,
+                         VkBuffer output);
+
+VkResult vkmath_add_mul_bf16(VkMathContext* ctx,
+                             VkCommandBuffer cmd,
+                             uint32_t num_elements,
+                             VkBuffer a,
+                             VkBuffer b,
+                             float alpha,
+                             VkBuffer output);
+
+VkResult vkmath_scale_bf16(VkMathContext* ctx,
+                           VkCommandBuffer cmd,
+                           uint32_t num_elements,
+                           float alpha,
+                           VkBuffer input,
+                           VkBuffer output);
+
+/* ===========================================================================
  * Reductions (f32)
  * ========================================================================== */
 
@@ -476,6 +513,43 @@ VkResult vkmath_pow_f32(VkMathContext *ctx,
                         float exponent,
                         VkBuffer input,
                         VkBuffer output);
+
+/* ===========================================================================
+ * bf16 casts
+ * Input/output buffers use bf16 as uint16_t in scalar-block layout (low
+ * 16 bits hold the truncated f32 top bits), matching gemm_bf16.comp.
+ * Requires storageBuffer16BitAccess + scalarBlockLayout device features.
+ * ========================================================================== */
+
+/**
+ * \brief Cast f32 to bf16 (truncation): out[i] = top 16 bits of in[i].
+ *
+ * \param ctx Valid context.
+ * \param cmd Command buffer in the recording state.
+ * \param num_elements Element count.
+ * \param input f32 input buffer.
+ * \param output bf16 output buffer (uint16_t elements).
+ */
+VkResult vkmath_cast_f32_to_bf16(VkMathContext *ctx,
+                                 VkCommandBuffer cmd,
+                                 uint32_t num_elements,
+                                 VkBuffer input,
+                                 VkBuffer output);
+
+/**
+ * \brief Cast bf16 to f32 (exact): out[i] = float(bits(in[i]) << 16).
+ *
+ * \param ctx Valid context.
+ * \param cmd Command buffer in the recording state.
+ * \param num_elements Element count.
+ * \param input bf16 input buffer (uint16_t elements).
+ * \param output f32 output buffer.
+ */
+VkResult vkmath_cast_bf16_to_f32(VkMathContext *ctx,
+                                 VkCommandBuffer cmd,
+                                 uint32_t num_elements,
+                                 VkBuffer input,
+                                 VkBuffer output);
 
 /* ===========================================================================
  * Utility

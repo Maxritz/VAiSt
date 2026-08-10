@@ -40,6 +40,7 @@ typedef char vkmath_pc_static_assert[sizeof(vkmath_push_constants_t) == 72 ? 1 :
 
 #define VKMATH_DTYPE_F32 0
 #define VKMATH_DTYPE_F16 1
+#define VKMATH_DTYPE_BF16 2
 
 /* ── Kernel types ──────────────────────────────────────────────────────── */
 
@@ -68,7 +69,9 @@ typedef char vkmath_pc_static_assert[sizeof(vkmath_push_constants_t) == 72 ? 1 :
 #define VKMATH_KERNEL_SQRT          22
 #define VKMATH_KERNEL_RSQRT         23
 #define VKMATH_KERNEL_POW           24
-#define VKMATH_KERNEL_COUNT         25
+#define VKMATH_KERNEL_CAST_F32_TO_BF16  25
+#define VKMATH_KERNEL_CAST_BF16_TO_F32  26
+#define VKMATH_KERNEL_COUNT         27
 
 /* ── Capability tiers ──────────────────────────────────────────────────── */
 

@@ -25,6 +25,16 @@ Child of root `AGENTS.md`. Governs the public API surface under `include/vkmodel
   exposing `__metadata__` string entries as metadata KVs and each tensor's
   dtype/shape/data_offsets. Data is read verbatim at absolute offset
   `8 + N + data_offsets[0]`; tensor size is validated against dtype × nelems.
+- **Parses OpenVINO IR v11** (`vkmodel_load_openvino`): tag-scans the `.xml`
+  for `<layer type="Const">` weight nodes plus legacy `<weights>`/`<biases>`
+  elements. Element type and shape come from `<data element_type shape
+  offset size>`; when absent, they fall back to the output `<port>`
+  precision/dims. Slices bytes at the declared `.bin` offset verbatim, size
+  checked against element-type × nelems, and validates every tensor's span
+  fits inside the `.bin`. Unsupported (sub-byte packed / non-static) element
+  types fail the load; opaque U8/U16/U32/U64/boolean/f8 shapes are exposed
+  like safetensors unknowns (`VKMODEL_DTYPE_UNKNOWN`, dtype_name = file
+  element type), while bf16 maps natively to ggml 30.
 - **Uploads**: each tensor's raw bytes into a model-owned device buffer via
   `vkr_malloc` + `vkr_upload`, streamed in bounded chunks (no whole-file RAM).
 - **Does NOT dequantize**: the loader only reports `ggml_type` per tensor and
@@ -68,6 +78,32 @@ Child of root `AGENTS.md`. Governs the public API surface under `include/vkmodel
   safetensors tensors and the canonical ggml name (from a static table) for
   GGUF tensors.
 
+### OpenVINO element type → ggml mapping
+| element_type | ggml_type | notes |
+|--------------|-----------|-------|
+| f32   | 0  | 1:1 |
+| f16   | 1  | 1:1 |
+| bf16  | 30 | 1:1 (native bf16, same as safetensors BF16) |
+| f64   | 28 | 1:1 |
+| i8/i16/i32/i64 | 24/25/26/27 | 1:1 |
+| u8/u16/u32/u64/boolean/f8e4m3/f8e5m2/f8e8m0 | `VKMODEL_DTYPE_UNKNOWN` (0xFFFFFFFF) | opaque bytes, esize 1/2/4/8; `_dtype_name()` returns the file element type |
+| i4/u1/u2/u3/u4/u6/nf4/f4e2m1/string/dynamic/undefined | load fails | sub-byte packed / non-static: element size underivable |
+- Numeric `ov::element::Type_t` enum strings are accepted as aliases
+  (dynamic=0, boolean=1, bf16=2, f16=3, f32=4, f64=5, i4=6, i8=7, i16=8,
+  i32=9, i64=10, u1=11, u2=12, u3=13, u4=14, u6=15, u8=16, u16=17, u32=18,
+  u64=19, nf4=20, f8e4m3=21, f8e5m2=22, string=23, f4e2m1=24, f8e8m0=25);
+  lookup is case-insensitive ASCII.
+- Shape order is OpenVINO's `<dim>` order (row-major, same as GGUF/safetensors).
+  A scalar Const (empty shape) yields nelems 1 / size 1×element_size.
+- Layer without `<data element_type>` (e.g. `FullyConnected` with `<weights>`)
+  resolves dtype+dims from the output `<port id="0">` precision and `<dim>`
+  list; port-precision strings ("FP32"/"FP16"/"BF16"/"I8"/"BOOL"/"FP8E4M3"/...)
+  map to the IR element-type names via `vkmodel_ov_port_aliases`. If the port
+  is also absent the load fails.
+- Declared `<data size>` must exactly equal element_size × nelems (validated);
+  the `.bin` span `offset+size` is checked against the file size. A `.bin`
+  larger than needed (unused tail) is accepted.
+
 ### Byte sizes (block layout)
 - Block byte sizes match the stack's VKQuant canonical layouts (the classic
   ggml f32-scale blocks): Q8_0=36, Q4_0=20, Q4_K=144, Q6_K=210, IQ4_XS=136.
@@ -86,13 +122,14 @@ Child of root `AGENTS.md`. Governs the public API surface under `include/vkmodel
 ## Files
 | File | Purpose |
 |------|---------|
-| `vkmodel.h` | Public API: load/destroy (GGUF + safetensors), metadata + tensor getters, dtype-name getter, block-size map |
+| `vkmodel.h` | Public API: load/destroy (GGUF + safetensors + OpenVINO IR), metadata + tensor getters, dtype-name getter, block-size map |
 
 ### Public API surface
-- `vkmodel_load` / `vkmodel_load_safetensors` — parse + upload a GGUF /
-  safetensors file; both produce the same `VkModel` opaque.
+- `vkmodel_load` / `vkmodel_load_safetensors` / `vkmodel_load_openvino` —
+  parse + upload a GGUF / safetensors / OpenVINO IR (.xml + .bin) file; all
+  three produce the same `VkModel` opaque.
 - `vkmodel_destroy` — frees host arrays + vkr_free()s every tensor buffer,
-  for models loaded by either loader.
+  for models loaded by any of the three loaders.
 - Metadata: `vkmodel_get_kv_count` / `_get_kv_key` / `_get_kv_string`.
 - Tensor: `vkmodel_get_tensor_count` / `_name` / `_dtype` / `_dtype_name` /
   `_nelems` / `_buffer` / `_size`.

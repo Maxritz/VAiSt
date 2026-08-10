@@ -1,0 +1,154 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+
+// Subgroup-tier fused quantized GEMM: y = alpha * (dequant_q3k(W) * x) + beta*y.
+//
+// Execution model (differs from the 16x16 shared-memory baseline):
+//   - One 32-lane workgroup per 32x8 output tile (local_size 32x1).
+//   - lane = output row (globalRow = grRow*TILE_M + lane); each lane owns a
+//     distinct weight row and accumulates TILE_N registers (one per output col).
+//   - The x activation vector is broadcast to all 32 lanes via
+//     subgroupShuffle: lanes 0..TILE_N-1 load one x element each and the other
+//     lanes receive it. This replaces the shared-memory broadcast of baseline.
+//   - W dequant stays in per-lane registers (no shared memory, no barriers).
+//
+// Tile spec constants use constant_id 7/8: the host fixes constant_ids 0..6
+// at 16/16/16 for every tier, so this kernel declares its own tile IDs that
+// the host SpecializationInfo does not override (defaults 32/8 are kept).
+//
+// Push constants, descriptor bindings, and the Q3_K weight layout are
+// identical to the baseline qgemm_q3k.comp (see shaders/vkblas/AGENTS.md).
+// The dequant math below is copied verbatim from the baseline shader.
+
+// Specialization constants (ids 7/8 are subgroup-tier-reserved)
+layout(constant_id = 7) const uint TILE_M = 32;   /* output rows per workgroup */
+layout(constant_id = 8) const uint TILE_N = 8;    /* output cols per workgroup */
+
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    float alpha;
+    float beta;
+    uint  lda;
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  _pad2;
+    uint  _pad3;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufW { uint8_t data_W[]; };
+layout(set = 0, binding = 1) restrict readonly buffer BufX { float data_X[]; };
+layout(set = 0, binding = 2) restrict readonly buffer BufY { float data_Y[]; };
+layout(set = 0, binding = 3) writeonly  buffer BufZ { float data_Z[]; };
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint lane    = gl_LocalInvocationID.x;
+    uint grRow   = gl_WorkGroupID.x;
+    uint grCol   = gl_WorkGroupID.y;
+
+    uint globalRow = grRow * TILE_M + lane;   /* weight row / output row       */
+    uint baseCol   = grCol * TILE_N;          /* first output col of the tile  */
+
+    float acc[TILE_N];
+    for (uint j = 0; j < TILE_N; ++j)
+        acc[j] = 0.0f;
+
+    for (uint kk = 0; kk < pc.k; ++kk) {
+        /* ── x broadcast: lanes 0..TILE_N-1 load, all lanes shuffle-receive ──
+           The shuffle sources are lanes 0..7, which are always active (no
+           early return before this loop), so the subgroup operations stay in
+           uniform control flow. */
+        float xv = 0.0f;
+        if (lane < TILE_N) {
+            uint col = baseCol + lane;
+            if (col < pc.n)
+                xv = data_X[kk + col * pc.ldb];
+        }
+
+        /* ── Dequantize this lane's W row element (Q3_K) ────────────────────
+           Only in-bounds rows read W; OOB lanes keep w = 0 and never write. */
+        float w = 0.0f;
+        if (globalRow < pc.m) {
+            uint blk  = kk >> 8u;
+            uint e    = kk & 255u;
+            uint base = globalRow * pc.lda + blk * 110u;
+
+            uint d_bits = uint(data_W[base + 108u]) | (uint(data_W[base + 109u]) << 8u);
+            float d = unpackHalf2x16(d_bits).x;
+
+            uint hcut = e >> 7u;          /* 0..1                    */
+            uint pos  = e & 127u;
+            uint j    = pos >> 5u;        /* 0..3                    */
+            uint l    = pos & 31u;
+            uint hi   = l >> 4u;          /* 0: elems 0..15, 1: 16..31 */
+            uint ll   = l & 15u;
+
+            uint is    = hcut * 8u + j * 2u + hi;
+            uint shift = 2u * j;
+            uint mbit  = j + (hcut != 0u ? 4u : 0u);
+            uint q_off = hcut * 32u + ll + (hi != 0u ? 16u : 0u);
+            uint h_off = ll + (hi != 0u ? 16u : 0u);
+
+            uint q2 = (uint(data_W[base + 32u + q_off]) >> shift) & 3u;
+            uint hb = (uint(data_W[base + h_off]) >> mbit) & 1u;
+            int  level = int(q2) - ((hb != 0u) ? 0 : 4);
+
+            uint s_off = base + 96u;
+            uint s0, s1;
+            if (is < 4u) {
+                s0 = uint(data_W[s_off + is]) & 0xFu;
+                s1 = uint(data_W[s_off + 8u + is]) & 3u;
+            } else if (is < 8u) {
+                s0 = uint(data_W[s_off + is]) & 0xFu;
+                s1 = (uint(data_W[s_off + is + 4u]) >> 2u) & 3u;
+            } else if (is < 12u) {
+                s0 = uint(data_W[s_off + is - 8u]) >> 4u;
+                s1 = (uint(data_W[s_off + is]) >> 4u) & 3u;
+            } else {
+                s0 = uint(data_W[s_off + is - 8u]) >> 4u;
+                s1 = (uint(data_W[s_off + is - 4u]) >> 6u) & 3u;
+            }
+            int sc = int(s0 | (s1 << 4u)) - 32;
+
+            w = d * float(sc) * float(level);
+        }
+
+        for (uint j = 0; j < TILE_N; ++j) {
+            float xk = subgroupShuffle(xv, j);
+            acc[j] += w * xk;
+        }
+    }
+
+    /* ── Write (guard tiles that overhang m/n) ───────────────────────────── */
+    if (globalRow >= pc.m)
+        return;
+
+    for (uint j = 0; j < TILE_N; ++j) {
+        uint col = baseCol + j;
+        if (col >= pc.n)
+            break;
+
+        float result = pc.alpha * acc[j];
+        if (pc.beta_is_zero == 0)
+            result += pc.beta * data_Y[globalRow + col * pc.ldc];
+
+        data_Z[globalRow + col * pc.ldd] = result;
+    }
+}
