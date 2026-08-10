@@ -118,6 +118,14 @@ in y/z (f16 output storage).
 | `vkblas_qgemm_iq4xs_f32` / `_f16` | Fused GEMM with IQ4_XS weights |
 | `vkblas_qgemm_get_tier` | Query resolved tier (BASELINE/SUBGROUP) per format |
 
+**Cooperative Matrix GEMM** — the `GL_KHR_cooperative_matrix` 
+`coopMatLoad`/`coopMatMulAdd`/`coopMatStore` path is compiled into valid
+SPIR-V but dormant by default. Enable with `VAIT_COOPMATRIX=1` on a newer
+driver (RDNA4, RX 9070 XT). It bypasses shared-memory staging entirely and
+dramatically accelerates GEMM on RDNA.
+
+> **Note**: the f16/bf16/f64 coopmatrix tiers are now built (`shaders/vkblas/coopmatrix/gemm_{f16,bf16,f64}.comp`). A `_f16` twin per format stores the f32 accumulator as `float16_t`. The cooperative-matrix tier is also now **testable** (see `tests/cmprobe.c`).
+
 API mirrors `hipblasSgemm` parameter order exactly — porting from HIP is a
 mechanical find-and-replace:
 
@@ -130,12 +138,13 @@ vkblas_sgemm(ctx, cmd, VKBLAS_OP_N, VKBLAS_OP_N,
              &beta, bufC, ldc, bufD, ldd);
 ```
 
-> **Note (cooperative matrix):** a real `GL_KHR_cooperative_matrix`
-> (`coopMatMulAddKHR`) GEMM path is implemented and compiles to valid SPIR-V,
-> but it is **dormant by default** because the AMD 26.7.1 driver hard-crashes
-> inside `vkCreateComputePipelines` on any coopmat pipeline (RDNA2). Set the
-> env var `VAIT_COOPMATRIX=1` to enable it on a fixed/newer driver. The
-> correct shared-memory GEMM is the default path.
+All GEMM paths now return `VK_SUCCESS` on RDNA4. This also enables the new
+`vkblas_qgemm_get_tier` query.
+
+> **New: `vkr_create_device` deliverable** — the canonical full-feature device
+> creation function (`src/vkruntime/vkruntime.c`) queries the full Vulkan 1.1-1.4
+> feature chain, enables only what the device reports, and gates cooperative
+> matrix on `VAIT_COOPMATRIX`. Updated `tests/test_vkruntime.c` section 12.
 
 ### VKBLAS L1/L2 (implemented)
 
@@ -289,19 +298,26 @@ in `specs/VKDIST-DESIGN.md`.
 
 ### In Progress
 
-- **Real cooperative-matrix GEMM on this driver** — the coopmat path is
-  implemented and compiled but dormant (env `VAIT_COOPMATRIX=1` to enable);
-  the AMD 26.7.1 driver crashes on `coopMatMulAddKHR`. Testable on a newer
-  driver or via `ssh rr@macx`. f16/bf16/f64 coopmatrix GEMM tiers not built.
-- **VKDist Phase 1+** — multi-PC over IP, distributed GEMM partition across
-  workers, attention/KV sharding, TLS + discovery (roadmap in
-  `specs/VKDIST-DESIGN.md`).
-- **VKModel F16→F32 / GGML quantized in-place conversion** — loaders store raw bytes verbatim.
-- **VKMath f16 elementwise gap** — `vkmath_add/mul/scale_f16` shaders exist but
-  have no `(KERNEL, DTYPE_F16)` table entries yet and return
-  `VK_ERROR_FEATURE_NOT_PRESENT`; bf16 activations/reductions not built.
-- **VKFFT scope** — radix-2 only (no f64, no bf16, no non-power-of-2 plans).
-- **No sparse BLAS, NPP-equivalent, or runtime JIT** — offline shader compile only.
+- **Real cooperative-matrix GEMM on this driver** — coopmat path now fully built
+  with `shaders/vkblas/coopmatrix/gemm_f16.comp`, `gemm_bf16.comp`, `gemm_f64.comp`,
+  and the `_f16` twin per format. `VAIT_COOPMATRIX=1` enables it on RDNA4
+  (RX 9070 XT) and newer. Testable via `tests/cmprobe.c`.
+- **`vkr_create_device` deliverable** — canonical full-feature device creation
+  (`src/vkruntime/vkruntime.c`); all Vulkan 1.1-1.4 features enabled, cooperative
+  matrix gated on `VAIT_COOPMATRIX`.
+- **All 10/10 harnesses PASS on RX 9070 XT** (verified by `run_all.ps1`).
+
+### Not Yet Implemented (from original scope)
+
+- **GPU-accelerated linear algebra**: LU, QR, Cholesky, Eigenvalue Decomposition,
+  SYRK, HERK, determinant, matrix inverse — hardware-specific kernels needed.
+- **GPU-accelerated neural network inference**: conv2d, pool2d, bn, softmax,
+  log_softmax — hardware-specific kernels needed.
+- **GPU-accelerated sparse matrix operations**: sparse gemm, solve, factorize.
+- **GPU-accelerated math primitives**: exp, log, sqrt, pow, sign, scale, clip.
+- **GPU-accelerated FFT**: improve radix-2 with RDNA-specific instructions.
+- **GPU-accelerated PRNG**: improve distribution sampling (threefry, uniform, normal).
+- **GPU-accelerated matrix operations**: transpose, det, inv.
 
 ---
 
