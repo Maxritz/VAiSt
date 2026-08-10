@@ -1,6 +1,19 @@
 # Build artifacts
 build/
+build-*/
 cmake-build-*/
+
+# Temp/debug files
+tmp_*.ps1
+tmp_*.txt
+_*.txt
+*.out
+err.txt
+full.txt
+out.txt
+
+# Scripts
+compile_new_shaders.ps1
 
 # SPIR-V binaries
 **/*.spv

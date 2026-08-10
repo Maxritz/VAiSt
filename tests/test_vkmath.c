@@ -657,6 +657,36 @@ static int check_output_u16(const char *name, const void *mapped,
 }
 
 /**
+ * \brief Check f16 output with tolerance (1 ULP f16 rounding differences).
+ */
+static float f16_to_f32(uint16_t h);  /* forward declaration */
+static int check_output_f16(const char *name, const void *mapped,
+                            VkDeviceSize off_readback,
+                            const uint16_t *expected, uint32_t count, float tol)
+{
+    const uint16_t *got = (const uint16_t *)((const char *)mapped + off_readback);
+    int pass = 1;
+    uint32_t mismatches = 0;
+
+    for (uint32_t i = 0; i < count; i++) {
+        float g = f16_to_f32(got[i]);
+        float e = f16_to_f32(expected[i]);
+        float diff = fabsf(g - e);
+        float max_val = fmaxf(fabsf(g), fabsf(e));
+        if (diff > tol && diff / max_val > tol) {
+            if (mismatches < 8) {
+                printf("    mismatch[%u]: got 0x%04x (%f) expected 0x%04x (%f)\n",
+                       i, got[i], g, expected[i], e);
+            }
+            mismatches++;
+            pass = 0;
+        }
+    }
+    printf("  %-18s : %s\n", name, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+/**
  * \brief Truncate an f32 to its bf16 bit pattern (matches shader semantics).
  */
 static uint16_t f32_to_bf16_bits(float f)
@@ -676,6 +706,82 @@ static float bf16_to_f32(uint16_t b)
     float f;
     memcpy(&f, &ub, sizeof(f));
     return f;
+}
+
+/**
+ * \brief Convert f32 to IEEE 754 binary16 bit pattern (CPU reference).
+ *        Handles normals, zeros, and subnormals. No inf/nan in test data.
+ */
+static uint16_t f32_to_f16_bits(float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    uint32_t sign = (u >> 31) & 0x1;
+    uint32_t mantissa = u & 0x7FFFFF;
+    int32_t exponent = ((u >> 23) & 0xFF) - 127;
+
+    if (exponent < -24) {
+        /* Too small for subnormal f16 */
+        return (uint16_t)(sign << 15);
+    } else if (exponent < -14) {
+        /* Subnormal f16 */
+        int shift = -14 - exponent;
+        uint32_t bits = (1u << 23) | mantissa; /* implicit leading 1 */
+        uint32_t scaled = bits >> shift;
+        /* Round to nearest, ties to even */
+        uint32_t rem = bits & ((1u << shift) - 1);
+        uint32_t half = 1u << (shift - 1);
+        if (rem > half || (rem == half && (scaled & 1))) {
+            scaled++;
+        }
+        uint16_t result = (uint16_t)(sign << 15) | (uint16_t)(scaled >> 13);
+        return result;
+    } else if (exponent <= 15) {
+        /* Normal f16 */
+        uint16_t exp16 = (uint16_t)(exponent + 15);
+        uint16_t mant16 = (uint16_t)(mantissa >> 13);
+        /* Round to nearest, ties to even */
+        uint32_t rem = mantissa & 0x1FFF;
+        if (rem > 0x1000 || (rem == 0x1000 && (mant16 & 1))) {
+            mant16++;
+            if (mant16 == 0x400) {
+                mant16 = 0;
+                exp16++;
+            }
+        }
+        return (uint16_t)(sign << 15) | (uint16_t)(exp16 << 10) | mant16;
+    } else {
+        /* Clamp to max f16 (preserve sign) */
+        return (uint16_t)(sign << 15) | 0x7BFF;
+    }
+}
+
+/**
+ * \brief Convert IEEE 754 binary16 bit pattern to f32 (CPU reference).
+ */
+static float f16_to_f32(uint16_t h)
+{
+    uint16_t sign = (h >> 15) & 0x1;
+    uint16_t exp = (h >> 10) & 0x1F;
+    uint16_t mant = h & 0x3FF;
+    float result;
+
+    if (exp == 0 && mant == 0) {
+        result = 0.0f;
+    } else if (exp == 0x1F) {
+        /* inf/nan — shouldn't happen in test data */
+        result = (mant == 0) ? (sign ? -INFINITY : INFINITY) : NAN;
+    } else if (exp == 0) {
+        /* subnormal */
+        float m = (float)mant / 1024.0f;
+        result = sign ? -m * (float)powf(2.0f, -14) : m * (float)powf(2.0f, -14);
+    } else {
+        float m = 1.0f + (float)mant / 1024.0f;
+        result = sign ? -(m * (float)powf(2.0f, (int)exp - 15)) :
+                        m * (float)powf(2.0f, (int)exp - 15);
+    }
+
+    return result;
 }
 
 /* ===========================================================================
@@ -702,9 +808,15 @@ int main(void)
     op_t op_cast_f2b, op_cast_b2f;
     op_t op_add_bf16, op_mul_bf16, op_add_mul_bf16, op_scale_bf16;
     op_t op_relu_bf16, op_silu_bf16, op_gelu_bf16, op_sigmoid_bf16, op_tanh_bf16;
+    op_t op_max_reduce_bf16, op_sum_reduce_bf16;
+    op_t op_max_reduce_f16, op_sum_reduce_f16;
+    op_t op_softmax_f16, op_rms_f16, op_layernorm_f16;
     memset(&op_softmax, 0, sizeof(op_softmax));
     memset(&op_rms, 0, sizeof(op_rms));
     memset(&op_layernorm, 0, sizeof(op_layernorm));
+    memset(&op_softmax_f16, 0, sizeof(op_softmax_f16));
+    memset(&op_rms_f16, 0, sizeof(op_rms_f16));
+    memset(&op_layernorm_f16, 0, sizeof(op_layernorm_f16));
     memset(&op_argmax, 0, sizeof(op_argmax));
     memset(&op_argmin, 0, sizeof(op_argmin));
     memset(&op_cumsum, 0, sizeof(op_cumsum));
@@ -727,6 +839,10 @@ int main(void)
     memset(&op_gelu_bf16, 0, sizeof(op_gelu_bf16));
     memset(&op_sigmoid_bf16, 0, sizeof(op_sigmoid_bf16));
     memset(&op_tanh_bf16, 0, sizeof(op_tanh_bf16));
+    memset(&op_max_reduce_bf16, 0, sizeof(op_max_reduce_bf16));
+    memset(&op_sum_reduce_bf16, 0, sizeof(op_sum_reduce_bf16));
+    memset(&op_max_reduce_f16, 0, sizeof(op_max_reduce_f16));
+    memset(&op_sum_reduce_f16, 0, sizeof(op_sum_reduce_f16));
 
     float in_a[TEST_NUM_ELEMENTS];
     float in_b[TEST_NUM_ELEMENTS];
@@ -740,6 +856,9 @@ int main(void)
     float exp_softmax[TEST_REDUCE_ROWS * TEST_REDUCE_COLS];
     float exp_rms[TEST_REDUCE_ROWS * TEST_REDUCE_COLS];
     float exp_layernorm[TEST_REDUCE_ROWS * TEST_REDUCE_COLS];
+    uint16_t exp_softmax_f16[TEST_REDUCE_ROWS * TEST_REDUCE_COLS];
+    uint16_t exp_rms_f16[TEST_REDUCE_ROWS * TEST_REDUCE_COLS];
+    uint16_t exp_layernorm_f16[TEST_REDUCE_ROWS * TEST_REDUCE_COLS];
     uint32_t exp_argmax[TEST_REDUCE_ROWS];
     uint32_t exp_argmin[TEST_REDUCE_ROWS];
     float exp_cumsum[TEST_REDUCE_ROWS * TEST_REDUCE_COLS];
@@ -764,6 +883,10 @@ int main(void)
     uint16_t exp_bf16_gelu[TEST_NUM_ELEMENTS];
     uint16_t exp_bf16_sigmoid[TEST_NUM_ELEMENTS];
     uint16_t exp_bf16_tanh[TEST_NUM_ELEMENTS];
+    uint16_t exp_bf16_max_reduce[TEST_REDUCE_ROWS];
+    uint16_t exp_bf16_sum_reduce[TEST_REDUCE_ROWS];
+    uint16_t exp_f16_max_reduce[TEST_REDUCE_ROWS];
+    uint16_t exp_f16_sum_reduce[TEST_REDUCE_ROWS];
 
     int overall_pass = 1;
     VkResult r;
@@ -931,9 +1054,37 @@ int main(void)
     r = setup_op(h.device, h.mem, &h.cursor, h.align,
                   TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_FALSE, &op_sigmoid_bf16);
     if (r != VK_SUCCESS) goto cleanup;
-    r = setup_op(h.device, h.mem, &h.cursor, h.align,
-                  TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_FALSE, &op_tanh_bf16);
+        r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                      TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_FALSE, &op_tanh_bf16);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                      TEST_REDUCE_ROWS * TEST_REDUCE_COLS, TEST_REDUCE_ROWS,
+                      VK_FALSE, &op_max_reduce_bf16);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                      TEST_REDUCE_ROWS * TEST_REDUCE_COLS, TEST_REDUCE_ROWS,
+                      VK_FALSE, &op_sum_reduce_bf16);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                      TEST_REDUCE_ROWS * TEST_REDUCE_COLS, TEST_REDUCE_ROWS,
+                      VK_FALSE, &op_max_reduce_f16);
     if (r != VK_SUCCESS) goto cleanup;
+        r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                       TEST_REDUCE_ROWS * TEST_REDUCE_COLS, TEST_REDUCE_ROWS,
+                       VK_FALSE, &op_sum_reduce_f16);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                       TEST_REDUCE_ROWS * TEST_REDUCE_COLS, TEST_REDUCE_ROWS * TEST_REDUCE_COLS,
+                       VK_FALSE, &op_softmax_f16);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                       TEST_REDUCE_ROWS * TEST_REDUCE_COLS, TEST_REDUCE_ROWS * TEST_REDUCE_COLS,
+                       VK_FALSE, &op_rms_f16);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                       TEST_REDUCE_ROWS * TEST_REDUCE_COLS, TEST_REDUCE_ROWS * TEST_REDUCE_COLS,
+                       VK_FALSE, &op_layernorm_f16);
+        if (r != VK_SUCCESS) goto cleanup;
 
     /* ── 10. Fill inputs with known values ──────────────────────────────── */
     for (uint32_t i = 0; i < TEST_NUM_ELEMENTS; i++) {
@@ -1025,6 +1176,18 @@ int main(void)
             exp_layernorm[row * TEST_REDUCE_COLS + c] = (rrow[c] - mean) * inv_std;
         }
 
+        /* f16 normalizations: same f32 math, output stored as float16_t bits.
+           The f16 normalization shaders compute in f32 internally (matching
+           the f32 path), so the f32 reference values are converted to f16. */
+        for (uint32_t c = 0; c < TEST_REDUCE_COLS; c++) {
+            exp_softmax_f16[row * TEST_REDUCE_COLS + c] =
+                f32_to_f16_bits(exp_softmax[row * TEST_REDUCE_COLS + c]);
+            exp_rms_f16[row * TEST_REDUCE_COLS + c] =
+                f32_to_f16_bits(exp_rms[row * TEST_REDUCE_COLS + c]);
+            exp_layernorm_f16[row * TEST_REDUCE_COLS + c] =
+                f32_to_f16_bits(exp_layernorm[row * TEST_REDUCE_COLS + c]);
+        }
+
         /* argmax / argmin (first occurrence of tie) */
         uint32_t ai = 0;
         uint32_t ni = 0;
@@ -1105,6 +1268,56 @@ int main(void)
     memcpy((char *)h.mapped + op_gelu_bf16.off_in_a, bf16_in, sizeof(bf16_in));
     memcpy((char *)h.mapped + op_sigmoid_bf16.off_in_a, bf16_in, sizeof(bf16_in));
     memcpy((char *)h.mapped + op_tanh_bf16.off_in_a, bf16_in, sizeof(bf16_in));
+
+    /* bf16 reduction inputs: red[] converted to bf16 payload */
+    uint16_t red_bf16[TEST_REDUCE_ROWS * TEST_REDUCE_COLS];
+    for (uint32_t i = 0; i < TEST_REDUCE_ROWS * TEST_REDUCE_COLS; i++) {
+        red_bf16[i] = f32_to_bf16_bits(red[i]);
+    }
+    memcpy((char *)h.mapped + op_max_reduce_bf16.off_in_a, red_bf16, sizeof(red_bf16));
+    memcpy((char *)h.mapped + op_sum_reduce_bf16.off_in_a, red_bf16, sizeof(red_bf16));
+
+    /* f16 reduction inputs: red[] converted to IEEE 754 half precision */
+    uint16_t red_f16[TEST_REDUCE_ROWS * TEST_REDUCE_COLS];
+    for (uint32_t i = 0; i < TEST_REDUCE_ROWS * TEST_REDUCE_COLS; i++) {
+        red_f16[i] = f32_to_f16_bits(red[i]);
+    }
+    memcpy((char *)h.mapped + op_max_reduce_f16.off_in_a, red_f16, sizeof(red_f16));
+    memcpy((char *)h.mapped + op_sum_reduce_f16.off_in_a, red_f16, sizeof(red_f16));
+
+    /* bf16 reductions: input is the same bf16 payload of the reduction matrix (red),
+       expected outputs are computed in f32 then truncated to bf16 (matches shaders). */
+    for (uint32_t row = 0; row < TEST_REDUCE_ROWS; row++) {
+        float m = -1.0e30f;
+        float s = 0.0f;
+        for (uint32_t c = 0; c < TEST_REDUCE_COLS; c++) {
+            float f = bf16_to_f32(f32_to_bf16_bits(red[row * TEST_REDUCE_COLS + c]));
+            if (f > m) m = f;
+            s += f;
+        }
+        exp_bf16_max_reduce[row] = f32_to_bf16_bits(m);
+        exp_bf16_sum_reduce[row] = f32_to_bf16_bits(s);
+    }
+
+    /* f16 reductions: references computed from f16-converted input (matches
+       f16 shader which loads float16_t from buffer). Output stored as uint16_t
+       bit pattern after f32 accumulate + truncate. */
+    for (uint32_t row = 0; row < TEST_REDUCE_ROWS; row++) {
+        float m = -1.0e30f;
+        float s = 0.0f;
+        for (uint32_t c = 0; c < TEST_REDUCE_COLS; c++) {
+            float f = f16_to_f32(f32_to_f16_bits(red[row * TEST_REDUCE_COLS + c]));
+            if (f > m) m = f;
+            s += f;
+        }
+        exp_f16_max_reduce[row] = f32_to_f16_bits(m);
+        exp_f16_sum_reduce[row] = f32_to_f16_bits(s);
+    }
+
+    /* f16 normalization inputs: reuse red[] converted to f16 */
+    memcpy((char *)h.mapped + op_softmax_f16.off_in_a, red_f16, sizeof(red_f16));
+    memcpy((char *)h.mapped + op_rms_f16.off_in_a, red_f16, sizeof(red_f16));
+    memcpy((char *)h.mapped + op_layernorm_f16.off_in_a, red_f16, sizeof(red_f16));
 
     /* CPU reference values are also written into a mapped "second region"
        so the host-computed expected data is visible in the same memory.  */
@@ -1312,8 +1525,50 @@ int main(void)
 
         overall_pass &= record_dispatch(
             vkmath_tanh_bf16(h.math_ctx, h.cmd, TEST_NUM_ELEMENTS,
-                             op_tanh_bf16.in_a, op_tanh_bf16.out),
+                              op_tanh_bf16.in_a, op_tanh_bf16.out),
             "tanh_bf16");
+
+        overall_pass &= record_dispatch(
+            vkmath_max_reduce_dim_bf16(h.math_ctx, h.cmd,
+                                       TEST_REDUCE_ROWS, TEST_REDUCE_COLS,
+                                       op_max_reduce_bf16.in_a, op_max_reduce_bf16.out),
+            "max_reduce_dim_bf16");
+
+        overall_pass &= record_dispatch(
+            vkmath_sum_reduce_dim_bf16(h.math_ctx, h.cmd,
+                                       TEST_REDUCE_ROWS, TEST_REDUCE_COLS,
+                                       op_sum_reduce_bf16.in_a, op_sum_reduce_bf16.out),
+            "sum_reduce_dim_bf16");
+
+        overall_pass &= record_dispatch(
+            vkmath_max_reduce_dim_f16(h.math_ctx, h.cmd,
+                                      TEST_REDUCE_ROWS, TEST_REDUCE_COLS,
+                                      op_max_reduce_f16.in_a, op_max_reduce_f16.out),
+            "max_reduce_dim_f16");
+
+        overall_pass &= record_dispatch(
+            vkmath_sum_reduce_dim_f16(h.math_ctx, h.cmd,
+                                      TEST_REDUCE_ROWS, TEST_REDUCE_COLS,
+                                      op_sum_reduce_f16.in_a, op_sum_reduce_f16.out),
+            "sum_reduce_dim_f16");
+
+        overall_pass &= record_dispatch(
+            vkmath_softmax_f16(h.math_ctx, h.cmd,
+                               TEST_REDUCE_ROWS, TEST_REDUCE_COLS,
+                               op_softmax_f16.in_a, op_softmax_f16.out),
+            "softmax_f16");
+
+        overall_pass &= record_dispatch(
+            vkmath_rms_norm_f16(h.math_ctx, h.cmd,
+                                TEST_REDUCE_ROWS, TEST_REDUCE_COLS, TEST_EPS,
+                                op_rms_f16.in_a, op_rms_f16.out),
+            "rms_norm_f16");
+
+        overall_pass &= record_dispatch(
+            vkmath_layernorm_f16(h.math_ctx, h.cmd,
+                                 TEST_REDUCE_ROWS, TEST_REDUCE_COLS, TEST_EPS,
+                                 op_layernorm_f16.in_a, op_layernorm_f16.out),
+            "layernorm_f16");
     }
 
     /* Make the shader writes visible to the transfer readback copies.      */
@@ -1346,7 +1601,7 @@ int main(void)
                          op_cumsum.off_readback,
                          TEST_REDUCE_ROWS * TEST_REDUCE_COLS * sizeof(float));
     record_copy_readback(h.cmd, op_clip.out, h.staging,
-                         op_clip.off_readback, TEST_NUM_ELEMENTS * sizeof(float));
+                          op_clip.off_readback, TEST_NUM_ELEMENTS * sizeof(float));
     record_copy_readback(h.cmd, op_abs.out, h.staging,
                          op_abs.off_readback, TEST_NUM_ELEMENTS * sizeof(float));
     record_copy_readback(h.cmd, op_sign.out, h.staging,
@@ -1395,6 +1650,45 @@ int main(void)
         record_copy_readback(h.cmd, op_tanh_bf16.out, h.staging,
                              op_tanh_bf16.off_readback,
                              TEST_NUM_ELEMENTS * sizeof(uint16_t));
+    }
+
+    if (h.supports_bf16) {
+        record_copy_readback(h.cmd, op_max_reduce_bf16.out, h.staging,
+                             op_max_reduce_bf16.off_readback,
+                             TEST_REDUCE_ROWS * sizeof(uint16_t));
+        record_copy_readback(h.cmd, op_sum_reduce_bf16.out, h.staging,
+                             op_sum_reduce_bf16.off_readback,
+                             TEST_REDUCE_ROWS * sizeof(uint16_t));
+        record_copy_readback(h.cmd, op_max_reduce_f16.out, h.staging,
+                             op_max_reduce_f16.off_readback,
+                             TEST_REDUCE_ROWS * sizeof(uint16_t));
+        record_copy_readback(h.cmd, op_sum_reduce_f16.out, h.staging,
+                             op_sum_reduce_f16.off_readback,
+                             TEST_REDUCE_ROWS * sizeof(uint16_t));
+        record_copy_readback(h.cmd, op_softmax_f16.out, h.staging,
+                             op_softmax_f16.off_readback,
+                             TEST_REDUCE_ROWS * TEST_REDUCE_COLS * sizeof(uint16_t));
+        record_copy_readback(h.cmd, op_rms_f16.out, h.staging,
+                             op_rms_f16.off_readback,
+                             TEST_REDUCE_ROWS * TEST_REDUCE_COLS * sizeof(uint16_t));
+        record_copy_readback(h.cmd, op_layernorm_f16.out, h.staging,
+                             op_layernorm_f16.off_readback,
+                             TEST_REDUCE_ROWS * TEST_REDUCE_COLS * sizeof(uint16_t));
+    }
+
+    if (h.supports_bf16) {
+        record_copy_readback(h.cmd, op_max_reduce_bf16.out, h.staging,
+                             op_max_reduce_bf16.off_readback,
+                             TEST_REDUCE_ROWS * sizeof(uint16_t));
+        record_copy_readback(h.cmd, op_sum_reduce_bf16.out, h.staging,
+                             op_sum_reduce_bf16.off_readback,
+                             TEST_REDUCE_ROWS * sizeof(uint16_t));
+        record_copy_readback(h.cmd, op_max_reduce_f16.out, h.staging,
+                             op_max_reduce_f16.off_readback,
+                             TEST_REDUCE_ROWS * sizeof(uint16_t));
+        record_copy_readback(h.cmd, op_sum_reduce_f16.out, h.staging,
+                             op_sum_reduce_f16.off_readback,
+                             TEST_REDUCE_ROWS * sizeof(uint16_t));
     }
 
     r = vkEndCommandBuffer(h.cmd);
@@ -1473,7 +1767,7 @@ int main(void)
     overall_pass &= check_output("rsqrt_f32", h.mapped, op_rsqrt.off_readback,
                                  exp_rsqrt, TEST_NUM_ELEMENTS, TEST_F32_TOLERANCE);
     overall_pass &= check_output("pow_f32", h.mapped, op_pow.off_readback,
-                                 exp_pow, TEST_NUM_ELEMENTS, TEST_F32_TOLERANCE);
+                                  exp_pow, TEST_NUM_ELEMENTS, TEST_F32_TOLERANCE);
 
     if (h.supports_bf16) {
         overall_pass &= check_output_u16("cast_f32_to_bf16", h.mapped,
@@ -1509,6 +1803,32 @@ int main(void)
         overall_pass &= check_output_u16("tanh_bf16", h.mapped,
                                          op_tanh_bf16.off_readback,
                                          exp_bf16_tanh, TEST_NUM_ELEMENTS);
+
+        overall_pass &= check_output_u16("max_reduce_dim_bf16", h.mapped,
+                                         op_max_reduce_bf16.off_readback,
+                                         exp_bf16_max_reduce, TEST_REDUCE_ROWS);
+        overall_pass &= check_output_u16("sum_reduce_dim_bf16", h.mapped,
+                                         op_sum_reduce_bf16.off_readback,
+                                         exp_bf16_sum_reduce, TEST_REDUCE_ROWS);
+        overall_pass &= check_output_u16("max_reduce_dim_f16", h.mapped,
+                                         op_max_reduce_f16.off_readback,
+                                         exp_f16_max_reduce, TEST_REDUCE_ROWS);
+        overall_pass &= check_output_u16("sum_reduce_dim_f16", h.mapped,
+                                         op_sum_reduce_f16.off_readback,
+                                         exp_f16_sum_reduce, TEST_REDUCE_ROWS);
+
+        overall_pass &= check_output_f16("softmax_f16", h.mapped,
+                                         op_softmax_f16.off_readback,
+                                         exp_softmax_f16,
+                                         TEST_REDUCE_ROWS * TEST_REDUCE_COLS, 1e-2f);
+        overall_pass &= check_output_u16("rms_norm_f16", h.mapped,
+                                         op_rms_f16.off_readback,
+                                         exp_rms_f16,
+                                         TEST_REDUCE_ROWS * TEST_REDUCE_COLS);
+        overall_pass &= check_output_u16("layernorm_f16", h.mapped,
+                                         op_layernorm_f16.off_readback,
+                                         exp_layernorm_f16,
+                                         TEST_REDUCE_ROWS * TEST_REDUCE_COLS);
     }
 
 cleanup:
@@ -1577,6 +1897,14 @@ cleanup:
     if (op_sigmoid_bf16.out)   vkDestroyBuffer(h.device, op_sigmoid_bf16.out, NULL);
     if (op_tanh_bf16.in_a)  vkDestroyBuffer(h.device, op_tanh_bf16.in_a, NULL);
     if (op_tanh_bf16.out)   vkDestroyBuffer(h.device, op_tanh_bf16.out, NULL);
+
+    /* f16 normalization buffers */
+    if (op_softmax_f16.in_a)    vkDestroyBuffer(h.device, op_softmax_f16.in_a, NULL);
+    if (op_softmax_f16.out)     vkDestroyBuffer(h.device, op_softmax_f16.out, NULL);
+    if (op_rms_f16.in_a)        vkDestroyBuffer(h.device, op_rms_f16.in_a, NULL);
+    if (op_rms_f16.out)         vkDestroyBuffer(h.device, op_rms_f16.out, NULL);
+    if (op_layernorm_f16.in_a)  vkDestroyBuffer(h.device, op_layernorm_f16.in_a, NULL);
+    if (op_layernorm_f16.out)   vkDestroyBuffer(h.device, op_layernorm_f16.out, NULL);
     if (h.staging)     vkDestroyBuffer(h.device, h.staging, NULL);
     if (h.mapped)      vkUnmapMemory(h.device, h.mem);
     if (h.mem != VK_NULL_HANDLE) vkFreeMemory(h.device, h.mem, NULL);

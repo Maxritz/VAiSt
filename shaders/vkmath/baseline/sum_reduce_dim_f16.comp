@@ -1,0 +1,60 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_ARB_gpu_shader_int64 : require
+
+// Sum reduction along rows (f16 input, f16 output).
+// Input:  [num_rows * num_cols] float16_t (binding 0)
+// Output: [num_rows]             float16_t (binding 2)
+// Each workgroup handles one row; grid-stride loop for cols > 256.
+// Compute runs in f32, output stored as float16_t.
+
+layout(push_constant) uniform PC {
+    uint  num_elements;
+    uint  num_rows;
+    uint  num_cols;
+    float alpha;
+    float beta;
+    uint  _pad0;
+    uint  _pad1;
+    uint  _pad2;
+    uint64_t stride_a;
+    uint64_t stride_b;
+    uint64_t stride_out;
+    uint64_t batch_count;
+    uint64_t _pad3;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly  buffer BufIn  { float16_t data[]; };
+layout(scalar, set = 0, binding = 2)           writeonly   buffer BufOut { float16_t data_out[]; };
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+shared float sdata[256];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+
+    float val = 0.0;
+    uint base = row * pc.num_cols;
+
+    for (uint i = tid; i < pc.num_cols; i += 256u) {
+        float f = float(data[base + i]);
+        val += f;
+    }
+
+    sdata[tid] = val;
+    barrier();
+
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        barrier();
+    }
+
+    if (tid == 0u) {
+        data_out[row] = float16_t(sdata[0]);
+    }
+}

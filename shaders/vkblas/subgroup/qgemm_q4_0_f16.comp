@@ -26,6 +26,7 @@
 // Specialization constants (ids 7/8 are subgroup-tier-reserved)
 layout(constant_id = 7) const uint TILE_M = 32;   /* output rows per workgroup */
 layout(constant_id = 8) const uint TILE_N = 8;    /* output cols per workgroup */
+layout(constant_id = 9) const uint K_BLOCK  = 256; /* k-tiling block size       */
 
 layout(push_constant) uniform PC {
     uint  m;
@@ -70,7 +71,10 @@ void main() {
     for (uint j = 0; j < TILE_N; ++j)
         acc[j] = 0.0f;
 
-    for (uint kk = 0; kk < pc.k; ++kk) {
+    uint k_done = 0u;
+    while (k_done < pc.k) {
+        uint k_end = min(k_done + K_BLOCK, pc.k);
+        for (uint kk = k_done; kk < k_end; ++kk) {
         /* ── x broadcast: lanes 0..TILE_N-1 load, all lanes shuffle-receive ──
            The shuffle sources are lanes 0..7, which are always active (no
            early return before this loop), so the subgroup operations stay in
@@ -107,6 +111,8 @@ void main() {
             acc[j] += w * xk;
         }
     }
+        k_done = k_end;
+    }
 
     /* ── Write (guard tiles that overhang m/n) ───────────────────────────── */
     if (globalRow >= pc.m)
@@ -124,3 +130,4 @@ void main() {
         data_Z[globalRow + col * pc.ldd] = float16_t(result);
     }
 }
+

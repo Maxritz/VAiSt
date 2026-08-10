@@ -225,6 +225,43 @@ if(BUILD_TESTING)
     target_link_libraries(test_vkkv PRIVATE vkkv vkruntime Vulkan::Vulkan)
     add_test(NAME test_vkkv COMMAND test_vkkv)
 
+    # ── VKStream library (async streaming w/ BAR support) ────────────────────
+    add_library(vkstream STATIC src/vkstream/vkstream.c)
+    target_include_directories(vkstream PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkstream
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkstream
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkruntime
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkmodel
+    )
+    target_link_libraries(vkstream PUBLIC vkruntime Vulkan::Vulkan)
+    target_compile_definitions(vkstream PRIVATE VKSTREAM_EXPORTS)
+    target_compile_options(vkstream PRIVATE ${VAIT_WARN_FLAGS})
+
+    add_executable(test_vkstream tests/test_vkstream.c)
+    target_include_directories(test_vkstream PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkstream
+    )
+    target_link_libraries(test_vkstream PRIVATE vkstream vkruntime Vulkan::Vulkan)
+    add_test(NAME test_vkstream COMMAND test_vkstream)
+
+    # HIP-Vulkan bridge test (requires HIP runtime)
+    if(EXISTS "F:/ROCM-7.14.0-Windows/include/hip/hip_runtime.h")
+        add_executable(test_hip_bar tests/test_hip_bar.c)
+        target_include_directories(test_hip_bar PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/include/vkstream
+            F:/ROCM-7.14.0-Windows/include
+        )
+        target_link_libraries(test_hip_bar PRIVATE vkstream vkruntime Vulkan::Vulkan F:/ROCM-7.14.0-Windows/lib/amdhip64.lib)
+        target_compile_options(test_hip_bar PRIVATE -std=c99)
+        add_test(NAME test_hip_bar COMMAND test_hip_bar)
+    endif()
+
+
+
     # ── VKDist library (distributed compute, loopback Phase 0) ─────────────
     # POSIX-only implementation (pthread.h); skipped under MSVC until a
     # Win32-thread port lands.

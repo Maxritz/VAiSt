@@ -25,6 +25,7 @@
 // Specialization constants (ids 7/8 are subgroup-tier-reserved)
 layout(constant_id = 7) const uint TILE_M = 32;   /* output rows per workgroup */
 layout(constant_id = 8) const uint TILE_N = 8;    /* output cols per workgroup */
+layout(constant_id = 9) const uint K_BLOCK = 256; /* k-tiling block size       */
 
 layout(push_constant) uniform PC {
     uint  m;
@@ -69,38 +70,40 @@ void main() {
     for (uint j = 0; j < TILE_N; ++j)
         acc[j] = 0.0f;
 
-    for (uint kk = 0; kk < pc.k; ++kk) {
-        /* ── x broadcast: lanes 0..TILE_N-1 load, all lanes shuffle-receive ──
-           The shuffle sources are lanes 0..7, which are always active (no
-           early return before this loop), so the subgroup operations stay in
-           uniform control flow. */
-        float xv = 0.0f;
-        if (lane < TILE_N) {
-            uint col = baseCol + lane;
-            if (col < pc.n)
-                xv = data_X[kk + col * pc.ldb];
-        }
+    // k-tiled accumulation for large K (precision + occupancy)
+    uint k_done = 0u;
+    while (k_done < pc.k) {
+        uint k_end = min(k_done + K_BLOCK, pc.k);
+        for (uint kk = k_done; kk < k_end; ++kk) {
+            /* x broadcast: lanes 0..TILE_N-1 load, all lanes shuffle-receive */
+            float xv = 0.0f;
+            if (lane < TILE_N) {
+                uint col = baseCol + lane;
+                if (col < pc.n)
+                    xv = data_X[kk + col * pc.ldb];
+            }
 
-        /* ── Dequantize this lane's W row element (Q8_0: d * qs) ────────────
-           Only in-bounds rows read W; OOB lanes keep w = 0 and never write. */
-        float w = 0.0f;
-        if (globalRow < pc.m) {
-            uint blk  = kk >> 5u;
-            uint e    = kk & 31u;
-            uint base = globalRow * pc.lda + blk * 36u;
-            uint d_bits = uint(data_W[base]) |
-                          (uint(data_W[base + 1u]) << 8u) |
-                          (uint(data_W[base + 2u]) << 16u) |
-                          (uint(data_W[base + 3u]) << 24u);
-            float d = uintBitsToFloat(d_bits);
-            int8_t q = int8_t(data_W[base + 4u + e]);
-            w = d * float(q);
-        }
+            /* Dequantize this lane's W row element (Q8_0: d * qs) */
+            float w = 0.0f;
+            if (globalRow < pc.m) {
+                uint blk  = kk >> 5u;
+                uint e    = kk & 31u;
+                uint base = globalRow * pc.lda + blk * 36u;
+                uint d_bits = uint(data_W[base]) |
+                              (uint(data_W[base + 1u]) << 8u) |
+                              (uint(data_W[base + 2u]) << 16u) |
+                              (uint(data_W[base + 3u]) << 24u);
+                float d = uintBitsToFloat(d_bits);
+                int8_t q = int8_t(data_W[base + 4u + e]);
+                w = d * float(q);
+            }
 
-        for (uint j = 0; j < TILE_N; ++j) {
-            float xk = subgroupShuffle(xv, j);
-            acc[j] += w * xk;
+            for (uint j = 0; j < TILE_N; ++j) {
+                float xk = subgroupShuffle(xv, j);
+                acc[j] += w * xk;
+            }
         }
+        k_done = k_end;
     }
 
     /* ── Write (guard tiles that overhang m/n) ───────────────────────────── */

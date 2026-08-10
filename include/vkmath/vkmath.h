@@ -304,7 +304,7 @@ VkResult vkmath_scale_bf16(VkMathContext* ctx,
                            VkBuffer output);
 
 /* ===========================================================================
- * Reductions (f32)
+ * Reductions (f32 / f16 / bf16)
  * ========================================================================== */
 
 /**
@@ -313,6 +313,29 @@ VkResult vkmath_scale_bf16(VkMathContext* ctx,
  *        is [num_rows].
  */
 VkResult vkmath_max_reduce_dim_f32(VkMathContext* ctx,
+                                   VkCommandBuffer cmd,
+                                   uint32_t num_rows,
+                                   uint32_t num_cols,
+                                   VkBuffer input,
+                                   VkBuffer output);
+
+/**
+ * \brief Max reduction (bf16): same semantics as \ref vkmath_max_reduce_dim_f32.
+ * Input/output are uint16_t bf16 (storageBuffer16BitAccess + scalarBlockLayout).
+ * Compute runs in f32 for exact comparison; result truncates to bf16.
+ */
+VkResult vkmath_max_reduce_dim_bf16(VkMathContext* ctx,
+                                    VkCommandBuffer cmd,
+                                    uint32_t num_rows,
+                                    uint32_t num_cols,
+                                    VkBuffer input,
+                                    VkBuffer output);
+
+/**
+ * \brief Max reduction (f16): same semantics as \ref vkmath_max_reduce_dim_f32.
+ * Input/output are float16_t (shaderFloat16 + storageBuffer16BitAccess).
+ */
+VkResult vkmath_max_reduce_dim_f16(VkMathContext* ctx,
                                    VkCommandBuffer cmd,
                                    uint32_t num_rows,
                                    uint32_t num_cols,
@@ -330,10 +353,32 @@ VkResult vkmath_sum_reduce_dim_f32(VkMathContext *ctx,
                                    VkBuffer input,
                                    VkBuffer output);
 
+/**
+ * \brief Sum reduction (bf16): same semantics as \ref vkmath_sum_reduce_dim_f32.
+ * Input/output are uint16_t bf16 (storageBuffer16BitAccess + scalarBlockLayout).
+ * Compute runs in f32; result truncates to bf16.
+ */
+VkResult vkmath_sum_reduce_dim_bf16(VkMathContext* ctx,
+                                    VkCommandBuffer cmd,
+                                    uint32_t num_rows,
+                                    uint32_t num_cols,
+                                    VkBuffer input,
+                                    VkBuffer output);
+
+/**
+ * \brief Sum reduction (f16): same semantics as \ref vkmath_sum_reduce_dim_f32.
+ * Input/output are float16_t (shaderFloat16 + storageBuffer16BitAccess).
+ */
+VkResult vkmath_sum_reduce_dim_f16(VkMathContext* ctx,
+                                   VkCommandBuffer cmd,
+                                   uint32_t num_rows,
+                                   uint32_t num_cols,
+                                   VkBuffer input,
+                                   VkBuffer output);
+
 /* ===========================================================================
  * Reductions / normalizations (f32)
  * Input is [num_rows x num_cols], row-major. Output shape noted per op.
- * f16 variants are not yet provided for these ops.
  * ========================================================================== */
 
 /**
@@ -374,6 +419,45 @@ VkResult vkmath_rms_norm_f32(VkMathContext *ctx,
  * \param eps Epsilon added inside the square root.
  */
 VkResult vkmath_layernorm_f32(VkMathContext *ctx,
+                              VkCommandBuffer cmd,
+                              uint32_t num_rows,
+                              uint32_t num_cols,
+                              float eps,
+                              VkBuffer input,
+                              VkBuffer output);
+
+/* ===========================================================================
+ * Reductions / normalizations (f16)
+ * Input is [num_rows x num_cols] float16_t, output is [num_rows x num_cols]
+ * float16_t. Compute runs in f32 internally. Requires shaderFloat16 +
+ * storageBuffer16BitAccess + scalarBlockLayout.
+ * ========================================================================== */
+
+/**
+ * \brief Softmax over each row (f16): same semantics as \ref vkmath_softmax_f32.
+ */
+VkResult vkmath_softmax_f16(VkMathContext *ctx,
+                            VkCommandBuffer cmd,
+                            uint32_t num_rows,
+                            uint32_t num_cols,
+                            VkBuffer input,
+                            VkBuffer output);
+
+/**
+ * \brief RMS normalization (f16): same semantics as \ref vkmath_rms_norm_f32.
+ */
+VkResult vkmath_rms_norm_f16(VkMathContext *ctx,
+                             VkCommandBuffer cmd,
+                             uint32_t num_rows,
+                             uint32_t num_cols,
+                             float eps,
+                             VkBuffer input,
+                             VkBuffer output);
+
+/**
+ * \brief Layer normalization (f16): same semantics as \ref vkmath_layernorm_f32.
+ */
+VkResult vkmath_layernorm_f16(VkMathContext *ctx,
                               VkCommandBuffer cmd,
                               uint32_t num_rows,
                               uint32_t num_cols,
