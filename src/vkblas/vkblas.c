@@ -139,6 +139,15 @@ static const uint32_t* vkblas_select_spirv(VkBLASContext* ctx,
         case VKBLAS_DTYPE_F32:
             *out_size = vkblas_spv_coopmatrix_gemm_f32_size;
             return vkblas_spv_coopmatrix_gemm_f32;
+        case VKBLAS_DTYPE_F16:
+            *out_size = vkblas_spv_coopmatrix_gemm_f16_size;
+            return vkblas_spv_coopmatrix_gemm_f16;
+        case VKBLAS_DTYPE_BF16:
+            *out_size = vkblas_spv_coopmatrix_gemm_bf16_size;
+            return vkblas_spv_coopmatrix_gemm_bf16;
+        case VKBLAS_DTYPE_F64:
+            *out_size = vkblas_spv_coopmatrix_gemm_f64_size;
+            return vkblas_spv_coopmatrix_gemm_f64;
         default:
             return NULL;
         }
@@ -507,7 +516,8 @@ void vkblas_push_pc(VkCommandBuffer cmd, VkPipelineLayout layout,
 
 /* ── Context lifecycle ────────────────────────────────────────────────────── */
 
-VkResult vkblas_create_context(VkPhysicalDevice physicalDevice,
+VkResult vkblas_create_context(VkInstance instance,
+                               VkPhysicalDevice physicalDevice,
                                VkDevice device,
                                VkBLASContext** pContext)
 {
@@ -517,6 +527,7 @@ VkResult vkblas_create_context(VkPhysicalDevice physicalDevice,
     if (!ctx) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
     memset(ctx, 0, sizeof(*ctx));
+    ctx->instance = instance;
     ctx->device = device;
 
     /* Pipeline cache via VKRuntime helper */
@@ -564,7 +575,42 @@ VkResult vkblas_create_context(VkPhysicalDevice physicalDevice,
            (0xE06D7363) inside vkCreateComputePipelines for modules containing
            coopMatMulAddKHR. Enabled only when VAIT_COOPMATRIX is set. */
         ctx->use_coopmat = (getenv("VAIT_COOPMATRIX") != NULL) &&
-                           (ctx->has_coop_matrix == VK_TRUE);
+                            (ctx->has_coop_matrix == VK_TRUE);
+
+        /* Ground-truth: enumerate the cooperative-matrix shapes this device
+           actually advertises, so the f16/bf16/f64 coopmatrix tiers are
+           matched to reported (MSize,NSize,KSize,AType,BType,CType,ResultType).
+           Printed only while diagnosing under VAIT_COOPMATRIX. */
+        /* Ground-truth: enumerate the cooperative-matrix shapes this device
+           actually advertises, so the f16/bf16/f64 coopmatrix tiers are
+           matched to reported (MSize,NSize,KSize,AType,BType,CType,ResultType).
+           Printed only while diagnosing under VAIT_COOPMATRIX. */
+        if (ctx->use_coopmat) {
+            PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR gpm =
+                (PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR)
+                vkGetInstanceProcAddr(instance,
+                     "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR");
+            uint32_t n = 0;
+            if (gpm && gpm(physicalDevice, &n, NULL) == VK_SUCCESS && n > 0) {
+                VkCooperativeMatrixPropertiesKHR *cmprops =
+                    (VkCooperativeMatrixPropertiesKHR *)calloc(n, sizeof(*cmprops));
+                if (cmprops) {
+                    for (uint32_t i = 0; i < n; i++)
+                        cmprops[i].sType =
+                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+                    if (gpm(physicalDevice, &n, cmprops) == VK_SUCCESS) {
+                        for (uint32_t i = 0; i < n; i++)
+                            printf("vkblas: coopmatrix[%u] %ux%ux%u A=%u B=%u C=%u R=%u scope=%u\n",
+                                   i, cmprops[i].MSize, cmprops[i].NSize, cmprops[i].KSize,
+                                   (unsigned)cmprops[i].AType, (unsigned)cmprops[i].BType,
+                                   (unsigned)cmprops[i].CType, (unsigned)cmprops[i].ResultType,
+                                   (unsigned)cmprops[i].scope);
+                    }
+                    free(cmprops);
+                }
+            }
+        }
+
         if (ctx->use_coopmat && ctx->has_subgroup) {
             ctx->active_tier = VKBLAS_TIER_COOPMATRIX;
         } else if (ctx->has_subgroup) {

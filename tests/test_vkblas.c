@@ -1462,7 +1462,7 @@ int main(void)
     }
 
     /* ── 8. Context ─────────────────────────────────────────────────────── */
-    r = vkblas_create_context(h.physical_device, h.device, &h.blas_ctx);
+    r = vkblas_create_context(h.instance, h.physical_device, h.device, &h.blas_ctx);
     if (r != VK_SUCCESS) {
         fprintf(stderr, "test_vkblas: vkblas_create_context failed (%d)\n", (int)r);
         goto cleanup;

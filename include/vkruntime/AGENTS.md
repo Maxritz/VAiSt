@@ -25,6 +25,7 @@ typedef struct VkRuntimeCaps {        /* capability set, see vkruntime.h */
 } VkRuntimeCaps;
 
 VkResult vkr_detect_capabilities(VkPhysicalDevice, VkDevice, VkRuntimeCaps*);
+VkResult vkr_create_device(VkPhysicalDevice, uint32_t queue_family, VkDevice*);
 VkResult vkr_create_runtime(VkPhysicalDevice, VkDevice, VkQueue, VkRuntime**);
 void     vkr_destroy_runtime(VkRuntime*);
 uint32_t    vkr_get_arch_index(VkRuntime*);

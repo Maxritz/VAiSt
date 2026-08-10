@@ -264,6 +264,25 @@ build (MSVC Release + GCC/Strawberry `build/`) + run on RX 9070 XT ->
 shape fixed to [2,3,4] = 24 f32 elems = 96 B to match the .bin region).
 Remaining VKModel scope: no JIT IR conversion, no bf16 elementwise compute
 (VKMath).
+**vkr_create_device deliverable complete**: truth table (enable-only-what-the
+device-reports, pNext chain Vulkan 1.1-1.4 + VK_KHR_cooperative_matrix gated on
+`VAIT_COOPMATRIX`) -> `vkr_create_device()` in `src/vkruntime/vkruntime.c`
+queries the full feature/geometry property chain, mirrors `vkr_query_features`
+semantics for the enable set, restricts int64 atomics to Vulkan12Features,
+uses `shaderBufferFloat32Atomics`/`shaderBFloat16Type` correct member names,
+and only requests the `VK_AMD_*`/`VK_KHR_*`/`VK_EXT_*` extension names the PD
+advertises -> public header `include/vkruntime/vkruntime.h` (already declares it
+-> `include/vkruntime/AGENTS.md` API block updated) -> `tests/test_vkruntime.c`
+section 12 (create succeeds, queue valid, detect agrees, float16/16-bit
+storage/push-descriptor/subgroup all enabled, invalid queue family rejected) ->
+build (GCC/Strawberry + MSVC) + `run_all.ps1` on RX 9070 XT -> **ALL PASS**
+(10/10 harnesses green). Remaining VKRuntime scope: no shader reflection (no
+`shaders/` subtree); cooperative matrix stays behind `VAIT_COOPMATRIX`.
+
+Note on vendor naming: this stack uses the Vulkan `VK_AMD_*` vendor-extension
+nomenclature for AMD GPU features (e.g. `VK_AMD_SHADER_CORE_PROPERTIES(2)`,
+`VkPhysicalDeviceShaderCoreProperties2AMD`), matching current Vulkan vendor
+extension naming style — no `VK_MaxR` style is used.
 
 ## Child DOX Index
 

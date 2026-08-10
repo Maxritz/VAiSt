@@ -408,6 +408,48 @@ int main(void)
         if (set_layout) vkDestroyDescriptorSetLayout(device, set_layout, NULL);
     }
 
+    /* ── 12. (g) vkr_create_device (canonical full-feature device) ──────── */
+    printf("  --- vkr_create_device ---\n");
+    {
+        VkDevice dev2 = VK_NULL_HANDLE;
+        VkQueue q2 = VK_NULL_HANDLE;
+
+        r = vkr_create_device(physical_device, 0, &dev2);
+        overall_pass &= report(r == VK_SUCCESS, "create succeeds");
+        if (r != VK_SUCCESS) goto cleanup;
+
+        vkGetDeviceQueue(dev2, 0, 0, &q2);
+        overall_pass &= report(q2 != VK_NULL_HANDLE, "queue available");
+
+        /* capability detection must agree on the full-feature device */
+        VkRuntimeCaps caps2;
+        memset(&caps2, 0, sizeof(caps2));
+        r = vkr_detect_capabilities(physical_device, dev2, &caps2);
+        overall_pass &= report(r == VK_SUCCESS, "detect on full-feature device");
+
+        overall_pass &= report(caps2.has_push_descriptor,
+                               "push descriptors enabled");
+        overall_pass &= report(caps2.has_shader_float16,
+                               "shaderFloat16 enabled");
+        overall_pass &= report(caps2.has_storage_buffer16,
+                               "storageBuffer16 enabled");
+        overall_pass &= report(caps2.has_subgroup,
+                               "compute-stage subgroup enabled");
+        if (caps2.has_subgroup)
+            overall_pass &= report(caps2.subgroup_size == caps2.wavefront_size ||
+                                   caps2.wavefront_size == 0,
+                                   "subgroup/wavefront consistent");
+
+        /* invalid queue family must fail cleanly */
+        VkDevice bad = VK_NULL_HANDLE;
+        r = vkr_create_device(physical_device, 0xFFFFFFu, &bad);
+        overall_pass &= report(r != VK_SUCCESS && bad == VK_NULL_HANDLE,
+                               "invalid queue family rejected");
+        if (bad != VK_NULL_HANDLE) vkDestroyDevice(bad, NULL);
+
+        vkDestroyDevice(dev2, NULL);
+    }
+
 cleanup:
     if (bufs) {
         for (uint32_t i = 0; i < TEST_ALLOC_COUNT; i++) {

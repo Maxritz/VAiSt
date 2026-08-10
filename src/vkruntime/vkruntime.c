@@ -49,15 +49,211 @@ static uint32_t pool_index_for_usage(VkBufferUsageFlags usage)
  * Capability detection
  * ========================================================================== */
 
+static VkBool32 vkr_device_extension_supported(VkPhysicalDevice pd,
+                                               const char *name)
+{
+    uint32_t count = 0;
+    if (vkEnumerateDeviceExtensionProperties(pd, NULL, &count, NULL) != VK_SUCCESS)
+        return VK_FALSE;
+    if (count == 0) return VK_FALSE;
+
+    VkExtensionProperties *props =
+        (VkExtensionProperties *)malloc(count * sizeof(*props));
+    if (!props) return VK_FALSE;
+
+    VkResult r = vkEnumerateDeviceExtensionProperties(pd, NULL, &count, props);
+    VkBool32 found = VK_FALSE;
+    if (r == VK_SUCCESS) {
+        for (uint32_t i = 0; i < count; i++) {
+            if (strcmp(props[i].extensionName, name) == 0) { found = VK_TRUE; break; }
+        }
+    }
+    free(props);
+    return found;
+}
+
 /**
- * \brief Detect shaderInt64, subgroup, cooperative matrix, push descriptors.
+ * \brief Query the full stack feature set through one VkPhysicalDeviceFeatures2
+ *        pNext chain (Vulkan 1.1-1.4 + cooperative matrix + pipeline binary).
  *
- * Mirrors the capability detection every higher library (vkmath/vkblas/vkquant/
- * vkrand/vkfft) used to duplicate inline: feature detection through a
- * VkPhysicalDeviceCooperativeMatrixFeaturesKHR pNext on
- * VkPhysicalDeviceFeatures2, subgroup info through a
- * VkPhysicalDeviceSubgroupProperties pNext on VkPhysicalDeviceProperties2,
- * and a vkGetDeviceProcAddr lookup for vkCmdPushDescriptorSetKHR.
+ * \param pd   Physical device to query.
+ * \param caps Receives the feature flags.
+ */
+static void vkr_query_features(VkPhysicalDevice pd, VkRuntimeCaps *caps)
+{
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR coop;
+    VkPhysicalDeviceVulkan11Features vk11;
+    VkPhysicalDeviceVulkan12Features vk12;
+    VkPhysicalDeviceVulkan13Features vk13;
+    VkPhysicalDeviceVulkan14Features vk14;
+    VkPhysicalDeviceShaderFloat16Int8Features f16i8;
+    VkPhysicalDeviceShaderIntegerDotProductFeatures dot;
+    VkPhysicalDevicePipelineBinaryFeaturesKHR pbin;
+    VkPhysicalDeviceShaderAtomicFloatFeaturesEXT af;
+    VkPhysicalDeviceShaderBfloat16FeaturesKHR bf16;
+
+    memset(&coop, 0, sizeof(coop));
+    coop.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+    memset(&vk11, 0, sizeof(vk11));
+    vk11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    memset(&vk12, 0, sizeof(vk12));
+    vk12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    memset(&vk13, 0, sizeof(vk13));
+    vk13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    memset(&vk14, 0, sizeof(vk14));
+    vk14.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES;
+    memset(&f16i8, 0, sizeof(f16i8));
+    f16i8.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
+    memset(&dot, 0, sizeof(dot));
+    dot.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES;
+    memset(&pbin, 0, sizeof(pbin));
+    pbin.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_BINARY_FEATURES_KHR;
+    memset(&af, 0, sizeof(af));
+    af.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
+    memset(&bf16, 0, sizeof(bf16));
+    bf16.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_BFLOAT16_FEATURES_KHR;
+
+    VkPhysicalDeviceFeatures2 f2;
+    memset(&f2, 0, sizeof(f2));
+    f2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    f2.pNext = &vk11;
+    vk11.pNext = &vk12;
+    vk12.pNext = &vk13;
+    vk13.pNext = &vk14;
+    vk14.pNext = &f16i8;
+    f16i8.pNext = &dot;
+    dot.pNext = &pbin;
+    pbin.pNext = &af;
+    af.pNext = &bf16;
+    bf16.pNext = &coop;
+    vkGetPhysicalDeviceFeatures2(pd, &f2);
+
+    caps->has_shader_int64   = f2.features.shaderInt64;
+    caps->has_shader_float64 = f2.features.shaderFloat64;
+    caps->has_shader_int16   = f2.features.shaderInt16;
+
+    caps->has_storage_buffer16 = vk11.storageBuffer16BitAccess;
+    caps->has_storage_buffer8  = vk12.storageBuffer8BitAccess;
+
+    caps->has_shader_float16  = vk12.shaderFloat16;
+    caps->has_shader_int8     = vk12.shaderInt8;
+    caps->has_scalar_block_layout   = vk12.scalarBlockLayout;
+    caps->has_buffer_device_address = vk12.bufferDeviceAddress;
+    caps->has_subgroup_extended_types = vk12.shaderSubgroupExtendedTypes;
+    caps->has_timeline_semaphore  = vk12.timelineSemaphore;
+    caps->has_vulkan_memory_model = vk12.vulkanMemoryModel;
+
+    caps->has_subgroup                = vk13.subgroupSizeControl ? VK_TRUE : VK_FALSE;
+    caps->has_subgroup_size_control   = vk13.subgroupSizeControl;
+    caps->has_sync2                   = vk13.synchronization2;
+    caps->has_pipeline_creation_cache_control = vk13.pipelineCreationCacheControl;
+    caps->has_maintenance4            = vk13.maintenance4;
+    caps->has_shader_integer_dot_product = vk13.shaderIntegerDotProduct;
+
+    caps->has_shader_expect_assume = vk14.shaderExpectAssume;
+
+    caps->has_coop_matrix = coop.cooperativeMatrix;
+    caps->has_pipeline_binary = pbin.pipelineBinaries;
+    caps->has_atomic_float =
+        (af.shaderBufferFloat32Atomics && af.shaderBufferFloat32AtomicAdd) ? VK_TRUE : VK_FALSE;
+    caps->has_shader_bfloat16 = bf16.shaderBFloat16Type;
+}
+
+/**
+ * \brief Query subgroup / wave geometry through one VkPhysicalDeviceProperties2
+ *        pNext chain (subgroup, subgroup-size control, AMD shader core 1+2,
+ *        push-descriptor properties).
+ *
+ * \param pd   Physical device to query.
+ * \param caps Receives the geometry fields.
+ */
+static void vkr_query_properties(VkPhysicalDevice pd, VkRuntimeCaps *caps)
+{
+    VkPhysicalDeviceSubgroupProperties subgroup;
+    VkPhysicalDeviceSubgroupSizeControlProperties ssc;
+    VkPhysicalDeviceShaderCorePropertiesAMD amd1;
+    VkPhysicalDeviceShaderCoreProperties2AMD amd2;
+    VkPhysicalDevicePushDescriptorPropertiesKHR pdprops;
+
+    memset(&subgroup, 0, sizeof(subgroup));
+    subgroup.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+    memset(&ssc, 0, sizeof(ssc));
+    ssc.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES;
+    memset(&amd1, 0, sizeof(amd1));
+    amd1.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CORE_PROPERTIES_AMD;
+    memset(&amd2, 0, sizeof(amd2));
+    amd2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CORE_PROPERTIES_2_AMD;
+    memset(&pdprops, 0, sizeof(pdprops));
+    pdprops.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR;
+
+    VkPhysicalDeviceProperties2 p2;
+    memset(&p2, 0, sizeof(p2));
+    p2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    p2.pNext = &subgroup;
+    subgroup.pNext = &ssc;
+    ssc.pNext = &amd1;
+    amd1.pNext = &amd2;
+    amd2.pNext = &pdprops;
+    vkGetPhysicalDeviceProperties2(pd, &p2);
+
+    caps->subgroup_size = subgroup.subgroupSize;
+    caps->has_subgroup = (subgroup.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT)
+                         ? VK_TRUE : VK_FALSE;
+    caps->min_subgroup_size = ssc.minSubgroupSize;
+    caps->max_subgroup_size = ssc.maxSubgroupSize;
+    caps->required_subgroup_size = 0u; /* stage mask exposed, value is not */
+    caps->wavefront_size = amd1.wavefrontSize;
+    caps->active_compute_units = amd2.activeComputeUnitCount;
+    caps->max_push_descriptors = pdprops.maxPushDescriptors;
+
+    caps->max_workgroup_size[0] = p2.properties.limits.maxComputeWorkGroupSize[0];
+    caps->max_workgroup_size[1] = p2.properties.limits.maxComputeWorkGroupSize[1];
+    caps->max_workgroup_size[2] = p2.properties.limits.maxComputeWorkGroupSize[2];
+}
+
+/**
+ * \brief Detect the ReBAR / SAM zero-copy memory type, if any.
+ *
+ * A zero-copy type is DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT on the
+ * device-local heap (CPU-writable VRAM through the PCIe BAR). Found on the
+ * RX 9070 XT (RDNA4, ReBAR) as memory type 2 / heap 1. Absent on non-ReBAR
+ * discrete GPUs; the caller then falls back to staged uploads.
+ *
+ * \param pd   Physical device to query.
+ * \param caps Receives has_zero_copy_memory / zero_copy_memory_type.
+ */
+static void vkr_query_zero_copy(VkPhysicalDevice pd, VkRuntimeCaps *caps)
+{
+    caps->zero_copy_memory_type = VK_MAX_MEMORY_TYPES;
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(pd, &mp);
+    for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
+        const VkMemoryType *t = &mp.memoryTypes[i];
+        const VkMemoryHeap *h = &mp.memoryHeaps[t->heapIndex];
+        if ((t->propertyFlags & (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                 VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+            (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+            (void)h; /* full-heap BAR visibility is a driver guarantee on ReBAR */
+            caps->zero_copy_memory_type = i;
+            caps->has_zero_copy_memory = VK_TRUE;
+            return;
+        }
+    }
+    caps->has_zero_copy_memory = VK_FALSE;
+}
+
+/**
+ * \brief Detect the full stack capability set for a physical/logical device pair.
+ *
+ * Single implementation of the capability detection every higher library used
+ * to duplicate at context creation. Queries the full Vulkan 1.1-1.4 feature
+ * chain, subgroup / wave geometry, AMD shader-core properties, push-descriptor
+ * limits, the named-extension availability (pipeline binary, atomic float,
+ * shader bfloat16), and the ReBAR zero-copy memory type. Fills push_desc_fn
+ * from the logical device.
  *
  * \param pd     Physical device to query.
  * \param device Logical device (used for the push-descriptor fn lookup).
@@ -71,39 +267,22 @@ VkResult vkr_detect_capabilities(VkPhysicalDevice pd, VkDevice device,
     if (!pd || !device || !caps) return VK_ERROR_INITIALIZATION_FAILED;
     memset(caps, 0, sizeof(*caps));
 
-    /* shaderInt64 + cooperative matrix features (pNext chain) */
-    VkPhysicalDeviceCooperativeMatrixFeaturesKHR coop_features;
-    memset(&coop_features, 0, sizeof(coop_features));
-    coop_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+    vkr_query_features(pd, caps);
+    vkr_query_properties(pd, caps);
+    vkr_query_zero_copy(pd, caps);
 
-    VkPhysicalDeviceFeatures2 features2;
-    memset(&features2, 0, sizeof(features2));
-    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    features2.pNext = &coop_features;
-    vkGetPhysicalDeviceFeatures2(pd, &features2);
+    /* Named-extension availability (device-level, independent of creation) */
+    caps->has_pipeline_binary =
+        caps->has_pipeline_binary &&
+        vkr_device_extension_supported(pd, VK_KHR_PIPELINE_BINARY_EXTENSION_NAME);
+    caps->has_atomic_float =
+        caps->has_atomic_float &&
+        vkr_device_extension_supported(pd, VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME);
+    caps->has_shader_bfloat16 =
+        caps->has_shader_bfloat16 &&
+        vkr_device_extension_supported(pd, VK_KHR_SHADER_BFLOAT16_EXTENSION_NAME);
 
-    caps->has_shader_int64 = features2.features.shaderInt64 ? VK_TRUE : VK_FALSE;
-    caps->has_coop_matrix  = coop_features.cooperativeMatrix ? VK_TRUE : VK_FALSE;
-
-    /* subgroup properties via pNext chain */
-    VkPhysicalDeviceSubgroupProperties subgroup_props;
-    memset(&subgroup_props, 0, sizeof(subgroup_props));
-    subgroup_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
-
-    VkPhysicalDeviceProperties2 props2;
-    memset(&props2, 0, sizeof(props2));
-    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-    props2.pNext = &subgroup_props;
-    vkGetPhysicalDeviceProperties2(pd, &props2);
-
-    caps->subgroup_size = subgroup_props.subgroupSize;
-    caps->max_workgroup_size[0] = props2.properties.limits.maxComputeWorkGroupSize[0];
-    caps->max_workgroup_size[1] = props2.properties.limits.maxComputeWorkGroupSize[1];
-    caps->max_workgroup_size[2] = props2.properties.limits.maxComputeWorkGroupSize[2];
-
-    /* Subgroup is a core Vulkan 1.3+ feature; supportedStages gates compute */
-    caps->has_subgroup = (subgroup_props.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT)
-                         ? VK_TRUE : VK_FALSE;
+    /* Subgroup support from the subgroup properties (compute-stage gate above) */
 
     /* Highest supported shader tier (mirrors vkmath tier selection) */
     if (caps->has_coop_matrix) {
@@ -539,6 +718,218 @@ static VkResult vkr_copy_and_sync(VkRuntime *rt, VkCommandBuffer cmd,
 /* ===========================================================================
  * Public API: runtime lifecycle
  * ========================================================================== */
+
+/**
+ * \brief Create a logical device with the stack's canonical full feature set.
+ *
+ * Enables exactly what the physical device supports, across the full
+ * Vulkan 1.1-1.4 compute feature chain plus the named EXPLOIT extensions
+ * (push descriptor, AMD shader core properties, pipeline binary, atomic float,
+ * shader bfloat16) and VAIT_COOPMATRIX-gated cooperative matrix.
+ *
+ * \param pd           Physical device to create from.
+ * \param queue_family Queue family index for the created queue.
+ * \param out_device   Receives the VkDevice handle.
+ * \retval VK_SUCCESS
+ * \retval VK_ERROR_INITIALIZATION_FAILED Invalid argument or queue family invalid.
+ */
+VkResult vkr_create_device(VkPhysicalDevice pd, uint32_t queue_family,
+                           VkDevice *out_device)
+{
+    if (!pd || !out_device) return VK_ERROR_INITIALIZATION_FAILED;
+
+    /* Validate the queue family exists and is usable */
+    uint32_t qf_count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(pd, &qf_count, NULL);
+    if (qf_count == 0) return VK_ERROR_INITIALIZATION_FAILED;
+    VkQueueFamilyProperties *qf =
+        (VkQueueFamilyProperties *)malloc(qf_count * sizeof(*qf));
+    if (!qf) return VK_ERROR_OUT_OF_HOST_MEMORY;
+    vkGetPhysicalDeviceQueueFamilyProperties(pd, &qf_count, qf);
+    if (queue_family >= qf_count || qf[queue_family].queueCount == 0) {
+        free(qf);
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    float priority = 1.0f;
+
+    VkDeviceQueueCreateInfo qci;
+    memset(&qci, 0, sizeof(qci));
+    qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    qci.queueFamilyIndex = queue_family;
+    qci.queueCount = 1;
+    qci.pQueuePriorities = &priority;
+
+    /* ---- supported-feature mirror (enable only what exists) ---- */
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR coop;
+    VkPhysicalDeviceVulkan11Features vk11;
+    VkPhysicalDeviceVulkan12Features vk12;
+    VkPhysicalDeviceVulkan13Features vk13;
+    VkPhysicalDeviceVulkan14Features vk14;
+    VkPhysicalDeviceShaderFloat16Int8Features f16i8;
+    VkPhysicalDeviceShaderIntegerDotProductFeatures dot;
+    VkPhysicalDevicePipelineBinaryFeaturesKHR pbin;
+    VkPhysicalDeviceShaderAtomicFloatFeaturesEXT af;
+    VkPhysicalDeviceShaderBfloat16FeaturesKHR bf16;
+
+    memset(&coop, 0, sizeof(coop));
+    coop.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+    memset(&vk11, 0, sizeof(vk11));
+    vk11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    memset(&vk12, 0, sizeof(vk12));
+    vk12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    memset(&vk13, 0, sizeof(vk13));
+    vk13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    memset(&vk14, 0, sizeof(vk14));
+    vk14.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES;
+    memset(&f16i8, 0, sizeof(f16i8));
+    f16i8.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
+    memset(&dot, 0, sizeof(dot));
+    dot.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES;
+    memset(&pbin, 0, sizeof(pbin));
+    pbin.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_BINARY_FEATURES_KHR;
+    memset(&af, 0, sizeof(af));
+    af.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
+    memset(&bf16, 0, sizeof(bf16));
+    bf16.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_BFLOAT16_FEATURES_KHR;
+
+    VkPhysicalDeviceFeatures2 supported;
+    memset(&supported, 0, sizeof(supported));
+    supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    supported.pNext = &vk11;
+    vk11.pNext = &vk12;
+    vk12.pNext = &vk13;
+    vk13.pNext = &vk14;
+    vk14.pNext = &f16i8;
+    f16i8.pNext = &dot;
+    dot.pNext = &pbin;
+    pbin.pNext = &af;
+    af.pNext = &bf16;
+    bf16.pNext = &coop;
+    vkGetPhysicalDeviceFeatures2(pd, &supported);
+
+    /* ---- build the enable chain ---- */
+    VkBool32 coop_gated = (getenv("VAIT_COOPMATRIX") != NULL) && coop.cooperativeMatrix;
+
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR coop_en;
+    VkPhysicalDeviceVulkan11Features vk11_en;
+    VkPhysicalDeviceVulkan12Features vk12_en;
+    VkPhysicalDeviceVulkan13Features vk13_en;
+    VkPhysicalDeviceVulkan14Features vk14_en;
+    VkPhysicalDeviceShaderFloat16Int8Features f16i8_en;
+    VkPhysicalDeviceShaderIntegerDotProductFeatures dot_en;
+    VkPhysicalDevicePipelineBinaryFeaturesKHR pbin_en;
+    VkPhysicalDeviceShaderAtomicFloatFeaturesEXT af_en;
+    VkPhysicalDeviceShaderBfloat16FeaturesKHR bf16_en;
+
+    memset(&coop_en, 0, sizeof(coop_en));
+    coop_en.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+    memset(&vk11_en, 0, sizeof(vk11_en));
+    vk11_en.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    memset(&vk12_en, 0, sizeof(vk12_en));
+    vk12_en.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    memset(&vk13_en, 0, sizeof(vk13_en));
+    vk13_en.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    memset(&vk14_en, 0, sizeof(vk14_en));
+    vk14_en.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES;
+    memset(&f16i8_en, 0, sizeof(f16i8_en));
+    f16i8_en.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
+    memset(&dot_en, 0, sizeof(dot_en));
+    dot_en.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES;
+    memset(&pbin_en, 0, sizeof(pbin_en));
+    pbin_en.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_BINARY_FEATURES_KHR;
+    memset(&af_en, 0, sizeof(af_en));
+    af_en.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
+    memset(&bf16_en, 0, sizeof(bf16_en));
+    bf16_en.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_BFLOAT16_FEATURES_KHR;
+
+    VkPhysicalDeviceFeatures2 f2_en;
+    memset(&f2_en, 0, sizeof(f2_en));
+    f2_en.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+
+    f2_en.features.shaderInt64 = VK_TRUE;
+    f2_en.features.shaderFloat64 = supported.features.shaderFloat64;
+    f2_en.features.shaderInt16 = supported.features.shaderInt16;
+
+    vk11_en.storageBuffer16BitAccess = vk11.storageBuffer16BitAccess;
+    vk11_en.uniformAndStorageBuffer16BitAccess = vk11.uniformAndStorageBuffer16BitAccess;
+
+    vk12_en.storageBuffer8BitAccess = vk12.storageBuffer8BitAccess;
+    vk12_en.uniformAndStorageBuffer8BitAccess = vk12.uniformAndStorageBuffer8BitAccess;
+    vk12_en.shaderBufferInt64Atomics = vk12.shaderBufferInt64Atomics;
+    vk12_en.shaderSharedInt64Atomics = vk12.shaderSharedInt64Atomics;
+    vk12_en.shaderFloat16 = vk12.shaderFloat16;
+    vk12_en.shaderInt8 = vk12.shaderInt8;
+    vk12_en.scalarBlockLayout = vk12.scalarBlockLayout;
+    vk12_en.bufferDeviceAddress = vk12.bufferDeviceAddress;
+    vk12_en.shaderSubgroupExtendedTypes = vk12.shaderSubgroupExtendedTypes;
+    vk12_en.timelineSemaphore = vk12.timelineSemaphore;
+    vk12_en.vulkanMemoryModel = vk12.vulkanMemoryModel;
+
+    vk13_en.subgroupSizeControl = vk13.subgroupSizeControl;
+    vk13_en.computeFullSubgroups = vk13.computeFullSubgroups;
+    vk13_en.synchronization2 = vk13.synchronization2;
+    vk13_en.pipelineCreationCacheControl = vk13.pipelineCreationCacheControl;
+    vk13_en.maintenance4 = vk13.maintenance4;
+    vk13_en.shaderIntegerDotProduct = vk13.shaderIntegerDotProduct;
+
+    vk14_en.shaderExpectAssume = vk14.shaderExpectAssume;
+
+    f16i8_en.shaderFloat16 = vk12.shaderFloat16;
+    f16i8_en.shaderInt8 = vk12.shaderInt8;
+    dot_en.shaderIntegerDotProduct = vk13.shaderIntegerDotProduct;
+    pbin_en.pipelineBinaries = pbin.pipelineBinaries;
+    af_en.shaderBufferFloat32Atomics = af.shaderBufferFloat32Atomics;
+    af_en.shaderBufferFloat32AtomicAdd = af.shaderBufferFloat32AtomicAdd;
+    bf16_en.shaderBFloat16Type = bf16.shaderBFloat16Type;
+    coop_en.cooperativeMatrix = coop_gated;
+    coop_en.cooperativeMatrixRobustBufferAccess =
+        coop_gated && coop.cooperativeMatrixRobustBufferAccess;
+
+    f2_en.pNext = &vk11_en;
+    vk11_en.pNext = &vk12_en;
+    vk12_en.pNext = &vk13_en;
+    vk13_en.pNext = &vk14_en;
+    vk14_en.pNext = &f16i8_en;
+    f16i8_en.pNext = &dot_en;
+    dot_en.pNext = &pbin_en;
+    pbin_en.pNext = &af_en;
+    af_en.pNext = &bf16_en;
+    bf16_en.pNext = &coop_en;
+
+    /* ---- build the extension list (only available ones) ---- */
+    const char *exts[8];
+    uint32_t ext_count = 0;
+    if (vkr_device_extension_supported(pd, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME))
+        exts[ext_count++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
+    if (vkr_device_extension_supported(pd, VK_AMD_SHADER_CORE_PROPERTIES_EXTENSION_NAME))
+        exts[ext_count++] = VK_AMD_SHADER_CORE_PROPERTIES_EXTENSION_NAME;
+    if (vkr_device_extension_supported(pd, VK_AMD_SHADER_CORE_PROPERTIES_2_EXTENSION_NAME))
+        exts[ext_count++] = VK_AMD_SHADER_CORE_PROPERTIES_2_EXTENSION_NAME;
+    if (vkr_device_extension_supported(pd, VK_KHR_PIPELINE_BINARY_EXTENSION_NAME) &&
+        pbin.pipelineBinaries)
+        exts[ext_count++] = VK_KHR_PIPELINE_BINARY_EXTENSION_NAME;
+    if (vkr_device_extension_supported(pd, VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME) &&
+        af.shaderBufferFloat32Atomics)
+        exts[ext_count++] = VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME;
+    if (vkr_device_extension_supported(pd, VK_KHR_SHADER_BFLOAT16_EXTENSION_NAME) &&
+        bf16.shaderBFloat16Type)
+        exts[ext_count++] = VK_KHR_SHADER_BFLOAT16_EXTENSION_NAME;
+    if (coop_gated)
+        exts[ext_count++] = VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME;
+
+    VkDeviceCreateInfo dci;
+    memset(&dci, 0, sizeof(dci));
+    dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    dci.pNext = &f2_en;
+    dci.queueCreateInfoCount = 1;
+    dci.pQueueCreateInfos = &qci;
+    dci.enabledExtensionCount = ext_count;
+    dci.ppEnabledExtensionNames = exts;
+
+    VkResult r = vkCreateDevice(pd, &dci, NULL, out_device);
+    free(qf);
+    return r;
+}
 
 VkResult vkr_create_runtime(VkPhysicalDevice physicalDevice,
                             VkDevice device, VkQueue compute_queue,

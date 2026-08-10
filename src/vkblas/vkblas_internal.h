@@ -88,6 +88,7 @@ typedef struct {
 /* ── Context ─────────────────────────────────────────────────────── */
 
 struct VkBLASContext {
+    VkInstance instance;
     VkDevice device;
     VkPipelineCache pipeline_cache;
     VkDescriptorPool descriptor_pool;

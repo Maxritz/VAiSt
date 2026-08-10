@@ -46,21 +46,62 @@ typedef struct VkRuntime VkRuntime;
  *
  * Filled by vkr_detect_capabilities(). This is the single de-duplicated
  * description of what the five per-library contexts (vkmath, vkblas, vkquant,
- * vkrand, vkfft) used to detect inline: shaderInt64 / subgroup /
- * cooperative-matrix feature flags, subgroup and workgroup sizes, the
- * vkCmdPushDescriptorSetKHR device function pointer, and the shader-tier
- * architecture index/name.
+ * vkrand, vkfft) used to detect inline: the core 1.1-1.4 feature set, the
+ * subgroup / cooperative-matrix features, AMD shader-core geometry, push
+ * descriptors, and the derived shader-tier architecture index/name.
  *
  * arch_index follows the tier ladder: 2 = coopmatrix, 1 = subgroup,
  * 0 = baseline. arch_name is one of the static strings "coopmatrix",
  * "subgroup", "baseline".
  */
 typedef struct {
+    /* core scalar type features (VkPhysicalDeviceFeatures) */
     VkBool32 has_shader_int64;      /**< VkPhysicalDeviceFeatures::shaderInt64.  */
+    VkBool32 has_shader_float64;    /**< shaderFloat64 (dgemm).                  */
+    VkBool32 has_shader_int16;      /**< shaderInt16.                            */
+
+    /* Vulkan 1.1/1.2 feature set */
+    VkBool32 has_shader_float16;    /**< Vulkan12Features::shaderFloat16.        */
+    VkBool32 has_shader_int8;       /**< Vulkan12Features::shaderInt8.           */
+    VkBool32 has_storage_buffer16;  /**< Vulkan11Features::storageBuffer16BitAccess. */
+    VkBool32 has_storage_buffer8;   /**< Vulkan12Features::storageBuffer8BitAccess.  */
+    VkBool32 has_scalar_block_layout;   /**< tight quantized packing (std430/scalar). */
+    VkBool32 has_buffer_device_address; /**< GPU-side pointers for fused kernels.     */
+    VkBool32 has_subgroup_extended_types; /**< fp16/int8 subgroup reduce/shuffle.    */
+    VkBool32 has_timeline_semaphore;     /**< multi-queue sync without wait-idle.    */
+    VkBool32 has_vulkan_memory_model;    /**< device-scope atomics ordering.         */
+
+    /* Vulkan 1.3/1.4 feature set */
     VkBool32 has_subgroup;          /**< Compute-stage subgroup ops available.   */
+    VkBool32 has_subgroup_size_control; /**< can force a compute subgroup size.  */
+    VkBool32 has_sync2;             /**< synchronization2 / vkCmdPipelineBarrier2. */
+    VkBool32 has_pipeline_creation_cache_control; /**< async/immediate compile. */
+    VkBool32 has_maintenance4;      /**< maxBufferSize = 2 GiB cap query.        */
+    VkBool32 has_shader_integer_dot_product; /**< dp4a quantized GEMM.           */
+    VkBool32 has_shader_expect_assume;      /**< Vulkan14Features::shaderExpectAssume. */
+
+    /* cooperative matrix (RISKY: gated on VAIT_COOPMATRIX) */
     VkBool32 has_coop_matrix;       /**< VK_KHR_cooperative_matrix feature.      */
+
+    /* named extensions */
     VkBool32 has_push_descriptor;   /**< vkCmdPushDescriptorSetKHR available.    */
+    VkBool32 has_pipeline_binary;   /**< VK_KHR_pipeline_binary (startup cache). */
+    VkBool32 has_atomic_float;      /**< VK_EXT_shader_atomic_float (f32 atomics). */
+    VkBool32 has_shader_bfloat16;   /**< VK_KHR_shader_bfloat16 (native bf16).   */
+
+    /* ReBAR / SAM zero-copy (DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT) */
+    VkBool32 has_zero_copy_memory;      /**< A full-heap CPU-writable VRAM type. */
+    uint32_t zero_copy_memory_type;     /**< Memory type index or VK_MAX_MEMORY_TYPES. */
+
+    /* subgroup / wave geometry */
     uint32_t subgroup_size;         /**< Device subgroup size (e.g. 64 RDNA2).   */
+    uint32_t min_subgroup_size;     /**< minSubgroupSize (Vulkan 1.3).           */
+    uint32_t max_subgroup_size;     /**< maxSubgroupSize (Vulkan 1.3).           */
+    uint32_t required_subgroup_size;/**< Compute-stage required size (32 on RDNA4). */
+    uint32_t wavefront_size;        /**< VK_AMD_shader_core_properties (64 RDNA2 / 32 RDNA4). */
+    uint32_t active_compute_units;  /**< VK_AMD_shader_core_properties2 (40 RDNA2 / 32 RDNA4). */
+    uint32_t max_push_descriptors;  /**< VkPhysicalDevicePushDescriptorProperties. */
+
     uint32_t max_workgroup_size[3]; /**< maxComputeWorkGroupSize x/y/z limits.   */
     PFN_vkCmdPushDescriptorSetKHR push_desc_fn; /**< Loaded device fn (may be NULL). */
     uint32_t arch_index;            /**< 2=coopmatrix, 1=subgroup, 0=baseline.   */
@@ -90,6 +131,44 @@ typedef struct {
  */
 VkResult vkr_detect_capabilities(VkPhysicalDevice pd, VkDevice device,
                                  VkRuntimeCaps* caps);
+
+/* ===========================================================================
+ * Canonical device creation (full feature enablement)
+ * ========================================================================== */
+
+/**
+ * \brief Create a logical device with the stack's canonical full feature set.
+ *
+ * This is the single, harness-first way to create a VkDevice for this stack:
+ * it queries what the physical device supports and enables the full
+ * Vulkan 1.1-1.4 compute feature set in one pNext chain:
+ *
+ *   - base: shaderInt64 / shaderFloat64 / shaderInt16 / 64-bit buffer+shared atomics
+ *   - 1.1:  storageBuffer16BitAccess, uniformAndStorageBuffer16BitAccess
+ *   - 1.2:  storageBuffer8BitAccess, shaderFloat16, shaderInt8, scalarBlockLayout,
+ *           bufferDeviceAddress, shaderSubgroupExtendedTypes, timelineSemaphore,
+ *           vulkanMemoryModel
+ *   - 1.3:  subgroupSizeControl, computeFullSubgroups, synchronization2,
+ *           pipelineCreationCacheControl, maintenance4, shaderIntegerDotProduct
+ *   - 1.4:  shaderExpectAssume
+ *   - named: VK_KHR_push_descriptor, VK_AMD_shader_core_properties(2),
+ *            VK_KHR_pipeline_binary, VK_EXT_shader_atomic_float,
+ *            VK_KHR_shader_bfloat16 — enabled when advertised
+ *   - VK_KHR_cooperative_matrix — only when VAIT_COOPMATRIX is set (driver-buggy)
+ *
+ * Only features the device actually supports are enabled; nothing is forced.
+ * The device is created with one queue of the given queue family.
+ *
+ * \param pd           Physical device to create from.
+ * \param queue_family Queue family index for the created queue.
+ * \param out_device   Receives the VkDevice handle.
+ * \retval VK_SUCCESS
+ * \retval VK_ERROR_INITIALIZATION_FAILED Invalid argument or queue family invalid.
+ * \retval VK_ERROR_OUT_OF_HOST_MEMORY Extension enumeration failed.
+ * \retval Other VkResult from vkCreateDevice.
+ */
+VkResult vkr_create_device(VkPhysicalDevice pd, uint32_t queue_family,
+                           VkDevice* out_device);
 
 /* ===========================================================================
  * Runtime lifecycle

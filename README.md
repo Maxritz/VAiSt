@@ -43,9 +43,10 @@ VAiSt fixes this by starting from first principles:
   (VK_KHR_cooperative_matrix). The runtime picks the best tier your GPU
   supports and falls back gracefully.
 
-- **Shared shader sources.** 28 GLSL compute shader sources compile into 52
-  SPIR-V binaries via compile-time specialization — one source, multiple
-  tile sizes, multiple wave sizes, multiple quantization types.
+- **Shared shader sources.** 126 GLSL compute shader sources compile into 126
+  SPIR-V binaries via compile-time specialization (vkblas 30, vkmath 46,
+  vkquant 44, vkrand 4, vkfft 2) — one source, multiple tile sizes, multiple
+  wave sizes, multiple quantization types.
 
 ---
 
@@ -54,20 +55,28 @@ VAiSt fixes this by starting from first principles:
 ```
 VAiSt
 ├── include/
-│   └── vkblas/           BLAS API (hipBLAS-compatible naming)
+│   ├── vkblas/           BLAS API (hipBLAS-compatible naming)
 │   ├── vkfft/            FFT API (rocFFT-compatible naming)
 │   ├── vkrand/           RNG + sampling API (rocrand-compatible naming)
 │   ├── vkmath/           Elementwise ops, reductions, activations
-│   └── vkquant/          Quantized weight dequantization (Q4_K, Q8_0, etc.)
+│   ├── vkquant/          Quantization + dequantization (ggml block formats)
+│   ├── vkmodel/          Model loaders (GGUF, safetensors, OpenVINO IR)
+│   ├── vkruntime/        Device/queue/memory/pool runtime (hipRuntime-equivalent)
+│   ├── vkkv/             Cross-model KV-cache ridge transfer
+│   └── vkdist/           Distributed compute over TCP
 ├── src/                  C99 runtime + Vulkan dispatch
 ├── shaders/
-│   ├── baseline/         Tier 0: portable Vulkan 1.0 (works everywhere)
-│   ├── subgroup/         Tier 1: subgroup shuffle optimizations
-│   ├── coopmatrix/       Tier 2: VK_KHR_cooperative_matrix (RDNA4+)
-│   └── compile_shaders.ps1   Compiles .comp → SPIR-V → C header arrays
-├── specs/                Reference data, ISA docs, ROCm headers
-├── tests/                Per-library test harnesses (coming)
-└── docs/                 Architecture specifications (specs/)
+│   ├── vkblas/           GEMM, qgemm, L1/L2 BLAS (baseline + subgroup tiers)
+│   ├── vkmath/           Elementwise, reductions, activations, casts
+│   ├── vkquant/          Dequant + forward-quantize shaders
+│   ├── vkrand/           PRNG + distribution sampling
+│   ├── vkfft/            Radix-2 FFT
+│   ├── compile_shaders.ps1   Compiles .comp → SPIR-V → C header arrays
+│   └── (per-lib tiers)   baseline/ (Vulkan 1.0 core), subgroup/ (VK_KHR_shader_subgroup),
+│                         coopmatrix/ (VK_KHR_cooperative_matrix)
+├── specs/                Design docs, ISA reference, architecture notes
+├── tests/                10 per-library test harnesses (build + run green on RX 9070 XT)
+└── docs/                 Pointers into specs/
 ```
 
 ### VKBLAS (implemented)
@@ -84,6 +93,30 @@ automatically based on GPU capabilities:
 | `vkblas_s/h/d/bgemm_strided_batched` | f32/f16/f64/bf16 | Strided batched GEMM |
 | `vkblas_gemm_ex` | f16/f32/bf16 | Mixed-precision with compute-type control |
 | `vkblas_sgemm_batched` | f32 | Per-buffer batched GEMM |
+
+All plain GEMM precisions dispatch a shared-memory tiled baseline plus a
+**subgroup twin** (32×8 warp tile, `subgroupShuffle` x-broadcast, no shared
+memory) where `VK_KHR_shader_subgroup` is available. A cooperative-matrix tier
+exists for f32 but is dormant by default (see note below).
+
+**Fused quantized GEMM (qgemm)** — dequant + MAC fused in one shader, the
+decode hot path. All seven ggml weight formats dispatch a 16×16 baseline and a
+**32×8 subgroup tier** (one 32-lane subgroup per block, `subgroupShuffle`
+x-broadcast, no shared memory / barriers); the subgroup tier is the default on
+subgroup-capable devices. `vkblas_qgemm_get_tier` reports which tier resolved
+per format. A `_f16` twin per format stores the f32 accumulator as `float16_t`
+in y/z (f16 output storage).
+
+| Function | Description |
+|----------|-------------|
+| `vkblas_qgemm_q8_0_f32` / `_f16` | Fused GEMM with Q8_0 weights |
+| `vkblas_qgemm_q4_0_f32` / `_f16` | Fused GEMM with Q4_0 weights |
+| `vkblas_qgemm_q4k_f32` / `_f16` | Fused GEMM with Q4_K weights |
+| `vkblas_qgemm_q5k_f32` / `_f16` | Fused GEMM with Q5_K weights |
+| `vkblas_qgemm_q6k_f32` / `_f16` | Fused GEMM with Q6_K weights |
+| `vkblas_qgemm_q3k_f32` / `_f16` | Fused GEMM with Q3_K weights |
+| `vkblas_qgemm_iq4xs_f32` / `_f16` | Fused GEMM with IQ4_XS weights |
+| `vkblas_qgemm_get_tier` | Query resolved tier (BASELINE/SUBGROUP) per format |
 
 API mirrors `hipblasSgemm` parameter order exactly — porting from HIP is a
 mechanical find-and-replace:
@@ -135,6 +168,11 @@ compute dispatches. Mirrors the VKBLAS context/pipeline-caching pattern.
 | `vkmath_add_mul_f32/f16` | Fused `(a+b)*alpha` |
 | `vkmath_scale_f32/f16` | `alpha * in` |
 | `vkmath_max_reduce_dim_f32`, `vkmath_sum_reduce_dim_f32` | Row reductions |
+| `vkmath_softmax_f32`, `vkmath_rms_norm_f32`, `vkmath_layernorm_f32` | Normalization ops |
+| `vkmath_argmax_f32`, `vkmath_argmin_f32`, `vkmath_cumsum_f32` | Index / scan ops |
+| `vkmath_clip/abs/sign/exp/log/sqrt/rsqrt/pow_f32` | Scalar unary ops |
+| `vkmath_cast_f32_to_bf16`, `vkmath_cast_bf16_to_f32` | bf16 ↔ f32 casts (bit-exact, `floatBitsToUint(f)>>16`) |
+| `vkmath_add/mul/add_mul/scale_bf16` | bf16 elementwise (uint16_t SSBO, f32 compute) |
 
 All work records into a caller-supplied `VkCommandBuffer`; pipelines are
 created lazily and cached. Descriptor binding uses push descriptors when
@@ -142,21 +180,25 @@ available, otherwise a context-owned descriptor pool.
 
 ### VKQuant (implemented)
 
-Block dequantization of quantized weights to f32, using the same
-context/pipeline-cache pattern as VKMath.
+Block dequantization **and forward quantization** of quantized weights, using
+the same context/pipeline-cache pattern as VKMath. All ggml block formats
+round-trip: every `vkquant_quantize_<fmt>_f32` dispatches a real shader and is
+validated against its matching dequant in `test_vkquant`.
 
-| Function | Description |
+| Dequant (f32 output) | Forward quantize (f32 → block) |
 |----------|-------------|
-| `vkquant_dequant_q8_0_f32` | Q8_0 blocks (f32 scale + 32×int8) → 32 f32 each |
-| `vkquant_dequant_q4_0_f32` | Q4_0 blocks (f32 scale + 16 packed nibbles) → 32 f32 each |
-| `vkquant_dequant_q4k_f32` | Q4_K blocks (ggml, 256 elems) → 256 f32 each |
-| `vkquant_dequant_q6k_f32` | Q6_K blocks (ggml, 256 elems) → 256 f32 each |
-| `vkquant_dequant_iq4xs_f32` | IQ4_XS blocks (ggml + iq4nl LUT) → 256 f32 each |
-| `vkquant_quantize_q8_0_f32` | Forward quantize f32 → Q8_0 blocks |
-| `vkquant_quantize_q4_0_f32` | Forward quantize f32 → Q4_0 blocks |
+| Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q8_1, IQ4_NL (32-elem legacy blocks) | Same 7 formats |
+| Q2_K, Q3_K, Q4_K, Q5_K, Q6_K (256-elem K-quants) | Same 5 formats |
+| IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS (256-elem IQ) | Same 8 formats |
+| TQ1_0, TQ2_0 (256-elem TQ) | Same 2 formats |
 
-Q4_K/Q6_K/IQ4_XS layouts are ported bit-exact from ggml-common.h (validated
-GPU vs CPU).
+That is **22 dequant + 22 forward-quantize** kernels (44 SPIR-V blobs). K-quant
+scale-selection and the IQ/TQ grid search are transliterations of the ggml
+`quantize_row_*_ref` math; the grid formats replace ggml's runtime kmap/
+neighbours tables with a direct exhaustive search over the same dequant grid
+tables (embedded as GLSL `const` arrays), so stored grid indices round-trip
+exactly through the dequant shaders. Layouts are ported bit-exact from
+ggml-common.h (validated GPU vs CPU).
 
 ### VKRAND (implemented)
 
@@ -203,14 +245,15 @@ inline Vulkan code.
 
 ### VKModel (implemented)
 
-GGUF + safetensors model loader — parses metadata + tensor infos and uploads
-every tensor's raw bytes into device buffers via VKRuntime, as ready-to-use
-components.
+GGUF, safetensors, and OpenVINO IR model loaders — parse metadata + tensor
+infos and upload every tensor's raw bytes into device buffers via VKRuntime,
+as ready-to-use components.
 
 | Function | Description |
 |----------|-------------|
 | `vkmodel_load` / `vkmodel_destroy` | Load/free a GGUF model (all metadata value types, streamed tensor upload) |
 | `vkmodel_load_safetensors` | Load a safetensors model (self-contained JSON header parser, `__metadata__` KV exposure, verbatim offsets) |
+| `vkmodel_load_openvino` | Load an OpenVINO IR v11 model (`<xml>` + `.bin`; tag-scans Const `<data>` + legacy `<weights>`/`<biases>`, element types f32/f16/bf16/f64/i8..i64 mapped natively, per-tensor size + `.bin` span validation) |
 | `vkmodel_get_kv_count/_key/_string` | Host-side metadata access |
 | `vkmodel_get_tensor_count/_name/_dtype/_dtype_name/_nelems/_buffer/_size` | Tensor info + device buffer access |
 | `vkmodel_block_elems` | ggml_type → elements-per-block |
@@ -249,13 +292,16 @@ in `specs/VKDIST-DESIGN.md`.
 - **Real cooperative-matrix GEMM on this driver** — the coopmat path is
   implemented and compiled but dormant (env `VAIT_COOPMATRIX=1` to enable);
   the AMD 26.7.1 driver crashes on `coopMatMulAddKHR`. Testable on a newer
-  driver or via `ssh rr@macx`.
+  driver or via `ssh rr@macx`. f16/bf16/f64 coopmatrix GEMM tiers not built.
 - **VKDist Phase 1+** — multi-PC over IP, distributed GEMM partition across
   workers, attention/KV sharding, TLS + discovery (roadmap in
   `specs/VKDIST-DESIGN.md`).
-- **VKModel F16→F32 / GGML quantized in-place conversion** — loader stores raw bytes verbatim.
-- **IQ/TQ forward quantization** — dequant-only (their quantizers are
-  search/heuristic-based).
+- **VKModel F16→F32 / GGML quantized in-place conversion** — loaders store raw bytes verbatim.
+- **VKMath f16 elementwise gap** — `vkmath_add/mul/scale_f16` shaders exist but
+  have no `(KERNEL, DTYPE_F16)` table entries yet and return
+  `VK_ERROR_FEATURE_NOT_PRESENT`; bf16 activations/reductions not built.
+- **VKFFT scope** — radix-2 only (no f64, no bf16, no non-power-of-2 plans).
+- **No sparse BLAS, NPP-equivalent, or runtime JIT** — offline shader compile only.
 
 ---
 
@@ -274,9 +320,11 @@ cd shaders
 .\compile_shaders.ps1
 ```
 
-This compiles all `.comp` files under `shaders/vkblas/{baseline,subgroup,coopmatrix}/`
-into SPIR-V binaries and generates `src/vkblas/shaders_spv.h` with embedded
-bytecode arrays.
+File-tree auto-discovery: globs every `.comp` under
+`shaders/<lib>/{baseline,subgroup,coopmatrix}/` (vkblas, vkmath, vkquant,
+vkrand, vkfft), compiles each to SPIR-V, and regenerates the corresponding
+`src/<lib>/shaders_spv.h` with embedded bytecode arrays. Adding a kernel = drop
+a `.comp` + regenerate — no manual build-list edits.
 
 ### Build
 
@@ -332,8 +380,9 @@ Types follow the same scheme: `s` = f32, `d` = f64, `h` = f16, `bf` = bf16,
 Tile dimensions, unroll factors, and wave widths are SPIR-V specialization
 constants (`constant_id`), not pre-compiled `#define` variants. One SPIR-V
 binary can be reconfigured at pipeline creation time without recompilation.
-This keeps the shader count manageable — 28 sources produce 52 binaries because
-we only vary by wave size (32 vs 64), not by tile size.
+This keeps the shader count manageable — 126 sources produce 126 binaries
+because we only vary by wave size (32 vs 64) and tile via specialization
+constants, not by pre-compiled `#define` variants.
 
 ---
 

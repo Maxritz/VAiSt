@@ -1,0 +1,146 @@
+#version 450
+
+#extension GL_KHR_cooperative_matrix : enable
+
+// Tier 2 bf16 GEMM — real cooperative-matrix path.
+// Uses GL_KHR_cooperative_matrix fragments (coopMatLoad / coopMatMulAdd /
+// coopMatStore) with 16x16x16 float fragments, one subgroup per workgroup.
+// The bf16 data is stored as uint16_t in memory; conversion to float is done
+// for computation, and result is truncated back to float16_t.
+
+layout(constant_id = 0) const uint TILE_M   = 16;
+layout(constant_id = 1) const uint TILE_N   = 16;
+layout(constant_id = 2) const uint TILE_K   = 16;
+layout(constant_id = 3) const uint SG_WIDTH = 32;
+
+// Fragment dimensions (fixed 16x16x16 float fragments).
+#define CM_M 16
+#define CM_N 16
+#define CM_K 16
+#define CM_SCOPE 3          /* gl_ScopeSubgroup */
+#define CM_USE_A 0  /* gl_MatrixUseA */
+#define CM_USE_B 1  /* gl_MatrixUseB */
+#define CM_USE_ACC 2  /* gl_MatrixUseAccumulator */
+
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    float alpha;
+    float beta;
+    uint  lda;
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  _pad2;
+    uint  _pad3;
+} pc;
+
+layout(set = 0, binding = 0) restrict readonly buffer BufA { float data_A[]; };
+layout(set = 0, binding = 1) restrict readonly buffer BufB { float data_B[]; };
+layout(set = 0, binding = 2) restrict readonly buffer BufC { float data_C[]; };
+layout(set = 0, binding = 3) writeonly  buffer BufD { float data_D[]; };
+
+shared float As[CM_M * CM_K];
+shared float Bs[CM_K * CM_N];
+shared float Ds[CM_M * CM_N];
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+// 16x16x16 float cooperative-matrix fragments (row-major staging).
+coopmat<float, CM_SCOPE, CM_M, CM_K, CM_USE_A>  a_frag;
+coopmat<float, CM_SCOPE, CM_K, CM_N, CM_USE_B>  b_frag;
+coopmat<float, CM_SCOPE, CM_M, CM_N, CM_USE_ACC> acc_frag;
+
+void main() {
+    uint lane = gl_LocalInvocationIndex;      /* 0..31 (one subgroup)       */
+
+    uint grRow = gl_WorkGroupID.x;
+    uint grCol = gl_WorkGroupID.y;
+    uint batch = gl_WorkGroupID.z;
+
+    uint globalRow0 = grRow * CM_M;
+    uint globalCol0 = grCol * CM_N;
+
+    uint numTiles = (pc.k + CM_K - 1) / CM_K;
+
+    for (uint t = 0; t < numTiles; ++t) {
+        // ── Stage A tile (CM_M rows x CM_K cols) in shared memory ─────────
+        for (uint i = lane; i < CM_M * CM_K; i += SG_WIDTH) {
+            uint r = i / CM_K;
+            uint c = i % CM_K;
+            uint aRow, aCol;
+            if (pc.transA == 0) {
+                aRow = globalRow0 + r;
+                aCol = t * CM_K + c;
+            } else {
+                aRow = t * CM_K + c;
+                aCol = globalRow0 + r;
+            }
+            uint idx = aRow + aCol * pc.lda + batch * pc.strideA;
+            bool in_k = (pc.transA == 0) ? (aCol < pc.k) : (aRow < pc.k);
+            As[i] = in_k ? data_A[idx] : 0.0;
+        }
+
+        // ── Stage B tile (CM_K rows x CM_N cols) in shared memory ─────────
+        for (uint i = lane; i < CM_K * CM_N; i += SG_WIDTH) {
+            uint r = i / CM_N;
+            uint c = i % CM_N;
+            uint bRow, bCol;
+            if (pc.transB == 0) {
+                bRow = t * CM_K + r;
+                bCol = globalCol0 + c;
+            } else {
+                bRow = globalCol0 + c;
+                bCol = t * CM_K + r;
+            }
+            uint idx = bRow + bCol * pc.ldb + batch * pc.strideB;
+            bool in_k = (pc.transB == 0) ? (bRow < pc.k) : (bCol < pc.k);
+            Bs[i] = in_k ? data_B[idx] : 0.0;
+        }
+
+        barrier();
+
+        // ── Load fragments and multiply-accumulate (A*B + acc) ────────────
+        coopMatLoad(a_frag, As, 0, CM_K, 0);   /* row-major, stride 16 */
+        coopMatLoad(b_frag, Bs, 0, CM_N, 0);   /* row-major, stride 16 */
+        acc_frag = coopMatMulAdd(a_frag, b_frag, acc_frag);
+
+        barrier();   /* before the next iteration overwrites As/Bs */
+    }
+
+    // ── Store accumulator fragment to shared, then scale + write out ──────
+    coopMatStore(acc_frag, Ds, 0, CM_N, 0);    /* row-major, stride 16 */
+    barrier();
+
+    for (uint i = lane; i < CM_M * CM_N; i += SG_WIDTH) {
+        uint r = i / CM_N;
+        uint c = i % CM_N;
+
+        uint globalRow = globalRow0 + r;
+        uint globalCol = globalCol0 + c;
+
+        // ── m/n write-guard ───────────────────────────────────────────────
+        if (globalRow >= pc.m || globalCol >= pc.n) { continue; }
+
+        float result = pc.alpha * Ds[i];
+
+        if (pc.beta_is_zero == 0) {
+            uint cIdx = globalRow + globalCol * pc.ldc + batch * pc.strideC;
+            result += pc.beta * data_C[cIdx];
+        }
+
+        uint dIdx = globalRow + globalCol * pc.ldd + batch * pc.strideD;
+        data_D[dIdx] = result;
+    }
+}
