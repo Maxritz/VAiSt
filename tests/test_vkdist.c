@@ -568,7 +568,7 @@ int main(void)
         fprintf(stderr, "test_vkdist: vkCreateDevice failed (%d)\n", (int)r);
         goto cleanup;
     }
-    r = vkblas_create_context(pd, dev, &blas);
+    r = vkblas_create_context(instance, pd, dev, &blas);
     if (r != VK_SUCCESS) {
         fprintf(stderr, "test_vkdist: vkblas_create_context failed (%d)\n", (int)r);
         goto cleanup;

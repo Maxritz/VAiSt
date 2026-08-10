@@ -546,10 +546,48 @@ VkResult vkmath_cast_f32_to_bf16(VkMathContext *ctx,
  * \param output f32 output buffer.
  */
 VkResult vkmath_cast_bf16_to_f32(VkMathContext *ctx,
-                                 VkCommandBuffer cmd,
-                                 uint32_t num_elements,
-                                 VkBuffer input,
-                                 VkBuffer output);
+                                  VkCommandBuffer cmd,
+                                  uint32_t num_elements,
+                                  VkBuffer input,
+                                  VkBuffer output);
+
+/* ===========================================================================
+ * bf16 activations
+ * Input/output buffers use bf16 as uint16_t in scalar-block layout, same
+ * convention as the cast ops. Compute runs in f32, results truncate back to
+ * bf16 via floatBitsToUint(r) >> 16. Requires storageBuffer16BitAccess +
+ * scalarBlockLayout. Same signature shape as vkmath_relu_f32.
+ * ========================================================================== */
+
+VkResult vkmath_relu_bf16(VkMathContext *ctx,
+                          VkCommandBuffer cmd,
+                          uint32_t num_elements,
+                          VkBuffer input,
+                          VkBuffer output);
+
+VkResult vkmath_silu_bf16(VkMathContext *ctx,
+                          VkCommandBuffer cmd,
+                          uint32_t num_elements,
+                          VkBuffer input,
+                          VkBuffer output);
+
+VkResult vkmath_gelu_bf16(VkMathContext *ctx,
+                          VkCommandBuffer cmd,
+                          uint32_t num_elements,
+                          VkBuffer input,
+                          VkBuffer output);
+
+VkResult vkmath_sigmoid_bf16(VkMathContext *ctx,
+                             VkCommandBuffer cmd,
+                             uint32_t num_elements,
+                             VkBuffer input,
+                             VkBuffer output);
+
+VkResult vkmath_tanh_bf16(VkMathContext *ctx,
+                          VkCommandBuffer cmd,
+                          uint32_t num_elements,
+                          VkBuffer input,
+                          VkBuffer output);
 
 /* ===========================================================================
  * Utility

@@ -191,6 +191,20 @@ typedef struct {
     VkDeviceSize off_readback16;
 } qgemm_f16_buffers_t;
 
+/** Buffers + regions backing one extended L2/L3 BLAS op test case.
+    CD is the in-place input/output buffer: b/x (trsv), B/X (trsm),
+    y (symv/hemv), C (symm/hemm/syrk/herk). B is the secondary read-only
+    input (x for symv/hemv, B for symm/hemm) or VK_NULL_HANDLE when unused. */
+typedef struct {
+    VkBuffer A;
+    VkBuffer B;
+    VkBuffer CD;
+    VkDeviceSize off_A;
+    VkDeviceSize off_B;
+    VkDeviceSize off_CD;
+    VkDeviceSize off_readback;
+} ext_buffers_t;
+
 /* ===========================================================================
  * Bootstrap helpers
  * ========================================================================== */
@@ -453,8 +467,11 @@ static VkResult create_command_pool_and_buffer(VkDevice device,
         vkDestroyCommandPool(device, *out_pool, NULL);
         *out_pool = VK_NULL_HANDLE;
     }
-    return r;
+     return r;
 }
+
+static VkDeviceSize take_region(VkDeviceSize *cursor, VkDeviceSize align,
+                                VkDeviceSize size);
 
 static VkResult create_sub_buffer(VkDevice device, VkDeviceMemory mem,
                                   VkDeviceSize offset, VkDeviceSize size,
@@ -471,7 +488,37 @@ static VkResult create_sub_buffer(VkDevice device, VkDeviceMemory mem,
 
     VkResult r = vkCreateBuffer(device, &buffer_info, NULL, out_buffer);
     if (r != VK_SUCCESS) return r;
-    return vkBindBufferMemory(device, *out_buffer, mem, offset);
+     return vkBindBufferMemory(device, *out_buffer, mem, offset);
+}
+
+/** Allocate one (A,B,CD) buffer triple + readback region for an extended op,
+    carve sub-buffers from the single staging allocation, and bind them. Returns
+    VK_SUCCESS on full success (partial on failure so the caller can inspect). */
+static VkResult ext_alloc_case(VkDevice device, VkDeviceMemory mem,
+                                 VkDeviceSize align, VkDeviceSize *cursor,
+                                 VkDeviceSize aBytes, VkDeviceSize bBytes,
+                                 VkDeviceSize cdBytes,
+                                 ext_buffers_t *c)
+{
+    memset(c, 0, sizeof(*c));
+    c->off_A  = take_region(cursor, align, aBytes);
+    c->off_CD = take_region(cursor, align, cdBytes);
+    c->off_readback = take_region(cursor, align, cdBytes);
+
+    VkResult r = create_sub_buffer(device, mem, c->off_A, aBytes, &c->A);
+    if (r != VK_SUCCESS) return r;
+    if (bBytes > 0) {
+        c->off_B = take_region(cursor, align, bBytes);
+        r = create_sub_buffer(device, mem, c->off_B, bBytes, &c->B);
+        if (r != VK_SUCCESS) { vkDestroyBuffer(device, c->A, NULL); c->A = VK_NULL_HANDLE; return r; }
+    }
+    r = create_sub_buffer(device, mem, c->off_CD, cdBytes, &c->CD);
+    if (r != VK_SUCCESS) {
+        if (c->B) { vkDestroyBuffer(device, c->B, NULL); c->B = VK_NULL_HANDLE; }
+        vkDestroyBuffer(device, c->A, NULL); c->A = VK_NULL_HANDLE;
+        return r;
+    }
+    return VK_SUCCESS;
 }
 
 static VkResult allocate_staging_memory(VkPhysicalDevice physical_device,
@@ -1321,6 +1368,117 @@ static float dequant_iq4xs_f32(const uint8_t *blk, int idx)
 }
 
 /* ===========================================================================
+ * Extended L2/L3 BLAS — CPU reference models (must mirror shader semantics)
+ * ========================================================================== */
+
+/** Read the (i,j) entry of a symmetric matrix backed by triangular storage,
+    selecting the authoritative triangle per `lower`. */
+static float ext_sym_at(const float *A, int lda, int i, int j, int lower)
+{
+    if (lower) return (i >= j) ? A[i + j * lda] : A[j + i * lda];
+    return (j >= i) ? A[i + j * lda] : A[j + i * lda];
+}
+
+/** Triangular solve  x = op(A)^{-1} (alpha*b). Matches trsv_f*.comp branch
+    order exactly; when `round_f16` is set, every stored x_i is rounded to f16
+    to mirror the f16 shader's intermediate truncations. */
+static void ref_trsv(int lower, int transA, int unit, int n,
+                     const float *A, int lda, float alpha,
+                     const float *b, float *x, int round_f16)
+{
+    for (int i = 0; i < n; ++i) {
+        x[i] = alpha * b[i];
+        if (round_f16) x[i] = f16_to_f32(f32_to_f16(x[i]));
+    }
+    if (!transA) {
+        if (lower) {
+            for (int i = 0; i < n; ++i) {
+                float sum = x[i];
+                for (int j = 0; j < i; ++j) sum -= A[i + j * lda] * x[j];
+                float diag = unit ? 1.0f : A[i + i * lda];
+                x[i] = sum / diag;
+                if (round_f16) x[i] = f16_to_f32(f32_to_f16(x[i]));
+            }
+        } else {
+            for (int i = n - 1; i >= 0; --i) {
+                float sum = x[i];
+                for (int j = i + 1; j < n; ++j) sum -= A[i + j * lda] * x[j];
+                float diag = unit ? 1.0f : A[i + i * lda];
+                x[i] = sum / diag;
+                if (round_f16) x[i] = f16_to_f32(f32_to_f16(x[i]));
+            }
+        }
+    } else {
+        if (lower) {
+            for (int i = n - 1; i >= 0; --i) {
+                float sum = x[i];
+                for (int j = i + 1; j < n; ++j) sum -= A[j + i * lda] * x[j];
+                float diag = unit ? 1.0f : A[i + i * lda];
+                x[i] = sum / diag;
+                if (round_f16) x[i] = f16_to_f32(f32_to_f16(x[i]));
+            }
+        } else {
+            for (int i = 0; i < n; ++i) {
+                float sum = x[i];
+                for (int j = 0; j < i; ++j) sum -= A[j + i * lda] * x[j];
+                float diag = unit ? 1.0f : A[i + i * lda];
+                x[i] = sum / diag;
+                if (round_f16) x[i] = f16_to_f32(f32_to_f16(x[i]));
+            }
+        }
+    }
+}
+
+/** symv/hemv: y = alpha * A * x + beta * y (real; hemv == symv here). */
+static void ref_symv(int lower, int n, const float *A, int lda,
+                     float alpha, const float *x, float beta,
+                     const float *y, float *d, int round_f16)
+{
+    for (int i = 0; i < n; ++i) {
+        float acc = 0.0f;
+        for (int j = 0; j < n; ++j)
+            acc += ext_sym_at(A, lda, i, j, lower) * x[j];
+        float v = alpha * acc + beta * y[i];
+        d[i] = round_f16 ? f16_to_f32(f32_to_f16(v)) : v;
+    }
+}
+
+/** symm/hemm: D = alpha * A * B + beta * C (A symmetric on the left). */
+static void ref_symm(int lower, int n, int k, const float *A, int lda,
+                     const float *B, int ldb, float alpha, float beta,
+                     const float *C, int ldc, float *D, int ldd, int round_f16)
+{
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < k; ++j) {
+            float acc = 0.0f;
+            for (int p = 0; p < n; ++p)
+                acc += ext_sym_at(A, lda, i, p, lower) * B[p + j * ldb];
+            float v = alpha * acc + beta * C[i + j * ldc];
+            D[i + j * ldd] = round_f16 ? f16_to_f32(f32_to_f16(v)) : v;
+        }
+}
+
+/** syrk/herk: D = alpha * op(A) * op(A)^T + beta * C  (output fully symmetric).
+    transA==0: A is k x n? No — transA==0 => op(A)=A stored n x k (lda). */
+static void ref_syrk(int transA, int n, int k, const float *A, int lda,
+                     float alpha, float beta, const float *C, int ldc,
+                     float *D, int ldd, int round_f16)
+{
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < n; ++j) {
+            float acc = 0.0f;
+            for (int p = 0; p < k; ++p) {
+                float a_ip = (transA == 0) ? A[i + p * lda] : A[p + i * lda];
+                float a_jp = (transA == 0) ? A[j + p * lda] : A[p + j * lda];
+                acc += a_ip * a_jp;
+            }
+            float v = alpha * acc + beta * C[i + j * ldc];
+            D[i + j * ldd] = round_f16 ? f16_to_f32(f32_to_f16(v)) : v;
+            if (i != j) D[j + i * ldd] = D[i + j * ldd];
+        }
+}
+
+/* ===========================================================================
  * main
  * ========================================================================== */
 
@@ -1376,6 +1534,14 @@ int main(void)
     qgemm_f16_buffers_t qg_f16[9];
     /* CPU references for the nine qgemm cases, filled in section 10b. */
     static float qg_yexp[9][8 * 8];
+    /* Extended L2/L3 BLAS cases: 8 ops x {f32, f16}. */
+    ext_buffers_t x_trsv, x_trsm, x_symv, x_hemv, x_symm, x_hemm, x_syrk, x_herk;
+    ext_buffers_t x_trsv16, x_trsm16, x_symv16, x_hemv16,
+                  x_symm16, x_hemm16, x_syrk16, x_herk16;
+    float xref_trsv[8],   xref_trsm[32], xref_symv[8], xref_hemv[8];
+    float xref_symm[32],  xref_hemm[32], xref_syrk[64], xref_herk[64];
+    uint16_t xref16_trsv[8],   xref16_trsm[32], xref16_symv[8], xref16_hemv[8];
+    uint16_t xref16_symm[32],  xref16_hemm[32], xref16_syrk[64], xref16_herk[64];
 
     memset(&f32b, 0, sizeof(f32b));
     memset(&f16b, 0, sizeof(f16b));
@@ -1398,6 +1564,22 @@ int main(void)
     memset(&q3k, 0, sizeof(q3k));
     memset(&iq4xs, 0, sizeof(iq4xs));
     memset(&qg_f16, 0, sizeof(qg_f16));
+    memset(&x_trsv, 0, sizeof(x_trsv));
+    memset(&x_trsm, 0, sizeof(x_trsm));
+    memset(&x_symv, 0, sizeof(x_symv));
+    memset(&x_hemv, 0, sizeof(x_hemv));
+    memset(&x_symm, 0, sizeof(x_symm));
+    memset(&x_hemm, 0, sizeof(x_hemm));
+    memset(&x_syrk, 0, sizeof(x_syrk));
+    memset(&x_herk, 0, sizeof(x_herk));
+    memset(&x_trsv16, 0, sizeof(x_trsv16));
+    memset(&x_trsm16, 0, sizeof(x_trsm16));
+    memset(&x_symv16, 0, sizeof(x_symv16));
+    memset(&x_hemv16, 0, sizeof(x_hemv16));
+    memset(&x_symm16, 0, sizeof(x_symm16));
+    memset(&x_hemm16, 0, sizeof(x_hemm16));
+    memset(&x_syrk16, 0, sizeof(x_syrk16));
+    memset(&x_herk16, 0, sizeof(x_herk16));
 
     int overall_pass = 1;
     VkResult r;
@@ -1794,6 +1976,250 @@ int main(void)
             r = create_sub_buffer(h.device, h.mem, qg_f16[i].off_y16,
                                   qgn * qgm * sizeof(uint16_t), &qg_f16[i].y16);
             if (r != VK_SUCCESS) goto cleanup;
+        }
+    }
+
+    /* ── 9c. Extended L2/L3 BLAS buffers (8 ops x {f32, f16}) ─────────────── */
+    /* n=8 everywhere; trsm/symm/hemm B,C are 8x4; syrk/herk C is 8x8; symv y 8.
+       bBytes=0 for trsv, trsm, syrk, herk (no separate B input); others have B. */
+    r = ext_alloc_case(h.device, h.mem, h.align, &h.cursor,
+                       64 * sizeof(float), 0, 8 * sizeof(float), &x_trsv);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = ext_alloc_case(h.device, h.mem, h.align, &h.cursor,
+                       64 * sizeof(float), 0, 32 * sizeof(float), &x_trsm);
+    if (r != VK_SUCCESS) goto cleanup;
+    if (h.test_f16) {
+        r = ext_alloc_case(h.device, h.mem, h.align, &h.cursor,
+                           64 * sizeof(float), 0, 8 * sizeof(float), &x_trsv16);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = ext_alloc_case(h.device, h.mem, h.align, &h.cursor,
+                           64 * sizeof(float), 0, 32 * sizeof(float), &x_trsm16);
+        if (r != VK_SUCCESS) goto cleanup;
+    }
+    r = ext_alloc_case(h.device, h.mem, h.align, &h.cursor,
+                       64 * sizeof(float), 8 * sizeof(float), 8 * sizeof(float), &x_symv);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = ext_alloc_case(h.device, h.mem, h.align, &h.cursor,
+                       64 * sizeof(float), 8 * sizeof(float), 8 * sizeof(float), &x_hemv);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = ext_alloc_case(h.device, h.mem, h.align, &h.cursor,
+                       64 * sizeof(float), 32 * sizeof(float), 32 * sizeof(float), &x_symm);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = ext_alloc_case(h.device, h.mem, h.align, &h.cursor,
+                       64 * sizeof(float), 32 * sizeof(float), 32 * sizeof(float), &x_hemm);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = ext_alloc_case(h.device, h.mem, h.align, &h.cursor,
+                       32 * sizeof(float), 0, 64 * sizeof(float), &x_syrk);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = ext_alloc_case(h.device, h.mem, h.align, &h.cursor,
+                       32 * sizeof(float), 0, 64 * sizeof(float), &x_herk);
+    if (r != VK_SUCCESS) goto cleanup;
+    if (h.test_f16) {
+        r = ext_alloc_case(h.device, h.mem, h.align, &h.cursor,
+                           64 * sizeof(uint16_t), 8 * sizeof(uint16_t), 8 * sizeof(uint16_t), &x_symv16);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = ext_alloc_case(h.device, h.mem, h.align, &h.cursor,
+                           64 * sizeof(uint16_t), 8 * sizeof(uint16_t), 8 * sizeof(uint16_t), &x_hemv16);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = ext_alloc_case(h.device, h.mem, h.align, &h.cursor,
+                           64 * sizeof(uint16_t), 32 * sizeof(uint16_t), 32 * sizeof(uint16_t), &x_symm16);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = ext_alloc_case(h.device, h.mem, h.align, &h.cursor,
+                           64 * sizeof(uint16_t), 32 * sizeof(uint16_t), 32 * sizeof(uint16_t), &x_hemm16);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = ext_alloc_case(h.device, h.mem, h.align, &h.cursor,
+                           32 * sizeof(uint16_t), 0, 64 * sizeof(uint16_t), &x_syrk16);
+        if (r != VK_SUCCESS) goto cleanup;
+        r = ext_alloc_case(h.device, h.mem, h.align, &h.cursor,
+                           32 * sizeof(uint16_t), 0, 64 * sizeof(uint16_t), &x_herk16);
+        if (r != VK_SUCCESS) goto cleanup;
+    }
+
+    /* ── 10c. Extended L2/L3 inputs + CPU references ──────────────────────── */
+    /* Deterministic, well-conditioned matrices. S symmetric (full storage);
+       L/U lower/upper-triangular with strong diagonal. Vectors ramp. */
+    {
+        float S[64], L[64], U[64], x8[8], y8[8], B84[32], C84[32], C88[64],
+             A84[32], A48[32];
+        float Sf[64], Lf[64], Uf[64], xf[8], yf[8], Bf[32], Cf[32], C8f[64],
+              A84f[32], A48f[32];
+        float a15 = 1.5f, one = 1.0f, half = 0.5f, a075 = 0.75f;
+        float a025 = 0.25f, zero = 0.0f;
+        const int n = 8, k = 4;
+        for (int i = 0; i < n; ++i) {
+            x8[i] = 0.5f * (float)i - 1.75f;
+            y8[i] = 0.25f * (float)i + 0.5f;
+            for (int j = 0; j < n; ++j) {
+                float sdiag = 2.0f + 0.25f * (float)i;
+                S[i + j * n] = (i == j) ? sdiag
+                               : (0.125f * (float)(((i + 1) * (j + 1)) % 3) - 0.125f);
+                L[i + j * n] = (i > j) ? (0.25f * (float)(((i * 3 + j * 5) % 5)) - 0.5f)
+                       : ((i == j) ? (1.0f + 0.5f * (float)i) : 0.0f);
+                U[i + j * n] = (i < j) ? (0.25f * (float)(((i * 7 + j * 2) % 5)) - 0.5f)
+                       : ((i == j) ? (1.25f + 0.5f * (float)i) : 0.0f);
+                C88[i + j * n] = (i == j) ? 1.0f
+                            : 0.03125f * (float)((i + j) % 4);
+            }
+            for (int j = 0; j < k; ++j) {
+                B84[i + j * n] = 0.125f * (float)((i * 4 + j) % 7) - 0.375f;
+                C84[i + j * n] = 0.0625f * (float)((i + j * 2) % 5);
+                A84[i + j * n] = 0.25f * (float)((i * 5 + j * 3) % 6) - 0.625f;
+            }
+        }
+        for (int p = 0; p < k; ++p)
+            for (int i = 0; i < n; ++i)
+                A48[p + i * k] = 0.25f * (float)((p * 3 + i * 5) % 6) - 0.625f;
+
+        /* f16-rounded input copies (inputs the shaders consume as fp16). */
+        for (int i = 0; i < 64; ++i) { Sf[i] = f16_to_f32(f32_to_f16(S[i])); }
+        for (int i = 0; i < 64; ++i) { Lf[i] = f16_to_f32(f32_to_f16(L[i])); }
+        for (int i = 0; i < 64; ++i) { Uf[i] = f16_to_f32(f32_to_f16(U[i])); }
+        for (int i = 0; i < n; ++i) { xf[i] = f16_to_f32(f32_to_f16(x8[i])); }
+        for (int i = 0; i < n; ++i) { yf[i] = f16_to_f32(f32_to_f16(y8[i])); }
+        for (int i = 0; i < 32; ++i) { Bf[i] = f16_to_f32(f32_to_f16(B84[i])); }
+        for (int i = 0; i < 32; ++i) { Cf[i] = f16_to_f32(f32_to_f16(C84[i])); }
+        for (int i = 0; i < 64; ++i) { C8f[i] = f16_to_f32(f32_to_f16(C88[i])); }
+        for (int i = 0; i < 32; ++i) { A84f[i] = f16_to_f32(f32_to_f16(A84[i])); }
+        for (int i = 0; i < 32; ++i) { A48f[i] = f16_to_f32(f32_to_f16(A48[i])); }
+
+         /* --- f32 cases: full-precision inputs (shader reads float) --- */
+         memcpy((char *)h.mapped + x_trsv.off_A,   L, 64 * sizeof(float));
+         memcpy((char *)h.mapped + x_trsv.off_CD,  y8, 8 * sizeof(float));
+         ref_trsv(1, 0, 0, n, L, n, a15, y8, xref_trsv, 0);
+
+         memcpy((char *)h.mapped + x_trsm.off_A,   L, 64 * sizeof(float));
+         memcpy((char *)h.mapped + x_trsm.off_CD,  B84, 32 * sizeof(float));
+         for (int c = 0; c < k; ++c)
+             ref_trsv(1, 0, 0, n, L, n, one, B84 + c * n, xref_trsm + c * n, 0);
+
+         memcpy((char *)h.mapped + x_symv.off_A,   S, 64 * sizeof(float));
+         memcpy((char *)h.mapped + x_symv.off_B,   x8, 8 * sizeof(float));
+         memcpy((char *)h.mapped + x_symv.off_CD,  y8, 8 * sizeof(float));
+         memcpy((char *)h.mapped + x_hemv.off_A,   S, 64 * sizeof(float));
+         memcpy((char *)h.mapped + x_hemv.off_B,   x8, 8 * sizeof(float));
+         memcpy((char *)h.mapped + x_hemv.off_CD,  y8, 8 * sizeof(float));
+
+         memcpy((char *)h.mapped + x_symm.off_A,   S, 64 * sizeof(float));
+         memcpy((char *)h.mapped + x_symm.off_B,   B84, 32 * sizeof(float));
+         memcpy((char *)h.mapped + x_symm.off_CD,  C84, 32 * sizeof(float));
+
+         memcpy((char *)h.mapped + x_hemm.off_A,   S, 64 * sizeof(float));
+         memcpy((char *)h.mapped + x_hemm.off_B,   B84, 32 * sizeof(float));
+         memcpy((char *)h.mapped + x_hemm.off_CD,  C84, 32 * sizeof(float));
+
+         memcpy((char *)h.mapped + x_syrk.off_A,   A84, 32 * sizeof(float));
+        memcpy((char *)h.mapped + x_syrk.off_CD,  C88, 64 * sizeof(float));
+
+        memcpy((char *)h.mapped + x_herk.off_A,   A48, 32 * sizeof(float));
+        memcpy((char *)h.mapped + x_herk.off_CD,  C88, 64 * sizeof(float));
+
+        /* CPU references for symv/hemv/symm/hemm/syrk/herk (alpha/beta).
+           uplo in ref must match the dispatch: symv=UPPER(0), hemv=LOWER(1),
+             symm=LOWER(1), hemm=UPPER(0), syrk=UPPER(0), herk=LOWER(1). */
+        ref_symv(0, n, S, n, a15, x8, half, y8, xref_symv, 0);
+        ref_symv(1, n, S, n, half, x8, a025, y8, xref_hemv, 0);
+        ref_symm(1, n, k, S, n, B84, n, one, half, C84, n, xref_symm, n, 0);
+        ref_symm(0, n, k, S, n, B84, n, a075, one, C84, n, xref_hemm, n, 0);
+        ref_syrk(0, n, k, A84, n, one, half, C88, n, xref_syrk, n, 0);
+        ref_syrk(0, n, k, A48, k, a075, a025, C88, n, xref_herk, n, 0);
+
+        if (h.test_f16) {
+            /* f16 cases: inputs uploaded as fp16 bits; the shader reconstructs
+               via f16_to_f32, so refs consume the rounded f32 arrays
+               (Sf/Uf/xf/yf/Bf/Cf/C8f/A48f/A84f) and pack results to f16 bits,
+               matching the per-store f16 rounding in the shader. */
+            uint16_t a16[64], b16[32], c16[64];
+            /* trsv: upper U, UNIT diag, T, alpha 0.5 */
+            for (int i = 0; i < 64; ++i) a16[i] = f32_to_f16(U[i]);
+            for (int i = 0; i < n; ++i) b16[i] = f32_to_f16(y8[i]);
+            memcpy((char *)h.mapped + x_trsv16.off_A,   a16, 64 * sizeof(uint16_t));
+            memcpy((char *)h.mapped + x_trsv16.off_CD,  b16, 8 * sizeof(uint16_t));
+            {
+                float tmp_trsv[8];
+                ref_trsv(0, 1, 1, n, Uf, n, 0.5f, yf, tmp_trsv, 1);
+                for (int i = 0; i < n; ++i) xref16_trsv[i] = f32_to_f16(tmp_trsv[i]);
+            }
+
+            /* trsm: upper U, non-unit, T, alpha 1.0 */
+            for (int i = 0; i < 64; ++i) a16[i] = f32_to_f16(U[i]);
+            for (int i = 0; i < 32; ++i) b16[i] = f32_to_f16(B84[i]);
+            memcpy((char *)h.mapped + x_trsm16.off_A,   a16, 64 * sizeof(uint16_t));
+            memcpy((char *)h.mapped + x_trsm16.off_CD,  b16, 32 * sizeof(uint16_t));
+            for (int c = 0; c < k; ++c) {
+                float col[8];
+                ref_trsv(0, 1, 0, n, Uf, n, 1.0f, Bf + c * n, col, 1);
+                for (int i = 0; i < n; ++i) xref16_trsm[c * n + i] = f32_to_f16(col[i]);
+            }
+
+            /* symv: upper, alpha 1.0 beta 0.5 */
+            for (int i = 0; i < 64; ++i) a16[i] = f32_to_f16(S[i]);
+            for (int i = 0; i < n; ++i) { b16[i] = f32_to_f16(x8[i]); c16[i] = f32_to_f16(y8[i]); }
+            memcpy((char *)h.mapped + x_symv16.off_A,   a16, 64 * sizeof(uint16_t));
+            memcpy((char *)h.mapped + x_symv16.off_B,   b16, 8 * sizeof(uint16_t));
+            memcpy((char *)h.mapped + x_symv16.off_CD,  c16, 8 * sizeof(uint16_t));
+            {
+                float tmp_symv[8];
+                ref_symv(0, n, Sf, n, 1.0f, xf, 0.5f, yf, tmp_symv, 1);
+                for (int i = 0; i < n; ++i) xref16_symv[i] = f32_to_f16(tmp_symv[i]);
+            }
+
+            /* hemv: lower, alpha 0.5 beta 0.25 */
+            for (int i = 0; i < 64; ++i) a16[i] = f32_to_f16(S[i]);
+            for (int i = 0; i < n; ++i) { b16[i] = f32_to_f16(x8[i]); c16[i] = f32_to_f16(y8[i]); }
+            memcpy((char *)h.mapped + x_hemv16.off_A,   a16, 64 * sizeof(uint16_t));
+            memcpy((char *)h.mapped + x_hemv16.off_B,   b16, 8 * sizeof(uint16_t));
+            memcpy((char *)h.mapped + x_hemv16.off_CD,  c16, 8 * sizeof(uint16_t));
+            {
+                float tmp_hemv[8];
+                ref_symv(1, n, Sf, n, 0.5f, xf, 0.25f, yf, tmp_hemv, 1);
+                for (int i = 0; i < n; ++i) xref16_hemv[i] = f32_to_f16(tmp_hemv[i]);
+            }
+
+            /* symm: lower, alpha 1.0 beta 0.5 */
+            for (int i = 0; i < 64; ++i) a16[i] = f32_to_f16(S[i]);
+            for (int i = 0; i < 32; ++i) { b16[i] = f32_to_f16(B84[i]); c16[i] = f32_to_f16(C84[i]); }
+            memcpy((char *)h.mapped + x_symm16.off_A,   a16, 64 * sizeof(uint16_t));
+            memcpy((char *)h.mapped + x_symm16.off_B,   b16, 32 * sizeof(uint16_t));
+            memcpy((char *)h.mapped + x_symm16.off_CD,  c16, 32 * sizeof(uint16_t));
+            {
+                float tmp_symm[32];
+                ref_symm(0, n, k, Sf, n, Bf, n, 1.0f, 0.5f, Cf, n, tmp_symm, n, 1);
+                for (int i = 0; i < n * k; ++i) xref16_symm[i] = f32_to_f16(tmp_symm[i]);
+            }
+
+            /* hemm: upper, alpha 0.75 beta 1.0 */
+            for (int i = 0; i < 64; ++i) a16[i] = f32_to_f16(S[i]);
+            for (int i = 0; i < 32; ++i) { b16[i] = f32_to_f16(B84[i]); c16[i] = f32_to_f16(C84[i]); }
+            memcpy((char *)h.mapped + x_hemm16.off_A,   a16, 64 * sizeof(uint16_t));
+            memcpy((char *)h.mapped + x_hemm16.off_B,   b16, 32 * sizeof(uint16_t));
+            memcpy((char *)h.mapped + x_hemm16.off_CD,  c16, 32 * sizeof(uint16_t));
+            {
+                float tmp_hemm[32];
+                ref_symm(1, n, k, Sf, n, Bf, n, 0.5f, 1.0f, Cf, n, tmp_hemm, n, 1);
+                for (int i = 0; i < n * k; ++i) xref16_hemm[i] = f32_to_f16(tmp_hemm[i]);
+            }
+
+            /* syrk: full, N, alpha 1.0 beta 0.5 */
+            for (int i = 0; i < 32; ++i) a16[i] = f32_to_f16(A84[i]);
+            for (int i = 0; i < 64; ++i) c16[i] = f32_to_f16(C88[i]);
+            memcpy((char *)h.mapped + x_syrk16.off_A,   a16, 32 * sizeof(uint16_t));
+            memcpy((char *)h.mapped + x_syrk16.off_CD,  c16, 64 * sizeof(uint16_t));
+            {
+                float tmp_syrk[64];
+                ref_syrk(0, n, k, A84f, n, 1.0f, 0.5f, C8f, n, tmp_syrk, n, 1);
+                for (int i = 0; i < n * n; ++i) xref16_syrk[i] = f32_to_f16(tmp_syrk[i]);
+            }
+
+            /* herk: lower, N, alpha 0.75 beta 0.25 */
+            for (int i = 0; i < 32; ++i) a16[i] = f32_to_f16(A48[i]);
+            for (int i = 0; i < 64; ++i) c16[i] = f32_to_f16(C88[i]);
+            memcpy((char *)h.mapped + x_herk16.off_A,   a16, 32 * sizeof(uint16_t));
+            memcpy((char *)h.mapped + x_herk16.off_CD,  c16, 64 * sizeof(uint16_t));
+            {
+                float tmp_herk[64];
+                ref_syrk(0, n, k, A48f, k, 0.75f, 0.25f, C8f, n, tmp_herk, n, 1);
+                for (int i = 0; i < n * n; ++i) xref16_herk[i] = f32_to_f16(tmp_herk[i]);
+            }
         }
     }
 
@@ -2540,6 +2966,112 @@ int main(void)
                q8_tier == 1 ? "subgroup" : "baseline");
     }
 
+    /* ── 11f. Extended L2/L3 BLAS dispatches (trsv/trsm/symv/hemv/symm/hemm/syrk/herk) ──── */
+    /* 16 ops x {f32, f16}. trsv/trsm overwrite the right-hand-side in place;
+       symv/hemv overwrite y; symm/hemm/syrk/herk write C. n=8, k=4. */
+    {
+        const int n = 8, k = 4;
+        float a15 = 1.5f, one = 1.0f, half = 0.5f, a075 = 0.75f, a025 = 0.25f;
+        /* trsv: lower L, non-unit, N, alpha 1.5 (b=y overwritten with x) */
+        overall_pass &= record_dispatch(
+            vkblas_trsv_f32(h.blas_ctx, h.cmd, VKBLAS_FILL_LOWER, VKBLAS_OP_N, VKBLAS_DIAG_NON_UNIT, n,
+                            &a15, x_trsv.A, n, x_trsv.CD, n),
+            "trsv f32");
+        /* trsm: lower L, non-unit, N, alpha 1.0 (B overwritten with X in place) */
+        overall_pass &= record_dispatch(
+            vkblas_trsm_f32(h.blas_ctx, h.cmd, VKBLAS_FILL_LOWER, VKBLAS_OP_N, VKBLAS_DIAG_NON_UNIT, n, k,
+                            &one, x_trsm.A, n, x_trsm.CD, n),
+            "trsm f32");
+        /* symv: upper S, alpha 1.5 beta 0.5 (x in B, y in CD overwritten) */
+        overall_pass &= record_dispatch(
+            vkblas_symv_f32(h.blas_ctx, h.cmd, VKBLAS_FILL_UPPER, n,
+                            &a15, x_symv.A, n, x_symv.B, 1, &half, x_symv.CD, 1),
+            "symv f32");
+        /* hemv: lower S, alpha 0.5 beta 0.25 */
+        overall_pass &= record_dispatch(
+            vkblas_hemv_f32(h.blas_ctx, h.cmd, VKBLAS_FILL_LOWER, n,
+                            &half, x_hemv.A, n, x_hemv.B, 1, &a025, x_hemv.CD, 1),
+            "hemv f32");
+        /* symm: lower S, C = alpha*A*B + beta*C */
+        overall_pass &= record_dispatch(
+            vkblas_symm_f32(h.blas_ctx, h.cmd, VKBLAS_FILL_LOWER, n, k, &one,
+                            x_symm.A, n, x_symm.B, n, &half, x_symm.CD, n),
+            "symm f32");
+        /* hemm: upper S, C = alpha*A*B + beta*C */
+        overall_pass &= record_dispatch(
+            vkblas_hemm_f32(h.blas_ctx, h.cmd, VKBLAS_FILL_UPPER, n, k, &a075,
+                            x_hemm.A, n, x_hemm.B, n, &one, x_hemm.CD, n),
+            "hemm f32");
+        /* syrk: C = alpha*A*A^T + beta*C (upper triangle written) */
+        overall_pass &= record_dispatch(
+            vkblas_syrk_f32(h.blas_ctx, h.cmd, VKBLAS_FILL_UPPER, VKBLAS_OP_N, n, k,
+                            &one, x_syrk.A, n, &half, x_syrk.CD, n),
+            "syrk f32");
+        /* herk: C = alpha*A^T*A + beta*C (lower triangle, A is k x n here) */
+        overall_pass &= record_dispatch(
+            vkblas_herk_f32(h.blas_ctx, h.cmd, VKBLAS_FILL_LOWER, VKBLAS_OP_N, n, k,
+                            &a075, x_herk.A, k, &a025, x_herk.CD, n),
+            "herk f32");
+    }
+
+    /* f16 cases: alpha/beta packed as fp16 bits; buffers bound as uint16 SSA.
+       trsv/trsm/symm/hemm/syrk/herk all take alpha/beta as float* (the f16 API
+       reinterpret_casts the pointer to uint16_t), so pass the f16-bit values. */
+    if (h.test_f16) {
+        const int n = 8, k = 4;
+        uint16_t a16_15 = f32_to_f16(1.5f), a16_1 = f32_to_f16(1.0f),
+                 a16_h = f32_to_f16(0.5f), a16_75 = f32_to_f16(0.75f),
+                 a16_25 = f32_to_f16(0.25f);
+        /* trsv: upper U, UNIT diag, T, alpha 0.5 */
+        overall_pass &= record_dispatch(
+            vkblas_trsv_f16(h.blas_ctx, h.cmd, VKBLAS_FILL_UPPER, VKBLAS_OP_T, VKBLAS_DIAG_UNIT, n,
+                            (const float *)&a16_h, x_trsv16.A, n,
+                            x_trsv16.CD, n),
+            "trsv f16");
+        /* trsm: upper U, non-unit, T, alpha 1.0 */
+        overall_pass &= record_dispatch(
+            vkblas_trsm_f16(h.blas_ctx, h.cmd, VKBLAS_FILL_UPPER, VKBLAS_OP_T, VKBLAS_DIAG_NON_UNIT, n, k,
+                            (const float *)&a16_1, x_trsm16.A, n,
+                            x_trsm16.CD, n),
+            "trsm f16");
+        /* symv: upper, alpha 1.0 beta 0.5 */
+        overall_pass &= record_dispatch(
+            vkblas_symv_f16(h.blas_ctx, h.cmd, VKBLAS_FILL_UPPER, n,
+                            (const float *)&a16_1, x_symv16.A, n,
+                            x_symv16.B, 1, (const float *)&a16_h, x_symv16.CD, 1),
+            "symv f16");
+        /* hemv: lower, alpha 0.5 beta 0.25 */
+        overall_pass &= record_dispatch(
+            vkblas_hemv_f16(h.blas_ctx, h.cmd, VKBLAS_FILL_LOWER, n,
+                            (const float *)&a16_h, x_hemv16.A, n,
+                            x_hemv16.B, 1, (const float *)&a16_25, x_hemv16.CD, 1),
+            "hemv f16");
+        /* symm: lower, alpha 1.0 beta 0.5 */
+        overall_pass &= record_dispatch(
+            vkblas_symm_f16(h.blas_ctx, h.cmd, VKBLAS_FILL_LOWER, n, k,
+                            (const float *)&a16_1,
+                            x_symm16.A, n, x_symm16.B, n, (const float *)&a16_h, x_symm16.CD, n),
+            "symm f16");
+        /* hemm: upper, alpha 0.75 beta 1.0 */
+        overall_pass &= record_dispatch(
+            vkblas_hemm_f16(h.blas_ctx, h.cmd, VKBLAS_FILL_UPPER, n, k,
+                            (const float *)&a16_75,
+                            x_hemm16.A, n, x_hemm16.B, n, (const float *)&a16_1, x_hemm16.CD, n),
+            "hemm f16");
+        /* syrk: full, N, alpha 1.0 beta 0.5 */
+        overall_pass &= record_dispatch(
+            vkblas_syrk_f16(h.blas_ctx, h.cmd, VKBLAS_FILL_UPPER, VKBLAS_OP_N, n, k,
+                            (const float *)&a16_1, x_syrk16.A, n,
+                            (const float *)&a16_h, x_syrk16.CD, n),
+            "syrk f16");
+        /* herk: lower, N, alpha 0.75 beta 0.25 */
+        overall_pass &= record_dispatch(
+            vkblas_herk_f16(h.blas_ctx, h.cmd, VKBLAS_FILL_LOWER, VKBLAS_OP_N, n, k,
+                            (const float *)&a16_75, x_herk16.A, k,
+                            (const float *)&a16_25, x_herk16.CD, n),
+            "herk f16");
+    }
+
     /* ── 12. Make shader writes visible to the transfer readbacks ───────── */
     record_compute_to_transfer_barrier(h.cmd);
     record_copy_readback(h.cmd, f32b.D, h.staging, f32b.off_readback,
@@ -2595,6 +3127,42 @@ int main(void)
             record_copy_readback(h.cmd, qg_f16[i].y16, h.staging,
                                  qg_f16[i].off_readback16,
                                  8 * 8 * sizeof(uint16_t));
+     }
+
+    /* extended L2/L3 readbacks */
+    record_copy_readback(h.cmd, x_trsv.CD, h.staging, x_trsv.off_readback,
+                          8 * sizeof(float));
+    record_copy_readback(h.cmd, x_trsm.CD, h.staging, x_trsm.off_readback,
+                          32 * sizeof(float));
+    record_copy_readback(h.cmd, x_symv.CD, h.staging, x_symv.off_readback,
+                          8 * sizeof(float));
+    record_copy_readback(h.cmd, x_hemv.CD, h.staging, x_hemv.off_readback,
+                          8 * sizeof(float));
+    record_copy_readback(h.cmd, x_symm.CD, h.staging, x_symm.off_readback,
+                          32 * sizeof(float));
+    record_copy_readback(h.cmd, x_hemm.CD, h.staging, x_hemm.off_readback,
+                          32 * sizeof(float));
+    record_copy_readback(h.cmd, x_syrk.CD, h.staging, x_syrk.off_readback,
+                          64 * sizeof(float));
+    record_copy_readback(h.cmd, x_herk.CD, h.staging, x_herk.off_readback,
+                          64 * sizeof(float));
+    if (h.test_f16) {
+        record_copy_readback(h.cmd, x_trsv16.CD, h.staging, x_trsv16.off_readback,
+                              8 * sizeof(uint16_t));
+        record_copy_readback(h.cmd, x_trsm16.CD, h.staging, x_trsm16.off_readback,
+                              32 * sizeof(uint16_t));
+        record_copy_readback(h.cmd, x_symv16.CD, h.staging, x_symv16.off_readback,
+                              8 * sizeof(uint16_t));
+        record_copy_readback(h.cmd, x_hemv16.CD, h.staging, x_hemv16.off_readback,
+                              8 * sizeof(uint16_t));
+        record_copy_readback(h.cmd, x_symm16.CD, h.staging, x_symm16.off_readback,
+                              32 * sizeof(uint16_t));
+        record_copy_readback(h.cmd, x_hemm16.CD, h.staging, x_hemm16.off_readback,
+                              32 * sizeof(uint16_t));
+        record_copy_readback(h.cmd, x_syrk16.CD, h.staging, x_syrk16.off_readback,
+                              64 * sizeof(uint16_t));
+        record_copy_readback(h.cmd, x_herk16.CD, h.staging, x_herk16.off_readback,
+                              64 * sizeof(uint16_t));
     }
 
     r = vkEndCommandBuffer(h.cmd);
@@ -2695,6 +3263,60 @@ int main(void)
                                          elem_count, TEST_F64_TOLERANCE);
     else
         printf("  %-18s : SKIP (f64 features absent)\n", "dgemm a/b pack");
+
+    /* extended L2/L3 checks (n=8, k=4: trsm/symm/hemm = 32 elems, syrk/herk = 64) */
+    {
+        overall_pass &= check_output_f32("trsv f32", h.mapped,
+                                          x_trsv.off_readback, xref_trsv,
+                                          8, TEST_F32_TOLERANCE);
+        overall_pass &= check_output_f32("trsm f32", h.mapped,
+                                          x_trsm.off_readback, xref_trsm,
+                                          32, TEST_F32_TOLERANCE);
+        overall_pass &= check_output_f32("symv f32", h.mapped,
+                                          x_symv.off_readback, xref_symv,
+                                          8, TEST_F32_TOLERANCE);
+        overall_pass &= check_output_f32("hemv f32", h.mapped,
+                                          x_hemv.off_readback, xref_hemv,
+                                          8, TEST_F32_TOLERANCE);
+        overall_pass &= check_output_f32("symm f32", h.mapped,
+                                          x_symm.off_readback, xref_symm,
+                                          32, TEST_F32_TOLERANCE);
+        overall_pass &= check_output_f32("hemm f32", h.mapped,
+                                          x_hemm.off_readback, xref_hemm,
+                                          32, TEST_F32_TOLERANCE);
+        overall_pass &= check_output_f32("syrk f32", h.mapped,
+                                          x_syrk.off_readback, xref_syrk,
+                                          64, TEST_F32_TOLERANCE);
+        overall_pass &= check_output_f32("herk f32", h.mapped,
+                                          x_herk.off_readback, xref_herk,
+                                          64, TEST_F32_TOLERANCE);
+    }
+    if (h.test_f16) {
+        overall_pass &= check_output_f16("trsv f16", h.mapped,
+                                          x_trsv16.off_readback, xref16_trsv,
+                                          8, TEST_F16_TOLERANCE);
+        overall_pass &= check_output_f16("trsm f16", h.mapped,
+                                          x_trsm16.off_readback, xref16_trsm,
+                                          32, TEST_F16_TOLERANCE);
+        overall_pass &= check_output_f16("symv f16", h.mapped,
+                                          x_symv16.off_readback, xref16_symv,
+                                          8, TEST_F16_TOLERANCE);
+        overall_pass &= check_output_f16("hemv f16", h.mapped,
+                                          x_hemv16.off_readback, xref16_hemv,
+                                          8, TEST_F16_TOLERANCE);
+        overall_pass &= check_output_f16("symm f16", h.mapped,
+                                          x_symm16.off_readback, xref16_symm,
+                                          32, TEST_F16_TOLERANCE);
+        overall_pass &= check_output_f16("hemm f16", h.mapped,
+                                          x_hemm16.off_readback, xref16_hemm,
+                                          32, TEST_F16_TOLERANCE);
+        overall_pass &= check_output_f16("syrk f16", h.mapped,
+                                          x_syrk16.off_readback, xref16_syrk,
+                                          64, TEST_F16_TOLERANCE);
+        overall_pass &= check_output_f16("herk f16", h.mapped,
+                                          x_herk16.off_readback, xref16_herk,
+                                          64, TEST_F16_TOLERANCE);
+    }
 
     /* fused quantized GEMM checks (64 outputs each). */
     overall_pass &= check_output_f32("qgemm q8_0 k=32", h.mapped,
@@ -2802,6 +3424,52 @@ cleanup:
     if (iq4xs.y) vkDestroyBuffer(h.device, iq4xs.y, NULL);
     for (int i = 0; i < 9; ++i)
         if (qg_f16[i].y16) vkDestroyBuffer(h.device, qg_f16[i].y16, NULL);
+    if (x_trsv.A) vkDestroyBuffer(h.device, x_trsv.A, NULL);
+    if (x_trsv.B) vkDestroyBuffer(h.device, x_trsv.B, NULL);
+    if (x_trsv.CD) vkDestroyBuffer(h.device, x_trsv.CD, NULL);
+    if (x_trsm.A) vkDestroyBuffer(h.device, x_trsm.A, NULL);
+    if (x_trsm.B) vkDestroyBuffer(h.device, x_trsm.B, NULL);
+    if (x_trsm.CD) vkDestroyBuffer(h.device, x_trsm.CD, NULL);
+    if (x_symv.A) vkDestroyBuffer(h.device, x_symv.A, NULL);
+    if (x_symv.B) vkDestroyBuffer(h.device, x_symv.B, NULL);
+    if (x_symv.CD) vkDestroyBuffer(h.device, x_symv.CD, NULL);
+    if (x_hemv.A) vkDestroyBuffer(h.device, x_hemv.A, NULL);
+    if (x_hemv.B) vkDestroyBuffer(h.device, x_hemv.B, NULL);
+    if (x_hemv.CD) vkDestroyBuffer(h.device, x_hemv.CD, NULL);
+    if (x_symm.A) vkDestroyBuffer(h.device, x_symm.A, NULL);
+    if (x_symm.B) vkDestroyBuffer(h.device, x_symm.B, NULL);
+    if (x_symm.CD) vkDestroyBuffer(h.device, x_symm.CD, NULL);
+    if (x_hemm.A) vkDestroyBuffer(h.device, x_hemm.A, NULL);
+    if (x_hemm.B) vkDestroyBuffer(h.device, x_hemm.B, NULL);
+    if (x_hemm.CD) vkDestroyBuffer(h.device, x_hemm.CD, NULL);
+    if (x_syrk.A) vkDestroyBuffer(h.device, x_syrk.A, NULL);
+    if (x_syrk.CD) vkDestroyBuffer(h.device, x_syrk.CD, NULL);
+    if (x_herk.A) vkDestroyBuffer(h.device, x_herk.A, NULL);
+    if (x_herk.CD) vkDestroyBuffer(h.device, x_herk.CD, NULL);
+    if (h.test_f16) {
+        if (x_trsv16.A) vkDestroyBuffer(h.device, x_trsv16.A, NULL);
+        if (x_trsv16.B) vkDestroyBuffer(h.device, x_trsv16.B, NULL);
+        if (x_trsv16.CD) vkDestroyBuffer(h.device, x_trsv16.CD, NULL);
+        if (x_trsm16.A) vkDestroyBuffer(h.device, x_trsm16.A, NULL);
+        if (x_trsm16.B) vkDestroyBuffer(h.device, x_trsm16.B, NULL);
+        if (x_trsm16.CD) vkDestroyBuffer(h.device, x_trsm16.CD, NULL);
+        if (x_symv16.A) vkDestroyBuffer(h.device, x_symv16.A, NULL);
+        if (x_symv16.B) vkDestroyBuffer(h.device, x_symv16.B, NULL);
+        if (x_symv16.CD) vkDestroyBuffer(h.device, x_symv16.CD, NULL);
+        if (x_hemv16.A) vkDestroyBuffer(h.device, x_hemv16.A, NULL);
+        if (x_hemv16.B) vkDestroyBuffer(h.device, x_hemv16.B, NULL);
+        if (x_hemv16.CD) vkDestroyBuffer(h.device, x_hemv16.CD, NULL);
+        if (x_symm16.A) vkDestroyBuffer(h.device, x_symm16.A, NULL);
+        if (x_symm16.B) vkDestroyBuffer(h.device, x_symm16.B, NULL);
+        if (x_symm16.CD) vkDestroyBuffer(h.device, x_symm16.CD, NULL);
+        if (x_hemm16.A) vkDestroyBuffer(h.device, x_hemm16.A, NULL);
+        if (x_hemm16.B) vkDestroyBuffer(h.device, x_hemm16.B, NULL);
+        if (x_hemm16.CD) vkDestroyBuffer(h.device, x_hemm16.CD, NULL);
+        if (x_syrk16.A) vkDestroyBuffer(h.device, x_syrk16.A, NULL);
+        if (x_syrk16.CD) vkDestroyBuffer(h.device, x_syrk16.CD, NULL);
+        if (x_herk16.A) vkDestroyBuffer(h.device, x_herk16.A, NULL);
+        if (x_herk16.CD) vkDestroyBuffer(h.device, x_herk16.CD, NULL);
+    }
     if (h.staging) vkDestroyBuffer(h.device, h.staging, NULL);
     if (h.mapped)  vkUnmapMemory(h.device, h.mem);
     if (h.mem != VK_NULL_HANDLE) vkFreeMemory(h.device, h.mem, NULL);

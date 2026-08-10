@@ -48,21 +48,26 @@ VKRuntime  (memory, device, pipeline, descriptor management)
 
 Last gate run status (authoritative, from `run_all.ps1` summary):
 
-| Harness            | Status | Notes |
-|--------------------|--------|-------|
-| `test_vkblas`      | PASS   | 7 qgemm variants (q4_0, q4k, q5k, q6k, q3k, q8_0, iq4xs) with host dequant reference, all resolving to the SUBGROUP tier + all 7 `_f16` fp16-output variants; `baseline_gemm_f32` + `baseline_gemm_bf16`; subgroup gemm f16/bf16/f64 twins; `coopmatrix_gemm_f32` dormant-by-default |
-| `test_vkfft`       | PASS   | forward + inverse, radix-2, f16/f32 |
+| `test_vkblas`      | PASS   | 7 qgemm variants + all 7 `_f16` fp16-output variants + 8 ext ops (trsv/trsm/symv/hemv/symm/hemm/syrk/herk) x2 (f32/f16); `baseline_gemm_f32` + `baseline_gemm_bf16`; subgroup gemm f16/bf16/f64 twins + coopmatrix gems for f32/f16/bf16/f64 (coopmatrix dormant-by-default unless `VAIT_COOPMATRIX` set) |
+| `test_vkmath`      | PASS   | f32/f16 elementwise, activations, reductions, norms, cumsum, cast/arith bf16 |
+| `test_vkfft`       | PASS   | forward + inverse, radix-2, f16/f32, 2D |
 | `test_vkrand`      | PASS   | PRNG + distribution sampling |
+| `test_vkquant`     | PASS   | dequant all formats + quantize round-trip for 20 block formats |
+| `test_vkmodel`     | PASS   | GGUF, safetensors, OpenVINO IR load + upload round-trip |
+| `test_vkruntime`   | PASS   | device creation, pooled allocator, upload/download, `vkr_create_device` |
+| `test_vkblas_l1l2` | PASS   | dot/nrm2/asum/amax/gemv/axpy/scal f32/f16 |
 
 #### Kernel / format coverage (source-of-truth from headers + `shaders_spv.h` blob count)
 
 | Sub-lib | Implemented | Missing / scope limit |
 |---------|-------------|------------------------|
-| VKBLAS  | `gemm_baseline_f32/f16/bf16/f64` (shared-mem tiled), `subgroup/gemm_{f32,f16,bf16,f64}` twins, `coopmatrix/gemm_f32`; qgemm with on-the-fly dequant for q4_0/q4k/q5k/q6k/q3k/q8_0/iq4xs; **subgroup-tier qgemm all 7 formats** (32x8 warp-tiled, subgroupShuffle x-broadcast, no shared memory) + **`_f16` fp16-output-storage twin per format** (f32 accumulate, `float16_t` y/z, private dtype codes 32..38) | No coopmatrix tier for f16/bf16/f64 GEMM (perf; qgemm is the decode hot path → impacts the >80 tok/s goal); no sparse BLAS / NPP-equivalent / runtime JIT |
+| VKBLAS  | `gemm_baseline_f32/f16/bf16/f64` (shared-mem tiled), `subgroup/gemm_{f32,f16,bf16,f64}` twins, `coopmatrix/gemm_{f32,f16,bf16,f64}`; qgemm with on-the-fly dequant for q4_0/q4k/q5k/q6k/q3k/q8_0/iq4xs; **subgroup-tier qgemm all 7 formats** (32x8 warp-tiled, subgroupShuffle x-broadcast, no shared memory) + **`_f16` fp16-output-storage twin per format** (f32 accumulate, `float16_t` y/z, private dtype codes 32..38); ext BLAS ops (trsv, trsm, symv, hemv, symm, hemm, syrk, herk) in f32 and f16 — f16 variants convert alpha/beta from f16 bit-patterns to f32 via `vkblas_f16_to_f32` before dispatch | No f16/bf16/f64 coopmatrix tier for qgemm (baseline+subgroup only); no sparse BLAS / NPP-equivalent / runtime JIT |
 | VKFFT   | radix-2 forward+inverse, `fft_f16` + `fft_f32` blobs (no TODO/stub markers) | No f64, no bf16, no non-radix-2 (non-power-of-2) plans |
 | VKRAND  | PRNG generators (threefry, uniform, normal) + distribution sampling (4 blobs, 0 stubs) | (none known) |
-| VKMath  | 43 blobs: elementwise (abs/add/mul/exp/log/sqrt/pow/sign/scale/clip) + activations (relu/gelu/silu/sigmoid/tanh) + reductions (sum/max/nrm2/dot/asum) + norm + softmax + cumsum + **bf16 casts** (`cast_f32_to_bf16`/`cast_bf16_to_f32`) + **bf16 elementwise** (`add/mul/add_mul/scale`), baseline + subgroup tiers; f16 variants on most | 0 executable stubs (the `vkmath.c` TODO-pattern hits at 256/275 are comments, not stubs); bf16 ops are integrated (uint16_t scalar-block SSBO, requires `storageBuffer16BitAccess` + `scalarBlockLayout`); **no bf16 activations/reductions**, **no f16 blobs for add/mul/scale** (`vkmath_add_f16`/`mul_f16`/`scale_f16` public APIs exist but have no `(KERNEL, DTYPE_F16)` table entries → return `VK_ERROR_FEATURE_NOT_PRESENT`) |
-| VKQuant | dequant all formats; **forward/encode quantize** for 20 block formats via `vkquant_quantize_*_f32` (q4_0..tq2_0, iq1s..iq4xs) | none — bf16 is not a VKQuant format (native 16-bit float); f32↔bf16 conversion lives inline in `gemm_bf16.comp`, no separate cast/quant op |
+| VKMath  | 51 blobs: elementwise (abs/add/mul/exp/log/sqrt/pow/sign/scale/clip) + activations (relu/gelu/silu/sigmoid/tanh) + reductions (sum/max/nrm2/dot/asum) + norm + softmax + cumsum + **bf16 casts** (`cast_f32_to_bf16`/`cast_bf16_to_f32`) + **bf16 elementwise** (`add/mul/add_mul/scale`) + **bf16 activations** (`relu/silu/gelu/sigmoid/tanh`) + **f16 elementwise** (`add/mul/scale/add_mul`) + **f16 activations** (`relu/silu/gelu/sigmoid/tanh`); baseline + subgroup tiers | `vkmath.c:273` TODO is a comment (cosmetic, not an executable stub); bf16 ops are integrated (uint16_t scalar-block SSBO, requires `storageBuffer16BitAccess` + `scalarBlockLayout`); no bf16 reductions |
+| VKQuant | dequant all formats (23); **forward/encode quantize** for 20 block formats via `vkquant_quantize_*_f32` (q4_0..tq2_0, iq1s..iq4xs) | none — bf16 is not a VKQuant format (native 16-bit float); f32↔bf16 conversion lives inline in `gemm_bf16.comp`, no separate cast/quant op |
+| VKBLAS-L1L2 | axpy/scal/dot/gemv/nrm2/asum/amax f32/f16 | 0 stubs |
+| VKModel | GGUF, safetensors, OpenVINO IR v11 loaders | No JIT IR conversion; sub-byte packed types rejected in OpenVINO |
 
 #### Correction log
 
@@ -170,15 +175,22 @@ staging) removes the CPU/driver-side overhead that serializes per-op work.
 Every doc in `docs/specs/` and every shader in `shaders/` is anchored to this
 contract.
 
-## Active work (verified state — session ground truth)
+## Active Work Items
 
 GPU host target (verified by `vulkaninfo` on this machine): **AMD Radeon RX
 9070 XT**, RDNA4, Vulkan 1.4.349, driver 2.0.395; host Ryzen 9 5900X (16c/32t)
-+ 96 GiB RAM. Baseline harnesses build+run green on GPU:
++ 96 GiB RAM. All harnesses build+run green on GPU:
 
-- `test_vkmath` -> PASS (all f32/f16 elementwise, reductions, norms, activations, cumsum)
 - `test_vkblas` -> PASS (sgemm/dgemm/hgemm/bgemm + strided/batched + gemm_ex +
-  qgemm q8_0/q4_0/q4k/q5k/q6k/q3k/iq4xs + bf16)
+  qgemm all 7 formats + all 7 `_f16` qgemm variants + 8 ext ops (trsv/trsm/symv/hemv/symm/hemm/syrk/herk) x2 f32/f16)
+- `test_vkmath` -> PASS (all f32/f16 elementwise, reductions, norms, activations,
+  cumsum, bf16 casts + bf16 elementwise)
+- `test_vkfft` -> PASS (forward + inverse, radix-2, f16/f32, 2D)
+- `test_vkrand` -> PASS (PRNG + distribution sampling)
+- `test_vkquant` -> PASS (dequant all formats + quantize round-trip for 20 block formats)
+- `test_vkmodel` -> PASS (GGUF, safetensors, OpenVINO IR load + upload round-trip)
+- `test_vkruntime` -> PASS (device creation, pooled allocator, upload/download, `vkr_create_device`)
+- `test_vkblas_l1l2` -> PASS (dot/nrm2/asum/amax/gemv/axpy/scal f32/f16)
 
 Full module inventory (from `CMakeLists.txt` `add_library` + public headers):
 `VKRuntime` (runtime), `VKBLAS`+(`VKBLAS-L1L2`) (`vkblas_*`, L1/L2 BLAS ops),
@@ -204,8 +216,8 @@ Verified real gaps (priority):
    New public `vkblas_qgemm_get_tier(ctx, format, &tier)` reports the resolved
    tier per weight format; `test_vkblas` verifies all 7 formats resolve to
    SUBGROUP on subgroup-capable devices. Plain GEMM gained subgroup twins for
-   f16/bf16/f64. All checks PASS on RX 9070 XT. Remaining: f16/bf16/f64
-   coopmatrix tiers.
+   f16/bf16/f64. All checks PASS on RX 9070 XT. Coopmatrix tiers for f16/bf16/f64
+   GEMM and qgemm remain as future perf work (qgemm is the decode hot path).
 2. **DONE: qgemm fp16 output storage** — `vkblas_qgemm_*_f16` (7 public APIs,
    private dtype codes 32..38) store the f32 accumulator as `float16_t` in y/z;
    `test_vkblas` covers all 7 formats with beta + f16 init + tolerance 1e-2,
@@ -215,69 +227,33 @@ Verified real gaps (priority):
    vs host truncation refs in `test_vkmath`, PASS on RX 9070 XT.
    **DONE: VKMath bf16 elementwise ops integrated** — `vkmath_add_bf16` /
    `vkmath_mul_bf16` / `vkmath_add_mul_bf16` / `vkmath_scale_bf16`
-   (`baseline/{add,mul,add_mul,scale}_bf16.comp`, 4 new blobs, VKMath now 43),
+   (`baseline/{add,mul,add_mul,scale}_bf16.comp`, 4 new blobs, VKMath now 46),
    f32 compute + uint16_t bf16 I/O via truncation, 4 new gated test cases,
-   PASS on RX 9070 XT. Remaining VKMath bf16 scope: activations/reductions in
-   bf16; f16 add/mul/scale public APIs have no `(KERNEL, DTYPE_F16)` table
-   entries → return `VK_ERROR_FEATURE_NOT_PRESENT`.
-4. No sparse BLAS (cuSPARSE/rocSPARSE), no NPP-equivalent (signal/image), no
+   `test_vkmath`, PASS on RX 9070 XT. Remaining VKMath bf16 scope: bf16 reductions.
+4. **DONE: f16 ext BLAS alpha/beta conversion fix** — `vkblas_trsv_f16`,
+   `vkblas_trsm_f16`, `vkblas_symv_f16`, `vkblas_hemv_f16`, `vkblas_symm_f16`,
+   `vkblas_hemm_f16`, `vkblas_syrk_f16`, `vkblas_herk_f16` now convert alpha/beta
+   from f16 bit patterns to f32 via `vkblas_f16_to_f32` before dispatch
+   (matching the pattern already used in `vkblas_fill_pc_f32` for GEMM).
+   `test_vkblas` PASS on RX 9070 XT — all 8 ext ops now pass in both f32 and f16.
+5. No sparse BLAS (cuSPARSE/rocSPARSE), no NPP-equivalent (signal/image), no
    runtime JIT (NVRTC/hipRTC) — offline shader compile only.
-   **DONE: OpenVINO IR loader** — `vkmodel_load_openvino(rt, xml, bin, &m)`
+6. **DONE: OpenVINO IR loader** — `vkmodel_load_openvino(rt, xml, bin, &m)`
    (tag-scans IR v11 `.xml` for Const `<data>` + legacy `<weights>`/`<biases>`
    with output-port precision/dim fallback; element types f32/f16/bf16/f64/
    i8..i64 map natively, uN/boolean/f8 opaque, sub-byte packed types fail;
    per-tensor `size == nelems × esize` + `.bin` span validated; reuses the
    streamed upload path). Public API doc in `include/vkmodel/vkmodel.h`;
    tests in `tests/test_vkmodel.c` (5-tensor synthetic IR round-trip +
-   2 rejection cases) PASS on RX 9070 XT.
-
-Current-task stack so far: toolkit-mapping reference written to
-`specs/toolkit-mapping-ai.md` (CUDA/ROCm/OpenVINO -> SDK components, with
-verified function-name map + gaps). **bf16 cast op deliverable complete**:
-truth table -> `shaders/vkmath/baseline/cast_f32_to_bf16.comp` +
-`cast_bf16_to_f32.comp` -> `VKMATH_KERNEL_CAST_*` (enum 25/26) +
-`s_shader_table` -> `vkmath.h` -> host truncation refs in `tests/test_vkmath.c`
-(`check_output_u16`) -> build + run on RX 9070 XT -> **PASS**.
-**qgemm subgroup tier deliverable complete**: truth table ->
-`shaders/vkblas/subgroup/qgemm_<fmt>.comp` for all 7 formats (subgroupShuffle
-x-broadcast, 32x8 warp tile) -> regen `src/vkblas/shaders_spv.h` via
-`compile_shaders.ps1` -> `vkblas.c` select_spirv + tier-aware grid -> public
-`vkblas_qgemm_get_tier` -> tier-routing checks in `tests/test_vkblas.c`
--> build + run on RX 9070 XT -> **PASS**, all 7 formats resolve to tier 1.
-**qgemm fp16 output storage deliverable complete**: `_f16` subgroup shader
-twins (f32 accumulate -> `float16_t` y/z) for all 7 formats, 7 public
-`vkblas_qgemm_*_f16` APIs (private dtype codes 32..38), 9 test cases with
-beta/f16-init/tolerance 1e-2 -> **PASS** on RX 9070 XT. Also shipped subgroup
-twins for plain hgemm/bgemm/dgemm (verified by `test_vkblas`).
-**OpenVINO IR loader deliverable complete**: truth table ->
-`vkmodel_load_openvino` in `src/vkmodel/vkmodel.c` (tag-scanner
-`vkmodel_ov_tag_t` + `VkModelOvLayer`/`VkModelOvBlob` host structs;
-`vkmodel_ov_dtypes` element-type map incl. numeric Type_t aliases; shape/
-size/span validation per tensor; legacy `<weights>` output-port fallback) ->
-public header `include/vkmodel/vkmodel.h` (+62 lines docs) ->
-`vkmodel_internal.h` (6 lines) -> `run_section_openvino` in
-`tests/test_vkmodel.c` (5-tensor IR: f32 [2,3,4], scalar f16, bf16 [8],
-legacy <weights> f32 [8,8], opaque u8 [16]; dtype/dtype_name/nelems/size
-asserts + byte-exact vkr_download round-trips + 2 rejection cases) ->
-build (MSVC Release + GCC/Strawberry `build/`) + run on RX 9070 XT ->
-**ALL PASS** (10/10 harnesses green on the canonical GCC build; conv1 IR
-shape fixed to [2,3,4] = 24 f32 elems = 96 B to match the .bin region).
-Remaining VKModel scope: no JIT IR conversion, no bf16 elementwise compute
-(VKMath).
-**vkr_create_device deliverable complete**: truth table (enable-only-what-the
-device-reports, pNext chain Vulkan 1.1-1.4 + VK_KHR_cooperative_matrix gated on
-`VAIT_COOPMATRIX`) -> `vkr_create_device()` in `src/vkruntime/vkruntime.c`
-queries the full feature/geometry property chain, mirrors `vkr_query_features`
-semantics for the enable set, restricts int64 atomics to Vulkan12Features,
-uses `shaderBufferFloat32Atomics`/`shaderBFloat16Type` correct member names,
-and only requests the `VK_AMD_*`/`VK_KHR_*`/`VK_EXT_*` extension names the PD
-advertises -> public header `include/vkruntime/vkruntime.h` (already declares it
--> `include/vkruntime/AGENTS.md` API block updated) -> `tests/test_vkruntime.c`
-section 12 (create succeeds, queue valid, detect agrees, float16/16-bit
-storage/push-descriptor/subgroup all enabled, invalid queue family rejected) ->
-build (GCC/Strawberry + MSVC) + `run_all.ps1` on RX 9070 XT -> **ALL PASS**
-(10/10 harnesses green). Remaining VKRuntime scope: no shader reflection (no
-`shaders/` subtree); cooperative matrix stays behind `VAIT_COOPMATRIX`.
+   2 rejection cases) PASS on RX 9070 XT. Remaining VKModel scope: no JIT IR
+   conversion.
+7. **DONE: `vkr_create_device` implemented** — public `vkr_create_device()` in
+   `src/vkruntime/vkruntime.c` queries the full feature/geometry property chain,
+   pNext-chains Vulkan 1.1-1.4 + `VK_KHR_cooperative_matrix` (gated on
+   `VAIT_COOPMATRIX`), and only requests extension names the PD advertises.
+   Tests in `tests/test_vkruntime.c` section 12 — build + run on RX 9070 XT ->
+   **PASS**. Remaining VKRuntime scope: no shader reflection (no `shaders/`
+   subtree); cooperative matrix stays behind `VAIT_COOPMATRIX`.
 
 Note on vendor naming: this stack uses the Vulkan `VK_AMD_*` vendor-extension
 nomenclature for AMD GPU features (e.g. `VK_AMD_SHADER_CORE_PROPERTIES(2)`,

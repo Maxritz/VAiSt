@@ -701,6 +701,7 @@ int main(void)
     op_t op_clip, op_abs, op_sign, op_exp, op_log, op_sqrt, op_rsqrt, op_pow;
     op_t op_cast_f2b, op_cast_b2f;
     op_t op_add_bf16, op_mul_bf16, op_add_mul_bf16, op_scale_bf16;
+    op_t op_relu_bf16, op_silu_bf16, op_gelu_bf16, op_sigmoid_bf16, op_tanh_bf16;
     memset(&op_softmax, 0, sizeof(op_softmax));
     memset(&op_rms, 0, sizeof(op_rms));
     memset(&op_layernorm, 0, sizeof(op_layernorm));
@@ -721,6 +722,11 @@ int main(void)
     memset(&op_mul_bf16, 0, sizeof(op_mul_bf16));
     memset(&op_add_mul_bf16, 0, sizeof(op_add_mul_bf16));
     memset(&op_scale_bf16, 0, sizeof(op_scale_bf16));
+    memset(&op_relu_bf16, 0, sizeof(op_relu_bf16));
+    memset(&op_silu_bf16, 0, sizeof(op_silu_bf16));
+    memset(&op_gelu_bf16, 0, sizeof(op_gelu_bf16));
+    memset(&op_sigmoid_bf16, 0, sizeof(op_sigmoid_bf16));
+    memset(&op_tanh_bf16, 0, sizeof(op_tanh_bf16));
 
     float in_a[TEST_NUM_ELEMENTS];
     float in_b[TEST_NUM_ELEMENTS];
@@ -753,6 +759,11 @@ int main(void)
     uint16_t exp_bf16_mul[TEST_NUM_ELEMENTS];
     uint16_t exp_bf16_add_mul[TEST_NUM_ELEMENTS];
     uint16_t exp_bf16_scale[TEST_NUM_ELEMENTS];
+    uint16_t exp_bf16_relu[TEST_NUM_ELEMENTS];
+    uint16_t exp_bf16_silu[TEST_NUM_ELEMENTS];
+    uint16_t exp_bf16_gelu[TEST_NUM_ELEMENTS];
+    uint16_t exp_bf16_sigmoid[TEST_NUM_ELEMENTS];
+    uint16_t exp_bf16_tanh[TEST_NUM_ELEMENTS];
 
     int overall_pass = 1;
     VkResult r;
@@ -906,7 +917,22 @@ int main(void)
                  TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_TRUE, &op_add_mul_bf16);
     if (r != VK_SUCCESS) goto cleanup;
     r = setup_op(h.device, h.mem, &h.cursor, h.align,
-                 TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_FALSE, &op_scale_bf16);
+                  TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_FALSE, &op_scale_bf16);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                  TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_FALSE, &op_relu_bf16);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                  TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_FALSE, &op_silu_bf16);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                  TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_FALSE, &op_gelu_bf16);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                  TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_FALSE, &op_sigmoid_bf16);
+    if (r != VK_SUCCESS) goto cleanup;
+    r = setup_op(h.device, h.mem, &h.cursor, h.align,
+                  TEST_NUM_ELEMENTS, TEST_NUM_ELEMENTS, VK_FALSE, &op_tanh_bf16);
     if (r != VK_SUCCESS) goto cleanup;
 
     /* ── 10. Fill inputs with known values ──────────────────────────────── */
@@ -1055,6 +1081,18 @@ int main(void)
         exp_bf16_add_mul[i] = f32_to_bf16_bits((a + b) * TEST_SCALE_ALPHA);
         exp_bf16_scale[i]   = f32_to_bf16_bits(a * TEST_SCALE_ALPHA);
     }
+    /* bf16 activations: compute in f32, truncate back to bf16 */
+    for (uint32_t i = 0; i < TEST_NUM_ELEMENTS; i++) {
+        float a = bf16_to_f32(bf16_in[i]);
+        exp_bf16_relu[i]    = f32_to_bf16_bits(a > 0.0f ? a : 0.0f);
+        exp_bf16_silu[i]    = f32_to_bf16_bits(a * (1.0f / (1.0f + expf(-a))));
+        {
+            float inner = 0.79788453f * (a + 0.044715f * a * a * a);
+            exp_bf16_gelu[i] = f32_to_bf16_bits(0.5f * a * (1.0f + tanhf(inner)));
+        }
+        exp_bf16_sigmoid[i] = f32_to_bf16_bits(1.0f / (1.0f + expf(-a)));
+        exp_bf16_tanh[i]    = f32_to_bf16_bits(tanhf(a));
+    }
     memcpy((char *)h.mapped + op_add_bf16.off_in_a, bf16_in, sizeof(bf16_in));
     memcpy((char *)h.mapped + op_add_bf16.off_in_b, bf16_in_b, sizeof(bf16_in_b));
     memcpy((char *)h.mapped + op_mul_bf16.off_in_a, bf16_in, sizeof(bf16_in));
@@ -1062,6 +1100,11 @@ int main(void)
     memcpy((char *)h.mapped + op_add_mul_bf16.off_in_a, bf16_in, sizeof(bf16_in));
     memcpy((char *)h.mapped + op_add_mul_bf16.off_in_b, bf16_in_b, sizeof(bf16_in_b));
     memcpy((char *)h.mapped + op_scale_bf16.off_in_a, bf16_in, sizeof(bf16_in));
+    memcpy((char *)h.mapped + op_relu_bf16.off_in_a, bf16_in, sizeof(bf16_in));
+    memcpy((char *)h.mapped + op_silu_bf16.off_in_a, bf16_in, sizeof(bf16_in));
+    memcpy((char *)h.mapped + op_gelu_bf16.off_in_a, bf16_in, sizeof(bf16_in));
+    memcpy((char *)h.mapped + op_sigmoid_bf16.off_in_a, bf16_in, sizeof(bf16_in));
+    memcpy((char *)h.mapped + op_tanh_bf16.off_in_a, bf16_in, sizeof(bf16_in));
 
     /* CPU reference values are also written into a mapped "second region"
        so the host-computed expected data is visible in the same memory.  */
@@ -1087,6 +1130,16 @@ int main(void)
     memcpy((char *)h.mapped + op_cast_f2b.off_expected, exp_bf16, sizeof(exp_bf16));
     memcpy((char *)h.mapped + op_cast_b2f.off_expected, exp_bf16_f32,
            sizeof(exp_bf16_f32));
+    memcpy((char *)h.mapped + op_relu_bf16.off_expected, exp_bf16_relu,
+           sizeof(exp_bf16_relu));
+    memcpy((char *)h.mapped + op_silu_bf16.off_expected, exp_bf16_silu,
+           sizeof(exp_bf16_silu));
+    memcpy((char *)h.mapped + op_gelu_bf16.off_expected, exp_bf16_gelu,
+           sizeof(exp_bf16_gelu));
+    memcpy((char *)h.mapped + op_sigmoid_bf16.off_expected, exp_bf16_sigmoid,
+           sizeof(exp_bf16_sigmoid));
+    memcpy((char *)h.mapped + op_tanh_bf16.off_expected, exp_bf16_tanh,
+           sizeof(exp_bf16_tanh));
 
     /* ── 12. Record all dispatches into one command buffer ──────────────── */
     VkCommandBufferBeginInfo begin_info;
@@ -1236,6 +1289,31 @@ int main(void)
                               TEST_SCALE_ALPHA,
                               op_scale_bf16.in_a, op_scale_bf16.out),
             "scale_bf16");
+
+        overall_pass &= record_dispatch(
+            vkmath_relu_bf16(h.math_ctx, h.cmd, TEST_NUM_ELEMENTS,
+                             op_relu_bf16.in_a, op_relu_bf16.out),
+            "relu_bf16");
+
+        overall_pass &= record_dispatch(
+            vkmath_silu_bf16(h.math_ctx, h.cmd, TEST_NUM_ELEMENTS,
+                             op_silu_bf16.in_a, op_silu_bf16.out),
+            "silu_bf16");
+
+        overall_pass &= record_dispatch(
+            vkmath_gelu_bf16(h.math_ctx, h.cmd, TEST_NUM_ELEMENTS,
+                             op_gelu_bf16.in_a, op_gelu_bf16.out),
+            "gelu_bf16");
+
+        overall_pass &= record_dispatch(
+            vkmath_sigmoid_bf16(h.math_ctx, h.cmd, TEST_NUM_ELEMENTS,
+                                op_sigmoid_bf16.in_a, op_sigmoid_bf16.out),
+            "sigmoid_bf16");
+
+        overall_pass &= record_dispatch(
+            vkmath_tanh_bf16(h.math_ctx, h.cmd, TEST_NUM_ELEMENTS,
+                             op_tanh_bf16.in_a, op_tanh_bf16.out),
+            "tanh_bf16");
     }
 
     /* Make the shader writes visible to the transfer readback copies.      */
@@ -1301,6 +1379,21 @@ int main(void)
                              TEST_NUM_ELEMENTS * sizeof(uint16_t));
         record_copy_readback(h.cmd, op_scale_bf16.out, h.staging,
                              op_scale_bf16.off_readback,
+                             TEST_NUM_ELEMENTS * sizeof(uint16_t));
+        record_copy_readback(h.cmd, op_relu_bf16.out, h.staging,
+                             op_relu_bf16.off_readback,
+                             TEST_NUM_ELEMENTS * sizeof(uint16_t));
+        record_copy_readback(h.cmd, op_silu_bf16.out, h.staging,
+                             op_silu_bf16.off_readback,
+                             TEST_NUM_ELEMENTS * sizeof(uint16_t));
+        record_copy_readback(h.cmd, op_gelu_bf16.out, h.staging,
+                             op_gelu_bf16.off_readback,
+                             TEST_NUM_ELEMENTS * sizeof(uint16_t));
+        record_copy_readback(h.cmd, op_sigmoid_bf16.out, h.staging,
+                             op_sigmoid_bf16.off_readback,
+                             TEST_NUM_ELEMENTS * sizeof(uint16_t));
+        record_copy_readback(h.cmd, op_tanh_bf16.out, h.staging,
+                             op_tanh_bf16.off_readback,
                              TEST_NUM_ELEMENTS * sizeof(uint16_t));
     }
 
@@ -1401,6 +1494,21 @@ int main(void)
         overall_pass &= check_output_u16("scale_bf16", h.mapped,
                                          op_scale_bf16.off_readback,
                                          exp_bf16_scale, TEST_NUM_ELEMENTS);
+        overall_pass &= check_output_u16("relu_bf16", h.mapped,
+                                         op_relu_bf16.off_readback,
+                                         exp_bf16_relu, TEST_NUM_ELEMENTS);
+        overall_pass &= check_output_u16("silu_bf16", h.mapped,
+                                         op_silu_bf16.off_readback,
+                                         exp_bf16_silu, TEST_NUM_ELEMENTS);
+        overall_pass &= check_output_u16("gelu_bf16", h.mapped,
+                                         op_gelu_bf16.off_readback,
+                                         exp_bf16_gelu, TEST_NUM_ELEMENTS);
+        overall_pass &= check_output_u16("sigmoid_bf16", h.mapped,
+                                         op_sigmoid_bf16.off_readback,
+                                         exp_bf16_sigmoid, TEST_NUM_ELEMENTS);
+        overall_pass &= check_output_u16("tanh_bf16", h.mapped,
+                                         op_tanh_bf16.off_readback,
+                                         exp_bf16_tanh, TEST_NUM_ELEMENTS);
     }
 
 cleanup:
@@ -1459,6 +1567,16 @@ cleanup:
     if (op_add_mul_bf16.out)  vkDestroyBuffer(h.device, op_add_mul_bf16.out, NULL);
     if (op_scale_bf16.in_a)   vkDestroyBuffer(h.device, op_scale_bf16.in_a, NULL);
     if (op_scale_bf16.out)    vkDestroyBuffer(h.device, op_scale_bf16.out, NULL);
+    if (op_relu_bf16.in_a)  vkDestroyBuffer(h.device, op_relu_bf16.in_a, NULL);
+    if (op_relu_bf16.out)   vkDestroyBuffer(h.device, op_relu_bf16.out, NULL);
+    if (op_silu_bf16.in_a)  vkDestroyBuffer(h.device, op_silu_bf16.in_a, NULL);
+    if (op_silu_bf16.out)   vkDestroyBuffer(h.device, op_silu_bf16.out, NULL);
+    if (op_gelu_bf16.in_a)  vkDestroyBuffer(h.device, op_gelu_bf16.in_a, NULL);
+    if (op_gelu_bf16.out)   vkDestroyBuffer(h.device, op_gelu_bf16.out, NULL);
+    if (op_sigmoid_bf16.in_a)  vkDestroyBuffer(h.device, op_sigmoid_bf16.in_a, NULL);
+    if (op_sigmoid_bf16.out)   vkDestroyBuffer(h.device, op_sigmoid_bf16.out, NULL);
+    if (op_tanh_bf16.in_a)  vkDestroyBuffer(h.device, op_tanh_bf16.in_a, NULL);
+    if (op_tanh_bf16.out)   vkDestroyBuffer(h.device, op_tanh_bf16.out, NULL);
     if (h.staging)     vkDestroyBuffer(h.device, h.staging, NULL);
     if (h.mapped)      vkUnmapMemory(h.device, h.mem);
     if (h.mem != VK_NULL_HANDLE) vkFreeMemory(h.device, h.mem, NULL);

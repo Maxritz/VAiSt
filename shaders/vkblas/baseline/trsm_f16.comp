@@ -1,0 +1,95 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : enable
+#extension GL_EXT_shader_float16 : enable
+#extension GL_EXT_scalar_block_layout : enable
+
+/**
+ * \file trsm_f16.comp
+ * \brief f16 variant of trsm: op(A) * X = alpha * B, f16 storage, f32 compute.
+ */
+
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    float alpha;
+    float beta;
+    uint  lda;
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  _pad2;
+    uint  _pad3;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufA { float16_t data_A[]; };
+layout(scalar, set = 0, binding = 1) restrict readonly buffer BufB { float16_t data_B[]; };
+layout(scalar, set = 0, binding = 2) restrict readonly buffer BufC { float16_t data_C[]; };
+layout(scalar, set = 0, binding = 3) buffer BufD { float16_t data_D[]; };   /* read/write: in-out X */
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    const uint n    = pc.m;
+    const uint rhs  = gl_WorkGroupID.y;
+    const uint batch = gl_WorkGroupID.x;
+    const bool lowerA   = (pc.transB == 0);
+    const bool unitDiag = (pc._pad0 == 1);
+
+    const uint aOff = batch * pc.strideA;
+    const uint bOff = batch * pc.strideB + rhs * pc.ldb;
+    const uint xOff = batch * pc.strideD + rhs * pc.ldd;
+
+    for (uint i = 0; i < n; ++i)
+        data_D[xOff + i] = float16_t(pc.alpha * float(data_B[bOff + i]));
+
+    if (pc.transA == 0) {
+        if (lowerA) {
+            for (uint i = 0; i < n; ++i) {
+                float sum = float(data_D[xOff + i]);
+                for (uint j = 0; j < i; ++j)
+                    sum -= float(data_A[aOff + i + j * pc.lda]) * float(data_D[xOff + j]);
+                float diag = unitDiag ? 1.0 : float(data_A[aOff + i + i * pc.lda]);
+                data_D[xOff + i] = float16_t(sum / diag);
+            }
+        } else {
+            for (int ii = int(n) - 1; ii >= 0; --ii) {
+                uint i = uint(ii);
+                float sum = float(data_D[xOff + i]);
+                for (uint j = i + 1; j < n; ++j)
+                    sum -= float(data_A[aOff + i + j * pc.lda]) * float(data_D[xOff + j]);
+                float diag = unitDiag ? 1.0 : float(data_A[aOff + i + i * pc.lda]);
+                data_D[xOff + i] = float16_t(sum / diag);
+            }
+        }
+    } else {
+        if (lowerA) {
+            for (int ii = int(n) - 1; ii >= 0; --ii) {
+                uint i = uint(ii);
+                float sum = float(data_D[xOff + i]);
+                for (uint j = i + 1; j < n; ++j)
+                    sum -= float(data_A[aOff + j + i * pc.lda]) * float(data_D[xOff + j]);
+                float diag = unitDiag ? 1.0 : float(data_A[aOff + i + i * pc.lda]);
+                data_D[xOff + i] = float16_t(sum / diag);
+            }
+        } else {
+            for (uint i = 0; i < n; ++i) {
+                float sum = float(data_D[xOff + i]);
+                for (uint j = 0; j < i; ++j)
+                    sum -= float(data_A[aOff + j + i * pc.lda]) * float(data_D[xOff + j]);
+                float diag = unitDiag ? 1.0 : float(data_A[aOff + i + i * pc.lda]);
+                data_D[xOff + i] = float16_t(sum / diag);
+            }
+        }
+    }
+}

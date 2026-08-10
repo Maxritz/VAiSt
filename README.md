@@ -75,6 +75,8 @@ VAiSt
 │   └── (per-lib tiers)   baseline/ (Vulkan 1.0 core), subgroup/ (VK_KHR_shader_subgroup),
 │                         coopmatrix/ (VK_KHR_cooperative_matrix)
 ├── specs/                Design docs, ISA reference, architecture notes
+│   ├── Common_Issues.md        GPU hang / device-lost / fence issues (catalog)
+│   └── (per-subsystem specs)
 ├── tests/                10 per-library test harnesses (build + run green on RX 9070 XT)
 └── docs/                 Pointers into specs/
 ```

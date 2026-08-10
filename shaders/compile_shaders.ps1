@@ -85,7 +85,7 @@ function Compile-Library {
                 [void]$sb.Append("0x{0:X8}, " -f $words[$i])
             }
             [void]$sb.AppendLine("};")
-            [void]$sb.AppendLine("static const size_t ${arrName}_size = sizeof(${arrName});")
+            [void]$sb.AppendLine("#define ${arrName}_size (sizeof(${arrName}))")
             [void]$sb.AppendLine("")
         }
     }

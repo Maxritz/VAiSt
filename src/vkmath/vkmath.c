@@ -69,6 +69,11 @@ static const shader_blob_t s_shader_table[] = {
     {VKMATH_KERNEL_POW,        VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_pow_f32,             vkmath_spv_baseline_pow_f32_size},
     {VKMATH_KERNEL_CAST_F32_TO_BF16, VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_cast_f32_to_bf16, vkmath_spv_baseline_cast_f32_to_bf16_size},
     {VKMATH_KERNEL_CAST_BF16_TO_F32, VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_cast_bf16_to_f32, vkmath_spv_baseline_cast_bf16_to_f32_size},
+    {VKMATH_KERNEL_RELU_BF16,        VKMATH_DTYPE_BF16, VKMATH_TIER_BASELINE, vkmath_spv_baseline_relu_bf16,         vkmath_spv_baseline_relu_bf16_size},
+    {VKMATH_KERNEL_SILU_BF16,        VKMATH_DTYPE_BF16, VKMATH_TIER_BASELINE, vkmath_spv_baseline_silu_bf16,         vkmath_spv_baseline_silu_bf16_size},
+    {VKMATH_KERNEL_GELU_BF16,        VKMATH_DTYPE_BF16, VKMATH_TIER_BASELINE, vkmath_spv_baseline_gelu_bf16,         vkmath_spv_baseline_gelu_bf16_size},
+    {VKMATH_KERNEL_SIGMOID_BF16,     VKMATH_DTYPE_BF16, VKMATH_TIER_BASELINE, vkmath_spv_baseline_sigmoid_bf16,      vkmath_spv_baseline_sigmoid_bf16_size},
+    {VKMATH_KERNEL_TANH_BF16,        VKMATH_DTYPE_BF16, VKMATH_TIER_BASELINE, vkmath_spv_baseline_tanh_bf16,         vkmath_spv_baseline_tanh_bf16_size},
     /* subgroup tier — only kernels with subgroup .comp files */
     {VKMATH_KERNEL_SILU,       VKMATH_DTYPE_F32, VKMATH_TIER_SUBGROUP, vkmath_spv_subgroup_silu_f32,          vkmath_spv_subgroup_silu_f32_size},
     {VKMATH_KERNEL_SILU,       VKMATH_DTYPE_F16, VKMATH_TIER_SUBGROUP, vkmath_spv_subgroup_silu_f16,          vkmath_spv_subgroup_silu_f16_size},
@@ -950,12 +955,69 @@ VkResult vkmath_cast_f32_to_bf16(VkMathContext *ctx, VkCommandBuffer cmd,
 }
 
 VkResult vkmath_cast_bf16_to_f32(VkMathContext *ctx, VkCommandBuffer cmd,
-                                 uint32_t num_elements, VkBuffer input,
-                                 VkBuffer output) {
+                                  uint32_t num_elements, VkBuffer input,
+                                  VkBuffer output) {
     vkmath_push_constants_t pc;
     memset(&pc, 0, sizeof(pc));
     pc.num_elements = num_elements;
     return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_CAST_BF16_TO_F32,
         VKMATH_DTYPE_F32, &pc, elem_to_groups(num_elements), 1, 1,
+        input, VK_NULL_HANDLE, output, 1);
+}
+
+/* ── Public API: bf16 activations ─────────────────────────────────────────── */
+
+VkResult vkmath_relu_bf16(VkMathContext *ctx, VkCommandBuffer cmd,
+                          uint32_t num_elements, VkBuffer input,
+                          VkBuffer output) {
+    vkmath_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_elements = num_elements;
+    return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_RELU_BF16,
+        VKMATH_DTYPE_BF16, &pc, elem_to_groups(num_elements), 1, 1,
+        input, VK_NULL_HANDLE, output, 1);
+}
+
+VkResult vkmath_silu_bf16(VkMathContext *ctx, VkCommandBuffer cmd,
+                          uint32_t num_elements, VkBuffer input,
+                          VkBuffer output) {
+    vkmath_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_elements = num_elements;
+    return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_SILU_BF16,
+        VKMATH_DTYPE_BF16, &pc, elem_to_groups(num_elements), 1, 1,
+        input, VK_NULL_HANDLE, output, 1);
+}
+
+VkResult vkmath_gelu_bf16(VkMathContext *ctx, VkCommandBuffer cmd,
+                          uint32_t num_elements, VkBuffer input,
+                          VkBuffer output) {
+    vkmath_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_elements = num_elements;
+    return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_GELU_BF16,
+        VKMATH_DTYPE_BF16, &pc, elem_to_groups(num_elements), 1, 1,
+        input, VK_NULL_HANDLE, output, 1);
+}
+
+VkResult vkmath_sigmoid_bf16(VkMathContext *ctx, VkCommandBuffer cmd,
+                             uint32_t num_elements, VkBuffer input,
+                             VkBuffer output) {
+    vkmath_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_elements = num_elements;
+    return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_SIGMOID_BF16,
+        VKMATH_DTYPE_BF16, &pc, elem_to_groups(num_elements), 1, 1,
+        input, VK_NULL_HANDLE, output, 1);
+}
+
+VkResult vkmath_tanh_bf16(VkMathContext *ctx, VkCommandBuffer cmd,
+                          uint32_t num_elements, VkBuffer input,
+                          VkBuffer output) {
+    vkmath_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.num_elements = num_elements;
+    return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_TANH_BF16,
+        VKMATH_DTYPE_BF16, &pc, elem_to_groups(num_elements), 1, 1,
         input, VK_NULL_HANDLE, output, 1);
 }

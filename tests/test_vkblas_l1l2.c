@@ -542,7 +542,7 @@ int main(void)
     }
 
     /* ── 8. VkBLASContext (shared, reused by vkblas_l1l2) ───────────────── */
-    r = vkblas_create_context(h.physical_device, h.device, &h.blas_ctx);
+    r = vkblas_create_context(h.instance, h.physical_device, h.device, &h.blas_ctx);
     if (r != VK_SUCCESS) {
         fprintf(stderr, "test_vkblas_l1l2: vkblas_create_context failed (%d)\n", (int)r);
         goto cleanup;

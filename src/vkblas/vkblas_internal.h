@@ -31,6 +31,30 @@
 #define VKBLAS_DTYPE_QGEMM_Q3K  10
 #define VKBLAS_DTYPE_QGEMM_IQ4XS 11
 
+/* ── BLAS L2/L3 extended-op dtype codes ─────────────────────────────────── *
+ * Each extended op gets its own (f32, f16) dtype pair so the pipeline cache
+ * never collides with GEMM, QGEMM, or qgemm-f16 codes.  Baseline tier only
+ * for now: syrk/herk/symm/hemm are plain dot-product formulations, and the
+ * triangular solves run one warp per RHS column; subgroup/coopmatrix tiers
+ * are follow-up work.
+ */
+#define VKBLAS_DTYPE_TRSV_F32 39
+#define VKBLAS_DTYPE_TRSV_F16 40
+#define VKBLAS_DTYPE_TRSM_F32 41
+#define VKBLAS_DTYPE_TRSM_F16 42
+#define VKBLAS_DTYPE_SYMV_F32 43
+#define VKBLAS_DTYPE_SYMV_F16 44
+#define VKBLAS_DTYPE_HEMV_F32 45
+#define VKBLAS_DTYPE_HEMV_F16 46
+#define VKBLAS_DTYPE_SYMM_F32 47
+#define VKBLAS_DTYPE_SYMM_F16 48
+#define VKBLAS_DTYPE_HEMM_F32 49
+#define VKBLAS_DTYPE_HEMM_F16 50
+#define VKBLAS_DTYPE_SYRK_F32 51
+#define VKBLAS_DTYPE_SYRK_F16 52
+#define VKBLAS_DTYPE_HERK_F32 53
+#define VKBLAS_DTYPE_HERK_F16 54
+
 /* ── Push constant block (must match GLSL push_constant layout, std140) ── */
 
 typedef struct {

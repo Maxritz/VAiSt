@@ -252,7 +252,7 @@ static const uint32_t vkfft_spv_baseline_fft_f16[] = {
 0x00000012, 0x00000016, 0x0004003D, 0x0000000D, 0x00000044, 0x00000043, 0x00050085, 0x0000000D,     
 0x00000045, 0x00000042, 0x00000044, 0x00050081, 0x0000000D, 0x00000046, 0x00000040, 0x00000045,     
 0x00050050, 0x0000000E, 0x00000047, 0x0000003B, 0x00000046, 0x000200FE, 0x00000047, 0x00010038, };
-static const size_t vkfft_spv_baseline_fft_f16_size = sizeof(vkfft_spv_baseline_fft_f16);
+#define vkfft_spv_baseline_fft_f16_size (sizeof(vkfft_spv_baseline_fft_f16))
 
 // baseline_fft_f32 (1801 words)
 static const uint32_t vkfft_spv_baseline_fft_f32[] = {
@@ -483,6 +483,6 @@ static const uint32_t vkfft_spv_baseline_fft_f32[] = {
 0x0000000D, 0x00000045, 0x00000042, 0x00000044, 0x00050081, 0x0000000D, 0x00000046, 0x00000040,     
 0x00000045, 0x00050050, 0x0000000E, 0x00000047, 0x0000003B, 0x00000046, 0x000200FE, 0x00000047,     
 0x00010038, };
-static const size_t vkfft_spv_baseline_fft_f32_size = sizeof(vkfft_spv_baseline_fft_f32);
+#define vkfft_spv_baseline_fft_f32_size (sizeof(vkfft_spv_baseline_fft_f32))
 
 #endif /* vkfft_SHADERS_SPV_H */

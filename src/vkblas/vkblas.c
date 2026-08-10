@@ -245,6 +245,56 @@ static const uint32_t* vkblas_select_spirv(VkBLASContext* ctx,
         case VKBLAS_DTYPE_QGEMM_IQ4XS:
             *out_size = vkblas_spv_baseline_qgemm_iq4xs_size;
             return vkblas_spv_baseline_qgemm_iq4xs;
+        /* ── Extended L2/L3 BLAS ops (baseline tier only; subgroup/coopmatrix
+           fall back to baseline because no specialist variants exist yet). */
+        case VKBLAS_DTYPE_TRSV_F32:
+            *out_size = vkblas_spv_baseline_trsv_f32_size;
+            return vkblas_spv_baseline_trsv_f32;
+        case VKBLAS_DTYPE_TRSV_F16:
+            *out_size = vkblas_spv_baseline_trsv_f16_size;
+            return vkblas_spv_baseline_trsv_f16;
+        case VKBLAS_DTYPE_TRSM_F32:
+            *out_size = vkblas_spv_baseline_trsm_f32_size;
+            return vkblas_spv_baseline_trsm_f32;
+        case VKBLAS_DTYPE_TRSM_F16:
+            *out_size = vkblas_spv_baseline_trsm_f16_size;
+            return vkblas_spv_baseline_trsm_f16;
+        case VKBLAS_DTYPE_SYMV_F32:
+            *out_size = vkblas_spv_baseline_symv_f32_size;
+            return vkblas_spv_baseline_symv_f32;
+        case VKBLAS_DTYPE_SYMV_F16:
+            *out_size = vkblas_spv_baseline_symv_f16_size;
+            return vkblas_spv_baseline_symv_f16;
+        case VKBLAS_DTYPE_HEMV_F32:
+            *out_size = vkblas_spv_baseline_hemv_f32_size;
+            return vkblas_spv_baseline_hemv_f32;
+        case VKBLAS_DTYPE_HEMV_F16:
+            *out_size = vkblas_spv_baseline_hemv_f16_size;
+            return vkblas_spv_baseline_hemv_f16;
+        case VKBLAS_DTYPE_SYMM_F32:
+            *out_size = vkblas_spv_baseline_symm_f32_size;
+            return vkblas_spv_baseline_symm_f32;
+        case VKBLAS_DTYPE_SYMM_F16:
+            *out_size = vkblas_spv_baseline_symm_f16_size;
+            return vkblas_spv_baseline_symm_f16;
+        case VKBLAS_DTYPE_HEMM_F32:
+            *out_size = vkblas_spv_baseline_hemm_f32_size;
+            return vkblas_spv_baseline_hemm_f32;
+        case VKBLAS_DTYPE_HEMM_F16:
+            *out_size = vkblas_spv_baseline_hemm_f16_size;
+            return vkblas_spv_baseline_hemm_f16;
+        case VKBLAS_DTYPE_SYRK_F32:
+            *out_size = vkblas_spv_baseline_syrk_f32_size;
+            return vkblas_spv_baseline_syrk_f32;
+        case VKBLAS_DTYPE_SYRK_F16:
+            *out_size = vkblas_spv_baseline_syrk_f16_size;
+            return vkblas_spv_baseline_syrk_f16;
+        case VKBLAS_DTYPE_HERK_F32:
+            *out_size = vkblas_spv_baseline_herk_f32_size;
+            return vkblas_spv_baseline_herk_f32;
+        case VKBLAS_DTYPE_HERK_F16:
+            *out_size = vkblas_spv_baseline_herk_f16_size;
+            return vkblas_spv_baseline_herk_f16;
         default:
             return NULL;
         }
@@ -1393,8 +1443,8 @@ static VkResult vkblas_qgemm_common(VkBLASContext* ctx,
     pc.m = (uint32_t)n;
     pc.n = (uint32_t)m;
     pc.k = (uint32_t)k;
-    pc.alpha = *alpha;
-    pc.beta  = *beta;
+    pc.alpha  = *alpha;
+    pc.beta   = *beta;
     if (pc.beta == 0.0f)
         pc.beta_is_zero = 1;
     pc.lda = (uint32_t)ldw;
@@ -1661,4 +1711,521 @@ VkResult vkblas_qgemm_iq4xs_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
     return vkblas_qgemm_common(ctx, cmd, m, n, k,
                                VKBLAS_DTYPE_QGEMM_F16_IQ4XS,
                                alpha, Wq, ldw, x, ldx, beta, y16, ldy);
+}
+
+/* ===========================================================================
+ * Extended BLAS Level-2 / Level-3 ops
+ *
+ * All eight ops reuse the shared vkblas_push_constants_t block and the
+ * 4-buffer descriptor set (binding 0=A, 1=B, 2=C, 3=D).  Field mapping is
+ * per-shader; see the .comp headers for exact semantics.  uplo/diag are
+ * packed into transB/_pad0 respectively.  Grid sizing handles the natural
+ * per-op shapes (1x1 for trsv/trsm, 64x1 for symv/hemv, 16x16 for the rest).
+ * ========================================================================== */
+
+static VkResult vkblas_ext_setup(VkBLASContext* ctx, VkCommandBuffer cmd,
+                                 uint32_t dtype, VkBuffer A, VkBuffer B,
+                                 VkBuffer C, VkBuffer D,
+                                 vkblas_push_constants_t* pc)
+{
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkResult r = vkblas_ensure_pipeline(ctx, dtype, 0, 0, VK_FALSE, &pipeline);
+    if (r != VK_SUCCESS)
+        return r;
+
+    VkDescriptorSet ds;
+    r = vkblas_alloc_descriptor_set(ctx, &ds);
+    if (r != VK_SUCCESS)
+        return r;
+
+    vkblas_write_descriptor_set(ctx, ds, A, B,
+                                (C != VK_NULL_HANDLE) ? C : A, D);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            ctx->pipeline_layout, 0, 1, &ds, 0, NULL);
+    vkblas_push_pc(cmd, ctx->pipeline_layout, pc);
+    return VK_SUCCESS;
+}
+
+static VkResult vkblas_trsv_common(VkBLASContext* ctx, VkCommandBuffer cmd,
+                                   VkBLASFillMode_t uplo,
+                                   VkBLASOperation_t transA,
+                                   VkBLASDiagType_t diag,
+                                   int32_t n, const float* alpha,
+                                   VkBuffer A, int32_t lda,
+                                   VkBuffer b, int32_t ldb, uint32_t dtype);
+
+static VkResult vkblas_trsm_common(VkBLASContext* ctx, VkCommandBuffer cmd,
+                                   VkBLASFillMode_t uplo,
+                                   VkBLASOperation_t transA,
+                                   VkBLASDiagType_t diag,
+                                   int32_t n, int32_t nrhs, const float* alpha,
+                                   VkBuffer A, int32_t lda,
+                                   VkBuffer B, int32_t ldb, uint32_t dtype);
+
+static VkResult vkblas_symm_common(VkBLASContext* ctx, VkCommandBuffer cmd,
+                                   VkBLASFillMode_t uplo,
+                                   int32_t n, int32_t k, const float* alpha,
+                                   VkBuffer A, int32_t lda,
+                                   VkBuffer B, int32_t ldb,
+                                   const float* beta,
+                                   VkBuffer C, int32_t ldc, uint32_t dtype);
+
+static VkResult vkblas_syrk_common(VkBLASContext* ctx, VkCommandBuffer cmd,
+                                   VkBLASFillMode_t uplo,
+                                   VkBLASOperation_t trans,
+                                   int32_t n, int32_t k, const float* alpha,
+                                   VkBuffer A, int32_t lda,
+                                   const float* beta,
+                                   VkBuffer C, int32_t ldc, uint32_t dtype);
+
+/* ── trsv: one workgroup per batch column (1 thread each) ───────────────── */
+
+VkResult vkblas_trsv_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo, VkBLASOperation_t transA,
+                         VkBLASDiagType_t diag,
+                         int32_t n, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer b, int32_t ldb)
+{
+    if (!ctx || !cmd || !A || !b || !alpha)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (n <= 0)
+        return VK_SUCCESS;
+
+    return vkblas_trsv_common(ctx, cmd, uplo, transA, diag, n, alpha,
+                              A, lda, b, ldb, VKBLAS_DTYPE_TRSV_F32);
+}
+
+VkResult vkblas_trsv_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo, VkBLASOperation_t transA,
+                         VkBLASDiagType_t diag,
+                         int32_t n, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer b, int32_t ldb)
+{
+    if (!ctx || !cmd || !A || !b || !alpha)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (n <= 0)
+        return VK_SUCCESS;
+
+    return vkblas_trsv_common(ctx, cmd, uplo, transA, diag, n, alpha,
+                              A, lda, b, ldb, VKBLAS_DTYPE_TRSV_F16);
+}
+
+static VkResult vkblas_trsv_common(VkBLASContext* ctx, VkCommandBuffer cmd,
+                                   VkBLASFillMode_t uplo,
+                                   VkBLASOperation_t transA,
+                                   VkBLASDiagType_t diag,
+                                   int32_t n, const float* alpha,
+                                   VkBuffer A, int32_t lda,
+                                   VkBuffer b, int32_t ldb, uint32_t dtype)
+{
+    (void)ldb;
+    vkblas_push_constants_t pc = {0};
+    pc.m      = (uint32_t)n;
+    pc.alpha  = (dtype == VKBLAS_DTYPE_TRSV_F16)
+                 ? vkblas_f16_to_f32(*(const uint16_t*)alpha) : *alpha;
+    pc.lda    = (uint32_t)lda;
+    pc.ldb    = 1u;                 /* incb */
+    pc.ldc    = 1u;                 /* incx */
+    pc.transA = (transA == VKBLAS_OP_N) ? 0 : 1;
+    pc.transB = (uplo == VKBLAS_FILL_LOWER) ? 0 : 1;
+    pc._pad0  = (diag == VKBLAS_DIAG_UNIT) ? 1 : 0;
+
+    VkResult r = vkblas_ext_setup(ctx, cmd, dtype, A, b, VK_NULL_HANDLE, b, &pc);
+    if (r != VK_SUCCESS)
+        return r;
+
+    vkCmdDispatch(cmd, 1, 1, 1);    /* batch=WorkGroupID.x * 1 workgroup */
+    return VK_SUCCESS;
+}
+
+/* ── trsm: one workgroup per RHS column (y), one batch (x) ─────────────── */
+
+VkResult vkblas_trsm_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo, VkBLASOperation_t transA,
+                         VkBLASDiagType_t diag,
+                         int32_t m, int32_t nrhs, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer B, int32_t ldb)
+{
+    if (!ctx || !cmd || !A || !B || !alpha)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m <= 0 || nrhs <= 0)
+        return VK_SUCCESS;
+
+    return vkblas_trsm_common(ctx, cmd, uplo, transA, diag, m, nrhs, alpha,
+                              A, lda, B, ldb, VKBLAS_DTYPE_TRSM_F32);
+}
+
+VkResult vkblas_trsm_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo, VkBLASOperation_t transA,
+                         VkBLASDiagType_t diag,
+                         int32_t m, int32_t nrhs, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer B, int32_t ldb)
+{
+    if (!ctx || !cmd || !A || !B || !alpha)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m <= 0 || nrhs <= 0)
+        return VK_SUCCESS;
+
+    return vkblas_trsm_common(ctx, cmd, uplo, transA, diag, m, nrhs, alpha,
+                              A, lda, B, ldb, VKBLAS_DTYPE_TRSM_F16);
+}
+
+static VkResult vkblas_trsm_common(VkBLASContext* ctx, VkCommandBuffer cmd,
+                                   VkBLASFillMode_t uplo,
+                                   VkBLASOperation_t transA,
+                                   VkBLASDiagType_t diag,
+                                   int32_t n, int32_t nrhs, const float* alpha,
+                                   VkBuffer A, int32_t lda,
+                                   VkBuffer B, int32_t ldb, uint32_t dtype)
+{
+    vkblas_push_constants_t pc = {0};
+    pc.m      = (uint32_t)n;        /* order of A */
+    pc.n      = (uint32_t)nrhs;     /* columns of B/X */
+    pc.alpha  = (dtype == VKBLAS_DTYPE_TRSM_F16)
+                 ? vkblas_f16_to_f32(*(const uint16_t*)alpha) : *alpha;
+    pc.lda    = (uint32_t)lda;
+    pc.ldb    = (uint32_t)ldb;
+    pc.ldd    = (uint32_t)ldb;      /* X written in place over B */
+    pc.transA = (transA == VKBLAS_OP_N) ? 0 : 1;
+    pc.transB = (uplo == VKBLAS_FILL_LOWER) ? 0 : 1;
+    pc._pad0  = (diag == VKBLAS_DIAG_UNIT) ? 1 : 0;
+
+    VkResult r = vkblas_ext_setup(ctx, cmd, dtype, A, B, VK_NULL_HANDLE, B, &pc);
+    if (r != VK_SUCCESS)
+        return r;
+
+    vkCmdDispatch(cmd, 1, (uint32_t)nrhs, 1);
+    return VK_SUCCESS;
+}
+
+/* ── symv / hemv: y = alpha*A*x + beta*y (64-thread workgroups) ──────────*/
+
+VkResult vkblas_symv_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo,
+                         int32_t n, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer x, int32_t incx,
+                         const float* beta,
+                         VkBuffer y, int32_t incy)
+{
+    if (!ctx || !cmd || !A || !x || !y || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (n <= 0)
+        return VK_SUCCESS;
+
+    (void)incx; (void)incy;
+    vkblas_push_constants_t pc = {0};
+    pc.m      = (uint32_t)n;
+    pc.alpha  = *alpha;
+    pc.beta   = *beta;
+    pc.lda    = (uint32_t)lda;
+    pc.ldb    = 1u;
+    pc.ldc    = 1u;
+    pc.ldd    = 1u;
+    pc.transB = (uplo == VKBLAS_FILL_LOWER) ? 0 : 1;
+    pc.beta_is_zero = (pc.beta == 0.0f) ? 1 : 0;
+
+    VkResult r = vkblas_ext_setup(ctx, cmd, VKBLAS_DTYPE_SYMV_F32, A, x, y, y, &pc);
+    if (r != VK_SUCCESS)
+        return r;
+    vkCmdDispatch(cmd, (uint32_t)((n + 63) / 64), 1, 1);
+    return VK_SUCCESS;
+}
+
+VkResult vkblas_symv_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo,
+                         int32_t n, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer x, int32_t incx,
+                         const float* beta,
+                         VkBuffer y, int32_t incy)
+{
+    if (!ctx || !cmd || !A || !x || !y || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (n <= 0)
+        return VK_SUCCESS;
+
+     (void)incx; (void)incy;
+    vkblas_push_constants_t pc = {0};
+    pc.m      = (uint32_t)n;
+    pc.alpha  = vkblas_f16_to_f32(*(const uint16_t*)alpha);
+    pc.beta   = vkblas_f16_to_f32(*(const uint16_t*)beta);
+    pc.lda    = (uint32_t)lda;
+    pc.ldb    = 1u;
+    pc.ldc    = 1u;
+    pc.ldd    = 1u;
+    pc.transB = (uplo == VKBLAS_FILL_LOWER) ? 0 : 1;
+    pc.beta_is_zero = (pc.beta == 0.0f) ? 1 : 0;
+
+    VkResult r = vkblas_ext_setup(ctx, cmd, VKBLAS_DTYPE_SYMV_F16, A, x, y, y, &pc);
+    if (r != VK_SUCCESS)
+        return r;
+    vkCmdDispatch(cmd, (uint32_t)((n + 63) / 64), 1, 1);
+    return VK_SUCCESS;
+}
+
+VkResult vkblas_hemv_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo,
+                         int32_t n, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer x, int32_t incx,
+                         const float* beta,
+                         VkBuffer y, int32_t incy)
+{
+    if (!ctx || !cmd || !A || !x || !y || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (n <= 0)
+        return VK_SUCCESS;
+
+    (void)incx; (void)incy;
+    vkblas_push_constants_t pc = {0};
+    pc.m      = (uint32_t)n;
+    pc.alpha  = *alpha;
+    pc.beta   = *beta;
+    pc.lda    = (uint32_t)lda;
+    pc.ldb    = 1u;
+    pc.ldc    = 1u;
+    pc.ldd    = 1u;
+    pc.transB = (uplo == VKBLAS_FILL_LOWER) ? 0 : 1;
+    pc.beta_is_zero = (pc.beta == 0.0f) ? 1 : 0;
+
+    VkResult r = vkblas_ext_setup(ctx, cmd, VKBLAS_DTYPE_HEMV_F32, A, x, y, y, &pc);
+    if (r != VK_SUCCESS)
+        return r;
+    vkCmdDispatch(cmd, (uint32_t)((n + 63) / 64), 1, 1);
+    return VK_SUCCESS;
+}
+
+VkResult vkblas_hemv_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo,
+                         int32_t n, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer x, int32_t incx,
+                         const float* beta,
+                         VkBuffer y, int32_t incy)
+{
+    if (!ctx || !cmd || !A || !x || !y || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (n <= 0)
+        return VK_SUCCESS;
+
+     (void)incx; (void)incy;
+    vkblas_push_constants_t pc = {0};
+    pc.m      = (uint32_t)n;
+    pc.alpha  = vkblas_f16_to_f32(*(const uint16_t*)alpha);
+    pc.beta   = vkblas_f16_to_f32(*(const uint16_t*)beta);
+    pc.lda    = (uint32_t)lda;
+    pc.ldb    = 1u;
+    pc.ldc    = 1u;
+    pc.ldd    = 1u;
+    pc.transB = (uplo == VKBLAS_FILL_LOWER) ? 0 : 1;
+    pc.beta_is_zero = (pc.beta == 0.0f) ? 1 : 0;
+
+    VkResult r = vkblas_ext_setup(ctx, cmd, VKBLAS_DTYPE_HEMV_F16, A, x, y, y, &pc);
+    if (r != VK_SUCCESS)
+        return r;
+    vkCmdDispatch(cmd, (uint32_t)((n + 63) / 64), 1, 1);
+    return VK_SUCCESS;
+}
+
+/* ── symm / hemm: C = alpha*A*B + beta*C (16x16 tiles) ─────────────────── */
+
+static VkResult vkblas_symm_common(VkBLASContext* ctx, VkCommandBuffer cmd,
+                                   VkBLASFillMode_t uplo,
+                                   int32_t n, int32_t k, const float* alpha,
+                                   VkBuffer A, int32_t lda,
+                                   VkBuffer B, int32_t ldb,
+                                   const float* beta,
+                                   VkBuffer C, int32_t ldc, uint32_t dtype)
+{
+    vkblas_push_constants_t pc = {0};
+    pc.m      = (uint32_t)n;    /* rows of C and order of symmetric A */
+    pc.k      = (uint32_t)k;    /* cols of C and B */
+    pc.alpha  = (dtype == VKBLAS_DTYPE_SYMM_F16 || dtype == VKBLAS_DTYPE_HEMM_F16)
+                 ? vkblas_f16_to_f32(*(const uint16_t*)alpha) : *alpha;
+    pc.beta   = (dtype == VKBLAS_DTYPE_SYMM_F16 || dtype == VKBLAS_DTYPE_HEMM_F16)
+                 ? vkblas_f16_to_f32(*(const uint16_t*)beta) : *beta;
+     pc.lda    = (uint32_t)lda;
+     pc.ldb    = (uint32_t)ldb;
+     pc.ldc    = (uint32_t)ldc;
+     pc.ldd    = (uint32_t)ldc;  /* written in place over C */
+    pc.transB = (uplo == VKBLAS_FILL_LOWER) ? 0 : 1;
+    pc.beta_is_zero = (pc.beta == 0.0f) ? 1 : 0;
+
+    VkResult r = vkblas_ext_setup(ctx, cmd, dtype, A, B, C, C, &pc);
+    if (r != VK_SUCCESS)
+        return r;
+
+    /* i (C row) <- WorkGroupID.y over n;  j (C col) <- WorkGroupID.x over k */
+    uint32_t gridX = (uint32_t)((k + VKBLAS_TILE_N - 1) / VKBLAS_TILE_N);
+    uint32_t gridY = (uint32_t)((n + VKBLAS_TILE_M - 1) / VKBLAS_TILE_M);
+    vkCmdDispatch(cmd, gridX, gridY, 1);
+    return VK_SUCCESS;
+}
+
+VkResult vkblas_symm_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo,
+                         int32_t n, int32_t k, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer B, int32_t ldb,
+                         const float* beta,
+                         VkBuffer C, int32_t ldc)
+{
+    if (!ctx || !cmd || !A || !B || !C || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (n <= 0 || k <= 0)
+        return VK_SUCCESS;
+    return vkblas_symm_common(ctx, cmd, uplo, n, k, alpha, A, lda, B, ldb,
+                              beta, C, ldc, VKBLAS_DTYPE_SYMM_F32);
+}
+
+VkResult vkblas_symm_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo,
+                         int32_t n, int32_t k, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer B, int32_t ldb,
+                         const float* beta,
+                         VkBuffer C, int32_t ldc)
+{
+    if (!ctx || !cmd || !A || !B || !C || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (n <= 0 || k <= 0)
+        return VK_SUCCESS;
+    return vkblas_symm_common(ctx, cmd, uplo, n, k, alpha, A, lda, B, ldb,
+                              beta, C, ldc, VKBLAS_DTYPE_SYMM_F16);
+}
+
+VkResult vkblas_hemm_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo,
+                         int32_t n, int32_t k, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer B, int32_t ldb,
+                         const float* beta,
+                         VkBuffer C, int32_t ldc)
+{
+    if (!ctx || !cmd || !A || !B || !C || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (n <= 0 || k <= 0)
+        return VK_SUCCESS;
+    return vkblas_symm_common(ctx, cmd, uplo, n, k, alpha, A, lda, B, ldb,
+                              beta, C, ldc, VKBLAS_DTYPE_HEMM_F32);
+}
+
+VkResult vkblas_hemm_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo,
+                         int32_t n, int32_t k, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer B, int32_t ldb,
+                         const float* beta,
+                         VkBuffer C, int32_t ldc)
+{
+    if (!ctx || !cmd || !A || !B || !C || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (n <= 0 || k <= 0)
+        return VK_SUCCESS;
+    return vkblas_symm_common(ctx, cmd, uplo, n, k, alpha, A, lda, B, ldb,
+                              beta, C, ldc, VKBLAS_DTYPE_HEMM_F16);
+}
+
+/* ── syrk / herk: C = alpha * op(A) * op(A)^T + beta * C (16x16 tiles) ─── */
+
+static VkResult vkblas_syrk_common(VkBLASContext* ctx, VkCommandBuffer cmd,
+                                   VkBLASFillMode_t uplo,
+                                   VkBLASOperation_t trans,
+                                   int32_t n, int32_t k, const float* alpha,
+                                   VkBuffer A, int32_t lda,
+                                   const float* beta,
+                                   VkBuffer C, int32_t ldc, uint32_t dtype)
+{
+    vkblas_push_constants_t pc = {0};
+    pc.m      = (uint32_t)n;
+    pc.k      = (uint32_t)k;
+    pc.alpha  = (dtype == VKBLAS_DTYPE_SYRK_F16 || dtype == VKBLAS_DTYPE_HERK_F16)
+                 ? vkblas_f16_to_f32(*(const uint16_t*)alpha) : *alpha;
+    pc.beta   = (dtype == VKBLAS_DTYPE_SYRK_F16 || dtype == VKBLAS_DTYPE_HERK_F16)
+                 ? vkblas_f16_to_f32(*(const uint16_t*)beta) : *beta;
+    pc.lda    = (uint32_t)lda;
+    pc.ldc    = (uint32_t)ldc;
+    pc.ldd    = (uint32_t)ldc;  /* C written in place */
+    pc.transA = (trans == VKBLAS_OP_N) ? 0 : 1;
+    pc.transB = (uplo == VKBLAS_FILL_LOWER) ? 0 : 1;
+    pc.beta_is_zero = (pc.beta == 0.0f) ? 1 : 0;
+
+    VkResult r = vkblas_ext_setup(ctx, cmd, dtype, A, A, C, C, &pc);
+    if (r != VK_SUCCESS)
+        return r;
+
+    uint32_t grid = (uint32_t)((n + VKBLAS_TILE_M - 1) / VKBLAS_TILE_M);
+    vkCmdDispatch(cmd, grid, grid, 1);
+    return VK_SUCCESS;
+}
+
+VkResult vkblas_syrk_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo, VkBLASOperation_t trans,
+                         int32_t n, int32_t k,
+                         const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         const float* beta,
+                         VkBuffer C, int32_t ldc)
+{
+    if (!ctx || !cmd || !A || !C || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (n <= 0 || k <= 0)
+        return VK_SUCCESS;
+    return vkblas_syrk_common(ctx, cmd, uplo, trans, n, k, alpha, A, lda,
+                              beta, C, ldc, VKBLAS_DTYPE_SYRK_F32);
+}
+
+VkResult vkblas_syrk_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo, VkBLASOperation_t trans,
+                         int32_t n, int32_t k,
+                         const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         const float* beta,
+                         VkBuffer C, int32_t ldc)
+{
+    if (!ctx || !cmd || !A || !C || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (n <= 0 || k <= 0)
+        return VK_SUCCESS;
+    return vkblas_syrk_common(ctx, cmd, uplo, trans, n, k, alpha, A, lda,
+                              beta, C, ldc, VKBLAS_DTYPE_SYRK_F16);
+}
+
+VkResult vkblas_herk_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo, VkBLASOperation_t trans,
+                         int32_t n, int32_t k,
+                         const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         const float* beta,
+                         VkBuffer C, int32_t ldc)
+{
+    if (!ctx || !cmd || !A || !C || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (n <= 0 || k <= 0)
+        return VK_SUCCESS;
+    return vkblas_syrk_common(ctx, cmd, uplo, trans, n, k, alpha, A, lda,
+                              beta, C, ldc, VKBLAS_DTYPE_HERK_F32);
+}
+
+VkResult vkblas_herk_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo, VkBLASOperation_t trans,
+                         int32_t n, int32_t k,
+                         const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         const float* beta,
+                         VkBuffer C, int32_t ldc)
+{
+    if (!ctx || !cmd || !A || !C || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (n <= 0 || k <= 0)
+        return VK_SUCCESS;
+    return vkblas_syrk_common(ctx, cmd, uplo, trans, n, k, alpha, A, lda,
+                              beta, C, ldc, VKBLAS_DTYPE_HERK_F16);
 }

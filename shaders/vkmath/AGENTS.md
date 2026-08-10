@@ -87,3 +87,16 @@ data_out[idx] = uint16_t(floatBitsToUint(r) >> 16);
 Push-constant block identical to the f32/f16 shaders (`pc.num_elements`,
 `pc.alpha` used by add_mul/scale). `add_mul_bf16.comp` and `scale_bf16.comp`
 apply `pc.alpha` for the `(a+b)*alpha` / `alpha*a` forms. Baseline-only tier.
+
+### bf16 activation shaders (`relu_bf16.comp`, `silu_bf16.comp`,
+`gelu_bf16.comp`, `sigmoid_bf16.comp`, `tanh_bf16.comp`)
+Same bf16 representation as the casts/elementwise: `uint16_t` in `layout(scalar)`
+SSBOs, `StorageBuffer16BitAccess`. Compute runs in f32, results truncate back
+to bf16:
+```
+float  v = uintBitsToFloat(uint(data[idx]) << 16);
+float  r = /* activation in f32 (max(0,v) / v*sigmoid(v) / gelu / sigmoid / tanh) */;
+data_out[idx] = uint16_t(floatBitsToUint(r) >> 16);
+```
+Push-constant block identical to the other bf16 shaders (`pc.num_elements`).
+Baseline-only tier; no subgroup variant (elementwise, no benefit).

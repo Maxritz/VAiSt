@@ -46,6 +46,26 @@ typedef enum {
 } VkBLASPointerMode_t;
 
 /**
+ * \brief Triangle selector for triangular/symmetric storage formats.
+ *
+ * Used by trsv, trsm, symv, hemv, symm, hemm, syrk, herk.
+ */
+typedef enum {
+    VKBLAS_FILL_LOWER = 0,  /**< Only the lower triangle is authoritative. */
+    VKBLAS_FILL_UPPER = 1,  /**< Only the upper triangle is authoritative. */
+} VkBLASFillMode_t;
+
+/**
+ * \brief Diagonal storage mode for triangular-matrix formats.
+ *
+ * Only used by trsv and trsm.
+ */
+typedef enum {
+    VKBLAS_DIAG_NON_UNIT = 0,  /**< Diagonal entries are read from A. */
+    VKBLAS_DIAG_UNIT     = 1,  /**< Diagonal entries implied 1 (not read). */
+} VkBLASDiagType_t;
+
+/**
  * \brief Computation type for mixed-precision GEMM-ex operations.
  *
  * Mirrors hipblasComputeType_t. The computation type specifies the precision
@@ -117,15 +137,18 @@ typedef struct {
  * and caches them for subsequent dispatches. No device memory is allocated
  * by this function; the caller retains full memory ownership.
  *
+ * \param instance        Vulkan instance (used for instance-level extension
+ *                        queries such as cooperative-matrix enumeration).
  * \param physicalDevice Physical device handle (for capability queries).
  * \param device          Logical device the context will bind to.
  * \retval VK_SUCCESS On success.
  * \retval VK_ERROR_OUT_OF_HOST_MEMORY Host allocation failed.
  * \retval VK_ERROR_INITIALIZATION_FAILED Device queries or shader load failed.
  */
-VkResult vkblas_create_context(VkPhysicalDevice physicalDevice,
-                              VkDevice device,
-                              VkBLASContext** pContext);
+VkResult vkblas_create_context(VkInstance instance,
+                               VkPhysicalDevice physicalDevice,
+                               VkDevice device,
+                               VkBLASContext** pContext);
 
 /**
  * \brief Destroy a VkBLASContext and release all cached pipelines / descriptors.
@@ -912,6 +935,194 @@ VkResult vkblas_qgemm_iq4xs_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
                                 const float* alpha, VkBuffer Wq, int32_t ldw,
                                 VkBuffer x, int32_t ldx,
                                 const float* beta, VkBuffer y16, int32_t ldy);
+
+/* ===========================================================================
+ * Extended BLAS Level-2 / Level-3 ops
+ *
+ * These mirror rocBLAS / cuBLAS conventions: A, B, C, D, x, y are VkBuffer
+ * handles, column-major layout, and alpha/beta are host-pointer scalars.
+ * The triangular solves (trsv, trsm) OVERWRITE the RHS buffer with the
+ * solution.  All f16 variants use f32 accumulation internally and narrow
+ * to fp16 only at the final store. The f16 ext BLAS APIs (trsv/trsm/symv/
+ * hemv/symm/hemm/syrk/herk) interpret alpha/beta pointers as uint16_t f16
+ * bit patterns and promote them to f32 internally via `vkblas_f16_to_f32`.
+ * ========================================================================== */
+
+/**
+ * \brief Triangular solve for vectors (BLAS-2).
+ *
+ * Solves  op(A) * x = alpha * b  in place: the input vector b is scaled by
+ * alpha and then overwritten with the solution x. b and x use the same
+ * buffer handle.
+ *
+ * \param ctx     VKBLAS context.
+ * \param cmd     Vulkan command buffer (compute commands are recorded here).
+ * \param uplo    Which triangle of A is authoritative (lower or upper).
+ * \param transA  Whether op(A) = A or op(A) = A^T.
+ * \param diag    Whether the diagonal of A is all-ones (not read from A).
+ * \param n       Order of A (square: A is n x n). No-op if n <= 0.
+ * \param alpha   Scale for the RHS vector b (host scalar).
+ * \param A       VkBuffer containing the n x n triangular matrix, column-major.
+ * \param lda     Leading dimension of A (>= n).
+ * \param b       VkBuffer containing b; overwritten with x.
+ * \param ldb     Leading dimension/stride for b (must equal n for a contiguous vector).
+ */
+VkResult vkblas_trsv_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo, VkBLASOperation_t transA,
+                         VkBLASDiagType_t diag,
+                         int32_t n, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer b, int32_t ldb);
+VkResult vkblas_trsv_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo, VkBLASOperation_t transA,
+                         VkBLASDiagType_t diag,
+                         int32_t n, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer b, int32_t ldb);
+
+/**
+ * \brief Triangular solve for matrices (BLAS-3).
+ *
+ * Solves  op(A) * X = alpha * B  column-by-column: each column of B is
+ * solved as an independent trsv. B is overwritten with X.
+ *
+ * \param m       Order of A (square n = m, since A is m x m; B is m x nrhs).
+ * \param nrhs    Number of columns in B.
+ */
+VkResult vkblas_trsm_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo, VkBLASOperation_t transA,
+                         VkBLASDiagType_t diag,
+                         int32_t m, int32_t nrhs, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer B, int32_t ldb);
+VkResult vkblas_trsm_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo, VkBLASOperation_t transA,
+                         VkBLASDiagType_t diag,
+                         int32_t m, int32_t nrhs, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer B, int32_t ldb);
+
+/**
+ * \brief Symmetric (real) matrix-vector product (BLAS-2): y = alpha*A*x + beta*y.
+ */
+VkResult vkblas_symv_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo,
+                         int32_t n, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer x, int32_t incx,
+                         const float* beta,
+                         VkBuffer y, int32_t incy);
+VkResult vkblas_symv_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo,
+                         int32_t n, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer x, int32_t incx,
+                         const float* beta,
+                         VkBuffer y, int32_t incy);
+
+/**
+ * \brief Hermitian matrix-vector product (BLAS-2): y = alpha*A*x + beta*y.
+ *
+ * Identical to symv when A is real-valued (f32/f16).
+ */
+VkResult vkblas_hemv_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo,
+                         int32_t n, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer x, int32_t incx,
+                         const float* beta,
+                         VkBuffer y, int32_t incy);
+VkResult vkblas_hemv_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo,
+                         int32_t n, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer x, int32_t incx,
+                         const float* beta,
+                         VkBuffer y, int32_t incy);
+
+/**
+ * \brief Symmetric matrix-matrix multiply (BLAS-3): C = alpha*A*B + beta*C.
+ *
+ * A is symmetric on the left with leading dimension lda; B is m x k.
+ * A is square (m x m).  Note the dimensionality convention: pc.m carries the
+ * order of A and the row count of both B and C, while pc.k carries the
+ * column count of B and C.
+ */
+VkResult vkblas_symm_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo,
+                         int32_t m, int32_t n, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer B, int32_t ldb,
+                         const float* beta,
+                         VkBuffer C, int32_t ldc);
+VkResult vkblas_symm_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo,
+                         int32_t m, int32_t n, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer B, int32_t ldb,
+                         const float* beta,
+                         VkBuffer C, int32_t ldc);
+
+/**
+ * \brief Hermitian matrix-matrix multiply (BLAS-3): C = alpha*A*B + beta*C.
+ *
+ * Identical to symm when A is real-valued (f32/f16).
+ */
+VkResult vkblas_hemm_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo,
+                         int32_t m, int32_t n, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer B, int32_t ldb,
+                         const float* beta,
+                         VkBuffer C, int32_t ldc);
+VkResult vkblas_hemm_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo,
+                         int32_t m, int32_t n, const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         VkBuffer B, int32_t ldb,
+                         const float* beta,
+                         VkBuffer C, int32_t ldc);
+
+/**
+ * \brief Symmetric rank-k update (BLAS-3): C = alpha * op(A) * op(A)^T + beta * C.
+ *
+ * C is n x n, symmetric. Only the selected triangle is read/written; the
+ * shader mirrors the off-diagonal half so the output C is fully symmetric.
+ */
+VkResult vkblas_syrk_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo, VkBLASOperation_t trans,
+                         int32_t n, int32_t k,
+                         const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         const float* beta,
+                         VkBuffer C, int32_t ldc);
+VkResult vkblas_syrk_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo, VkBLASOperation_t trans,
+                         int32_t n, int32_t k,
+                         const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         const float* beta,
+                         VkBuffer C, int32_t ldc);
+
+/**
+ * \brief Hermitian rank-k update (BLAS-3): C = alpha * op(A) * op(A)^T + beta * C.
+ *
+ * Identical to syrk when A is real-valued (f32/f16).
+ */
+VkResult vkblas_herk_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo, VkBLASOperation_t trans,
+                         int32_t n, int32_t k,
+                         const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         const float* beta,
+                         VkBuffer C, int32_t ldc);
+VkResult vkblas_herk_f16(VkBLASContext* ctx, VkCommandBuffer cmd,
+                         VkBLASFillMode_t uplo, VkBLASOperation_t trans,
+                         int32_t n, int32_t k,
+                         const float* alpha,
+                         VkBuffer A, int32_t lda,
+                         const float* beta,
+                         VkBuffer C, int32_t ldc);
 
 /* ===========================================================================
  * Pointer mode control

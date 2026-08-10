@@ -1,0 +1,88 @@
+#version 450
+
+/**
+ * \file syrk_f32.comp
+ * \brief Symmetric rank-k update (BLAS Level 3):  C = alpha * op(A) * op(A)^T + beta * C
+ *
+ * One thread per output cell of the lower (or upper) triangle of C; the
+ * off-diagonal half is mirrored so the full matrix is written once.
+ * Column-major layout.
+ *
+ * Field mapping (reuses the shared vkblas push-constant block):
+ *   pc.m      = n (C is n x n)
+ *   pc.k      = k (reduction dimension; A is op-sized n x k)
+ *   pc.lda    = leading dim of A, pc.ldc = leading dim of C
+ *   pc.transA = 0 => op(A)=A (A is n x k), 1 => op(A)=A^T (A is k x n)
+ *   pc.transB = uplo: 0 lower, 1 upper (which triangle of C to author)
+ */
+
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    float alpha;
+    float beta;
+    uint  lda;
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  _pad2;
+    uint  _pad3;
+} pc;
+
+layout(set = 0, binding = 0) restrict readonly buffer BufA { float data_A[]; };
+layout(set = 0, binding = 1) restrict readonly buffer BufB { float data_B[]; };
+layout(set = 0, binding = 2) restrict readonly buffer BufC { float data_C[]; };
+layout(set = 0, binding = 3) writeonly  buffer BufD { float data_D[]; };
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    const uint n = pc.m;
+    const uint k = pc.k;
+    const bool fillLower = (pc.transB == 0);
+    const bool aIsNbyK   = (pc.transA == 0);
+    const uint batch = gl_WorkGroupID.z;
+    const uint aOff  = batch * pc.strideA;
+    const uint cOff  = batch * pc.strideC;
+    const uint dOff  = batch * pc.strideD;
+
+    const uint i = gl_WorkGroupID.y * 16 + gl_LocalInvocationID.y;   /* row of C */
+    const uint j = gl_WorkGroupID.x * 16 + gl_LocalInvocationID.x;   /* col of C */
+    if (i >= n || j >= n) return;
+
+    /* Compute only the authoritative triangle, mirror it once. */
+    bool inAuthLower = (i > j);
+    bool isDiagonal = (i == j);
+    if (!isDiagonal && fillLower != inAuthLower) {
+        /* Authored by the mirrored twin thread; nothing to do. */
+        return;
+    }
+
+    float acc = 0.0;
+    for (uint p = 0; p < k; ++p) {
+        float a_ip = aIsNbyK ? data_A[aOff + i + p * pc.lda]
+                             : data_A[aOff + p + i * pc.lda];
+        float a_jp = aIsNbyK ? data_A[aOff + j + p * pc.lda]
+                             : data_A[aOff + p + j * pc.lda];
+        acc += a_ip * a_jp;
+    }
+
+    float c_ij = (pc.beta_is_zero == 1) ? 0.0 : data_C[cOff + j * pc.ldc + i];
+    float res  = pc.alpha * acc + pc.beta * c_ij;
+    data_D[dOff + j * pc.ldd + i] = res;   /* auth cell (i in auth triangle) */
+    if (i != j) {
+        /* Mirror to the opposite triangle so C stays symmetric. */
+        data_D[dOff + i * pc.ldd + j] = res;
+    }
+}

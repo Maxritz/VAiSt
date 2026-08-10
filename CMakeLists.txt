@@ -18,6 +18,13 @@ if(NOT Vulkan_FOUND)
     message(FATAL_ERROR "Vulkan SDK not found. Set VULKAN_SDK or install the Vulkan SDK.")
 endif()
 
+# Warning flags: MSVC accepts neither -Wall semantics nor -Wextra; map to /W4.
+if(MSVC)
+    set(VAIT_WARN_FLAGS /W4)
+else()
+    set(VAIT_WARN_FLAGS -Wall -Wextra)
+endif()
+
 # ── Shader header regeneration ──────────────────────────────────────────────
 # The embedded SPIR-V headers (src/*/shaders_spv.h) are checked into the repo,
 # but can be regenerated with compile_shaders.ps1. A custom target makes this
@@ -38,7 +45,7 @@ target_include_directories(vkruntime PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
 )
 target_link_libraries(vkruntime PUBLIC Vulkan::Vulkan)
-target_compile_options(vkruntime PRIVATE -Wall -Wextra)
+target_compile_options(vkruntime PRIVATE ${VAIT_WARN_FLAGS})
 
 # ── VKMath library ──────────────────────────────────────────────────────────
 add_library(vkmath STATIC
@@ -52,7 +59,7 @@ target_include_directories(vkmath PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
 )
 target_link_libraries(vkmath PUBLIC Vulkan::Vulkan vkruntime)
-target_compile_options(vkmath PRIVATE -Wall -Wextra)
+target_compile_options(vkmath PRIVATE ${VAIT_WARN_FLAGS})
 
 # ── VKBLAS library ──────────────────────────────────────────────────────────
 add_library(vkblas STATIC
@@ -66,7 +73,7 @@ target_include_directories(vkblas PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
 )
 target_link_libraries(vkblas PUBLIC Vulkan::Vulkan vkruntime)
-target_compile_options(vkblas PRIVATE -Wall -Wextra)
+target_compile_options(vkblas PRIVATE ${VAIT_WARN_FLAGS})
 
 # ── Test harnesses ──────────────────────────────────────────────────────────
 include(CTest)
@@ -99,7 +106,7 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
     )
     target_link_libraries(vkquant PUBLIC Vulkan::Vulkan vkruntime)
-    target_compile_options(vkquant PRIVATE -Wall -Wextra)
+    target_compile_options(vkquant PRIVATE ${VAIT_WARN_FLAGS})
 
     add_executable(test_vkquant tests/test_vkquant.c)
     target_include_directories(test_vkquant PRIVATE
@@ -119,7 +126,7 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
     )
     target_link_libraries(vkrand PUBLIC Vulkan::Vulkan vkruntime)
-    target_compile_options(vkrand PRIVATE -Wall -Wextra)
+    target_compile_options(vkrand PRIVATE ${VAIT_WARN_FLAGS})
 
     add_executable(test_vkrand tests/test_vkrand.c)
     target_include_directories(test_vkrand PRIVATE
@@ -139,7 +146,7 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
     )
     target_link_libraries(vkfft PUBLIC Vulkan::Vulkan vkruntime)
-    target_compile_options(vkfft PRIVATE -Wall -Wextra)
+    target_compile_options(vkfft PRIVATE ${VAIT_WARN_FLAGS})
 
     add_executable(test_vkfft tests/test_vkfft.c)
     target_include_directories(test_vkfft PRIVATE
@@ -167,7 +174,7 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/vkblas_l1l2
     )
     target_link_libraries(vkblas_l1l2 PUBLIC vkblas Vulkan::Vulkan)
-    target_compile_options(vkblas_l1l2 PRIVATE -Wall -Wextra)
+    target_compile_options(vkblas_l1l2 PRIVATE ${VAIT_WARN_FLAGS})
 
     add_executable(test_vkblas_l1l2 tests/test_vkblas_l1l2.c)
     target_include_directories(test_vkblas_l1l2 PRIVATE
@@ -188,7 +195,7 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
     )
     target_link_libraries(vkmodel PUBLIC vkruntime Vulkan::Vulkan)
-    target_compile_options(vkmodel PRIVATE -Wall -Wextra)
+    target_compile_options(vkmodel PRIVATE ${VAIT_WARN_FLAGS})
 
     add_executable(test_vkmodel tests/test_vkmodel.c)
     target_include_directories(test_vkmodel PRIVATE
@@ -208,7 +215,7 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
     )
     target_link_libraries(vkkv PUBLIC vkruntime Vulkan::Vulkan)
-    target_compile_options(vkkv PRIVATE -Wall -Wextra)
+    target_compile_options(vkkv PRIVATE ${VAIT_WARN_FLAGS})
 
     add_executable(test_vkkv tests/test_vkkv.c)
     target_include_directories(test_vkkv PRIVATE
@@ -219,6 +226,9 @@ if(BUILD_TESTING)
     add_test(NAME test_vkkv COMMAND test_vkkv)
 
     # ── VKDist library (distributed compute, loopback Phase 0) ─────────────
+    # POSIX-only implementation (pthread.h); skipped under MSVC until a
+    # Win32-thread port lands.
+    if(NOT MSVC)
     add_library(vkdist STATIC src/vkdist/vkdist.c)
     target_include_directories(vkdist PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -230,7 +240,7 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/vkblas
     )
     target_link_libraries(vkdist PUBLIC vkblas vkruntime Vulkan::Vulkan)
-    target_compile_options(vkdist PRIVATE -Wall -Wextra)
+    target_compile_options(vkdist PRIVATE ${VAIT_WARN_FLAGS})
     if(WIN32)
         target_link_libraries(vkdist PUBLIC ws2_32)
     endif()
@@ -245,4 +255,5 @@ if(BUILD_TESTING)
         target_link_libraries(test_vkdist PRIVATE ws2_32)
     endif()
     add_test(NAME test_vkdist COMMAND test_vkdist)
+    endif() # NOT MSVC (vkdist)
 endif()

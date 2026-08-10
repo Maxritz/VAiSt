@@ -96,6 +96,6 @@ static const uint32_t vkkv_spv_baseline_apply[] = {
 0x000200F8, 0x00000036, 0x0004003D, 0x00000006, 0x00000060, 0x00000008, 0x0004003D, 0x00000029,     
 0x00000061, 0x0000002B, 0x00060041, 0x00000048, 0x00000062, 0x0000005F, 0x00000015, 0x00000060,     
 0x0003003E, 0x00000062, 0x00000061, 0x000100FD, 0x00010038, };
-static const size_t vkkv_spv_baseline_apply_size = sizeof(vkkv_spv_baseline_apply);
+#define vkkv_spv_baseline_apply_size (sizeof(vkkv_spv_baseline_apply))
 
 #endif /* vkkv_SHADERS_SPV_H */

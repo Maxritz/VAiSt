@@ -159,7 +159,7 @@ static const uint32_t vkrand_spv_baseline_normal_f32[] = {
 0x000500C7, 0x00000006, 0x0000008F, 0x0000008D, 0x0000008E, 0x00040070, 0x00000015, 0x00000090,     
 0x0000008F, 0x00050088, 0x00000015, 0x00000092, 0x00000090, 0x00000091, 0x000200FE, 0x00000092,     
 0x00010038, };
-static const size_t vkrand_spv_baseline_normal_f32_size = sizeof(vkrand_spv_baseline_normal_f32);
+#define vkrand_spv_baseline_normal_f32_size (sizeof(vkrand_spv_baseline_normal_f32))
 
 // baseline_threefry_uniform_f32 (1329 words)
 static const uint32_t vkrand_spv_baseline_threefry_uniform_f32[] = {
@@ -331,7 +331,7 @@ static const uint32_t vkrand_spv_baseline_threefry_uniform_f32[] = {
 0x00000024, 0x000000A8, 0x00000062, 0x00050080, 0x00000024, 0x000000A9, 0x000000A8, 0x00000059,     
 0x0003003E, 0x00000062, 0x000000A9, 0x000200F9, 0x00000063, 0x000200F8, 0x00000065, 0x000100FD,     
 0x00010038, };
-static const size_t vkrand_spv_baseline_threefry_uniform_f32_size = sizeof(vkrand_spv_baseline_threefry_uniform_f32);
+#define vkrand_spv_baseline_threefry_uniform_f32_size (sizeof(vkrand_spv_baseline_threefry_uniform_f32))
 
 // baseline_uniform_f32 (985 words)
 static const uint32_t vkrand_spv_baseline_uniform_f32[] = {
@@ -460,7 +460,7 @@ static const uint32_t vkrand_spv_baseline_uniform_f32[] = {
 0x0003003E, 0x00000053, 0x00000052, 0x0004003D, 0x00000006, 0x00000054, 0x00000032, 0x00050041,     
 0x00000007, 0x00000055, 0x00000011, 0x0000004C, 0x0003003E, 0x00000055, 0x00000054, 0x000100FD,     
 0x00010038, };
-static const size_t vkrand_spv_baseline_uniform_f32_size = sizeof(vkrand_spv_baseline_uniform_f32);
+#define vkrand_spv_baseline_uniform_f32_size (sizeof(vkrand_spv_baseline_uniform_f32))
 
 // baseline_uniform_uint32 (960 words)
 static const uint32_t vkrand_spv_baseline_uniform_uint32[] = {
@@ -585,6 +585,6 @@ static const uint32_t vkrand_spv_baseline_uniform_uint32[] = {
 0x0000004F, 0x00000051, 0x00050041, 0x00000007, 0x00000053, 0x00000011, 0x00000037, 0x0003003E,     
 0x00000053, 0x00000052, 0x0004003D, 0x00000006, 0x00000054, 0x00000032, 0x00050041, 0x00000007,     
 0x00000055, 0x00000011, 0x0000004C, 0x0003003E, 0x00000055, 0x00000054, 0x000100FD, 0x00010038, };
-static const size_t vkrand_spv_baseline_uniform_uint32_size = sizeof(vkrand_spv_baseline_uniform_uint32);
+#define vkrand_spv_baseline_uniform_uint32_size (sizeof(vkrand_spv_baseline_uniform_uint32))
 
 #endif /* vkrand_SHADERS_SPV_H */

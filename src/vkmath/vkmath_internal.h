@@ -71,7 +71,12 @@ typedef char vkmath_pc_static_assert[sizeof(vkmath_push_constants_t) == 72 ? 1 :
 #define VKMATH_KERNEL_POW           24
 #define VKMATH_KERNEL_CAST_F32_TO_BF16  25
 #define VKMATH_KERNEL_CAST_BF16_TO_F32  26
-#define VKMATH_KERNEL_COUNT         27
+#define VKMATH_KERNEL_RELU_BF16         27
+#define VKMATH_KERNEL_SILU_BF16         28
+#define VKMATH_KERNEL_GELU_BF16         29
+#define VKMATH_KERNEL_SIGMOID_BF16      30
+#define VKMATH_KERNEL_TANH_BF16         31
+#define VKMATH_KERNEL_COUNT             32
 
 /* ── Capability tiers ──────────────────────────────────────────────────── */
 

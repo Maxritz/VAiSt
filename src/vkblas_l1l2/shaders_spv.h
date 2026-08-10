@@ -147,7 +147,7 @@ static const uint32_t vkblas_l1l2_spv_baseline_amax_finalize_f32[] = {
 0x00040070, 0x00000011, 0x00000098, 0x00000097, 0x0004007C, 0x00000006, 0x00000099, 0x00000098,     
 0x00060041, 0x00000032, 0x0000009A, 0x0000002D, 0x0000002E, 0x0000002E, 0x0003003E, 0x0000009A,     
 0x00000099, 0x000200F9, 0x00000095, 0x000200F8, 0x00000095, 0x000100FD, 0x00010038, };
-static const size_t vkblas_l1l2_spv_baseline_amax_finalize_f32_size = sizeof(vkblas_l1l2_spv_baseline_amax_finalize_f32);
+#define vkblas_l1l2_spv_baseline_amax_finalize_f32_size (sizeof(vkblas_l1l2_spv_baseline_amax_finalize_f32))
 
 // baseline_amax_partial_f32 (1169 words)
 static const uint32_t vkblas_l1l2_spv_baseline_amax_partial_f32[] = {
@@ -299,7 +299,7 @@ static const uint32_t vkblas_l1l2_spv_baseline_amax_partial_f32[] = {
 0x0000009B, 0x0000009A, 0x00060041, 0x00000094, 0x0000009C, 0x0000008F, 0x00000030, 0x00000098,     
 0x0003003E, 0x0000009C, 0x0000009B, 0x000200F9, 0x0000008B, 0x000200F8, 0x0000008B, 0x000100FD,     
 0x00010038, };
-static const size_t vkblas_l1l2_spv_baseline_amax_partial_f32_size = sizeof(vkblas_l1l2_spv_baseline_amax_partial_f32);
+#define vkblas_l1l2_spv_baseline_amax_partial_f32_size (sizeof(vkblas_l1l2_spv_baseline_amax_partial_f32))
 
 // baseline_asum_finalize_f32 (797 words)
 static const uint32_t vkblas_l1l2_spv_baseline_asum_finalize_f32[] = {
@@ -404,7 +404,7 @@ static const uint32_t vkblas_l1l2_spv_baseline_asum_finalize_f32[] = {
 0x00000038, 0x0000002C, 0x0004003D, 0x00000011, 0x0000005F, 0x0000005E, 0x00060041, 0x0000002E,     
 0x00000060, 0x0000002B, 0x0000002C, 0x0000002C, 0x0003003E, 0x00000060, 0x0000005F, 0x000200F9,     
 0x0000005D, 0x000200F8, 0x0000005D, 0x000100FD, 0x00010038, };
-static const size_t vkblas_l1l2_spv_baseline_asum_finalize_f32_size = sizeof(vkblas_l1l2_spv_baseline_asum_finalize_f32);
+#define vkblas_l1l2_spv_baseline_asum_finalize_f32_size (sizeof(vkblas_l1l2_spv_baseline_asum_finalize_f32))
 
 // baseline_asum_partial_f32 (892 words)
 static const uint32_t vkblas_l1l2_spv_baseline_asum_partial_f32[] = {
@@ -521,7 +521,7 @@ static const uint32_t vkblas_l1l2_spv_baseline_asum_partial_f32[] = {
 0x0000002F, 0x0004003D, 0x0000001A, 0x00000067, 0x00000066, 0x00060041, 0x00000035, 0x00000068,     
 0x00000064, 0x0000002F, 0x00000065, 0x0003003E, 0x00000068, 0x00000067, 0x000200F9, 0x00000060,     
 0x000200F8, 0x00000060, 0x000100FD, 0x00010038, };
-static const size_t vkblas_l1l2_spv_baseline_asum_partial_f32_size = sizeof(vkblas_l1l2_spv_baseline_asum_partial_f32);
+#define vkblas_l1l2_spv_baseline_asum_partial_f32_size (sizeof(vkblas_l1l2_spv_baseline_asum_partial_f32))
 
 // baseline_axpy_f16 (1640 words)
 static const uint32_t vkblas_l1l2_spv_baseline_axpy_f16[] = {
@@ -731,7 +731,7 @@ static const uint32_t vkblas_l1l2_spv_baseline_axpy_f16[] = {
 0x000000B6, 0x000000BA, 0x000200F9, 0x000000B8, 0x000200F8, 0x000000BB, 0x0004003D, 0x00000006,     
 0x000000BC, 0x0000009B, 0x0003003E, 0x000000B6, 0x000000BC, 0x000200F9, 0x000000B8, 0x000200F8,     
 0x000000B8, 0x0004003D, 0x00000006, 0x000000BD, 0x000000B6, 0x000200FE, 0x000000BD, 0x00010038, };
-static const size_t vkblas_l1l2_spv_baseline_axpy_f16_size = sizeof(vkblas_l1l2_spv_baseline_axpy_f16);
+#define vkblas_l1l2_spv_baseline_axpy_f16_size (sizeof(vkblas_l1l2_spv_baseline_axpy_f16))
 
 // baseline_axpy_f32 (662 words)
 static const uint32_t vkblas_l1l2_spv_baseline_axpy_f32[] = {
@@ -819,7 +819,7 @@ static const uint32_t vkblas_l1l2_spv_baseline_axpy_f32[] = {
 0x0000002F, 0x0000003E, 0x0004003D, 0x00000011, 0x00000040, 0x0000003F, 0x00050081, 0x00000011,     
 0x00000041, 0x0000003D, 0x00000040, 0x00060041, 0x0000003A, 0x00000042, 0x0000002E, 0x0000002F,     
 0x00000030, 0x0003003E, 0x00000042, 0x00000041, 0x000100FD, 0x00010038, };
-static const size_t vkblas_l1l2_spv_baseline_axpy_f32_size = sizeof(vkblas_l1l2_spv_baseline_axpy_f32);
+#define vkblas_l1l2_spv_baseline_axpy_f32_size (sizeof(vkblas_l1l2_spv_baseline_axpy_f32))
 
 // baseline_dot_finalize_f32 (797 words)
 static const uint32_t vkblas_l1l2_spv_baseline_dot_finalize_f32[] = {
@@ -924,7 +924,7 @@ static const uint32_t vkblas_l1l2_spv_baseline_dot_finalize_f32[] = {
 0x00000038, 0x0000002C, 0x0004003D, 0x00000011, 0x0000005F, 0x0000005E, 0x00060041, 0x0000002E,     
 0x00000060, 0x0000002B, 0x0000002C, 0x0000002C, 0x0003003E, 0x00000060, 0x0000005F, 0x000200F9,     
 0x0000005D, 0x000200F8, 0x0000005D, 0x000100FD, 0x00010038, };
-static const size_t vkblas_l1l2_spv_baseline_dot_finalize_f32_size = sizeof(vkblas_l1l2_spv_baseline_dot_finalize_f32);
+#define vkblas_l1l2_spv_baseline_dot_finalize_f32_size (sizeof(vkblas_l1l2_spv_baseline_dot_finalize_f32))
 
 // baseline_dot_partial_f16 (1345 words)
 static const uint32_t vkblas_l1l2_spv_baseline_dot_partial_f16[] = {
@@ -1098,7 +1098,7 @@ static const uint32_t vkblas_l1l2_spv_baseline_dot_partial_f16[] = {
 0x00000008, 0x00000049, 0x00000027, 0x0003003E, 0x00000043, 0x00000049, 0x000200F9, 0x00000045,     
 0x000200F8, 0x00000045, 0x0004003D, 0x00000008, 0x0000004A, 0x00000043, 0x000200FE, 0x0000004A,     
 0x00010038, };
-static const size_t vkblas_l1l2_spv_baseline_dot_partial_f16_size = sizeof(vkblas_l1l2_spv_baseline_dot_partial_f16);
+#define vkblas_l1l2_spv_baseline_dot_partial_f16_size (sizeof(vkblas_l1l2_spv_baseline_dot_partial_f16))
 
 // baseline_dot_partial_f32 (983 words)
 static const uint32_t vkblas_l1l2_spv_baseline_dot_partial_f32[] = {
@@ -1226,7 +1226,7 @@ static const uint32_t vkblas_l1l2_spv_baseline_dot_partial_f32[] = {
 0x00000049, 0x00000071, 0x00000046, 0x0000002F, 0x0004003D, 0x0000001A, 0x00000072, 0x00000071,     
 0x00060041, 0x00000035, 0x00000073, 0x0000006F, 0x0000002F, 0x00000070, 0x0003003E, 0x00000073,     
 0x00000072, 0x000200F9, 0x0000006B, 0x000200F8, 0x0000006B, 0x000100FD, 0x00010038, };
-static const size_t vkblas_l1l2_spv_baseline_dot_partial_f32_size = sizeof(vkblas_l1l2_spv_baseline_dot_partial_f32);
+#define vkblas_l1l2_spv_baseline_dot_partial_f32_size (sizeof(vkblas_l1l2_spv_baseline_dot_partial_f32))
 
 // baseline_gemv_f16 (2053 words)
 static const uint32_t vkblas_l1l2_spv_baseline_gemv_f16[] = {
@@ -1488,7 +1488,7 @@ static const uint32_t vkblas_l1l2_spv_baseline_gemv_f16[] = {
 0x000000B8, 0x000200F8, 0x000000BB, 0x0004003D, 0x00000006, 0x000000BC, 0x0000009B, 0x0003003E,     
 0x000000B6, 0x000000BC, 0x000200F9, 0x000000B8, 0x000200F8, 0x000000B8, 0x0004003D, 0x00000006,     
 0x000000BD, 0x000000B6, 0x000200FE, 0x000000BD, 0x00010038, };
-static const size_t vkblas_l1l2_spv_baseline_gemv_f16_size = sizeof(vkblas_l1l2_spv_baseline_gemv_f16);
+#define vkblas_l1l2_spv_baseline_gemv_f16_size (sizeof(vkblas_l1l2_spv_baseline_gemv_f16))
 
 // baseline_gemv_f32 (1059 words)
 static const uint32_t vkblas_l1l2_spv_baseline_gemv_f32[] = {
@@ -1626,7 +1626,7 @@ static const uint32_t vkblas_l1l2_spv_baseline_gemv_f32[] = {
 0x00000088, 0x00000081, 0x00000087, 0x00050081, 0x00000011, 0x00000089, 0x0000007E, 0x00000088,     
 0x00060041, 0x0000003F, 0x0000008A, 0x00000073, 0x00000016, 0x00000078, 0x0003003E, 0x0000008A,     
 0x00000089, 0x000100FD, 0x00010038, };
-static const size_t vkblas_l1l2_spv_baseline_gemv_f32_size = sizeof(vkblas_l1l2_spv_baseline_gemv_f32);
+#define vkblas_l1l2_spv_baseline_gemv_f32_size (sizeof(vkblas_l1l2_spv_baseline_gemv_f32))
 
 // baseline_nrm2_finalize_f32 (803 words)
 static const uint32_t vkblas_l1l2_spv_baseline_nrm2_finalize_f32[] = {
@@ -1732,7 +1732,7 @@ static const uint32_t vkblas_l1l2_spv_baseline_nrm2_finalize_f32[] = {
 0x00000060, 0x00000001, 0x0000001F, 0x0000005F, 0x00060041, 0x0000002E, 0x00000061, 0x0000002B,     
 0x0000002C, 0x0000002C, 0x0003003E, 0x00000061, 0x00000060, 0x000200F9, 0x0000005D, 0x000200F8,     
 0x0000005D, 0x000100FD, 0x00010038, };
-static const size_t vkblas_l1l2_spv_baseline_nrm2_finalize_f32_size = sizeof(vkblas_l1l2_spv_baseline_nrm2_finalize_f32);
+#define vkblas_l1l2_spv_baseline_nrm2_finalize_f32_size (sizeof(vkblas_l1l2_spv_baseline_nrm2_finalize_f32))
 
 // baseline_nrm2_partial_f32 (909 words)
 static const uint32_t vkblas_l1l2_spv_baseline_nrm2_partial_f32[] = {
@@ -1851,7 +1851,7 @@ static const uint32_t vkblas_l1l2_spv_baseline_nrm2_partial_f32[] = {
 0x0000003E, 0x00000030, 0x0004003D, 0x0000001A, 0x0000006A, 0x00000069, 0x00060041, 0x00000036,     
 0x0000006B, 0x00000067, 0x00000030, 0x00000068, 0x0003003E, 0x0000006B, 0x0000006A, 0x000200F9,     
 0x00000063, 0x000200F8, 0x00000063, 0x000100FD, 0x00010038, };
-static const size_t vkblas_l1l2_spv_baseline_nrm2_partial_f32_size = sizeof(vkblas_l1l2_spv_baseline_nrm2_partial_f32);
+#define vkblas_l1l2_spv_baseline_nrm2_partial_f32_size (sizeof(vkblas_l1l2_spv_baseline_nrm2_partial_f32))
 
 // baseline_scal_f16 (1485 words)
 static const uint32_t vkblas_l1l2_spv_baseline_scal_f16[] = {
@@ -2042,7 +2042,7 @@ static const uint32_t vkblas_l1l2_spv_baseline_scal_f16[] = {
 0x000000B8, 0x000200F8, 0x000000BB, 0x0004003D, 0x00000006, 0x000000BC, 0x0000009B, 0x0003003E,     
 0x000000B6, 0x000000BC, 0x000200F9, 0x000000B8, 0x000200F8, 0x000000B8, 0x0004003D, 0x00000006,     
 0x000000BD, 0x000000B6, 0x000200FE, 0x000000BD, 0x00010038, };
-static const size_t vkblas_l1l2_spv_baseline_scal_f16_size = sizeof(vkblas_l1l2_spv_baseline_scal_f16);
+#define vkblas_l1l2_spv_baseline_scal_f16_size (sizeof(vkblas_l1l2_spv_baseline_scal_f16))
 
 // baseline_scal_f32 (533 words)
 static const uint32_t vkblas_l1l2_spv_baseline_scal_f32[] = {
@@ -2114,6 +2114,6 @@ static const uint32_t vkblas_l1l2_spv_baseline_scal_f32[] = {
 0x00000028, 0x0004003D, 0x00000011, 0x0000002F, 0x0000002E, 0x00050085, 0x00000011, 0x00000030,     
 0x0000002F, 0x0000002C, 0x00060041, 0x0000002D, 0x00000031, 0x00000022, 0x00000023, 0x00000028,     
 0x0003003E, 0x00000031, 0x00000030, 0x000100FD, 0x00010038, };
-static const size_t vkblas_l1l2_spv_baseline_scal_f32_size = sizeof(vkblas_l1l2_spv_baseline_scal_f32);
+#define vkblas_l1l2_spv_baseline_scal_f32_size (sizeof(vkblas_l1l2_spv_baseline_scal_f32))
 
 #endif /* vkblas_l1l2_SHADERS_SPV_H */
