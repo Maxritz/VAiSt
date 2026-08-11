@@ -69,8 +69,9 @@ VAiSt
 │   ├── vkmath/           Elementwise ops, reductions, activations
 │   ├── vkquant/          Quantization + dequantization (ggml block formats)
 │   ├── vkmodel/          Model loaders (GGUF, safetensors, OpenVINO IR)
-│   ├── vkruntime/        Device/queue/memory/pool runtime (hipRuntime-equivalent)
-│   ├── vkkv/             Cross-model KV-cache ridge transfer
+  │   ├── vkruntime/        Device/queue/memory/pool runtime (hipRuntime-equivalent)
+  │   ├── vkcompress/       LRU+LZ4 GPU buffer compression, tagged buffer registry
+  │   ├── vkkv/             Cross-model KV-cache ridge transfer
 │   └── vkdist/           Distributed compute over TCP
 ├── src/                  C99 runtime + Vulkan dispatch
 ├── shaders/
@@ -293,6 +294,19 @@ swapping same-family models (design doc pending).
 
 RoPE stripping and top-k layer selection are the caller's responsibility.
 
+### VKCompress (implemented)
+
+GPU-accelerated LZ4-style buffer compression with RLE for zero runs. Supports
+two compression tiers (fast/high) with separate shader variants:
+
+| Function | Description |
+|----------|-------------|
+| `vkcompress_create_context` / `vkcompress_destroy_context` | Create/destroy compression context (manages pipelines, descriptor pools, staging) |
+| `vkcompress_register_buffer` | Register a named buffer for compression (tag-based registry) |
+| `vkcompress_write` | Compress buffer data GPU-side (records compute dispatch) |
+| `vkcompress_read` | Decompress buffer data GPU-side (records compute dispatch) |
+| `vkcompress_load_catalog` / `vkcompress_save_catalog` | Catalog I/O for tagged buffer registry (stubbed — returns success) |
+
 ### VKDist (implemented, Phase 0)
 
 Distributed compute over TCP — run compute on another PC's Vulkan card.
@@ -372,7 +386,7 @@ cmake --build . --config Release
 ctest -C Release
 ```
 
-All 23 tests pass on RX 9070 XT (ROCm 7.14.0, Vulkan SDK 1.4.357.0).
+All 24 tests pass on RX 9070 XT (ROCm 7.14.0, Vulkan SDK 1.4.357.0).
 
 ---
 
@@ -504,3 +518,4 @@ See the [LICENSE](LICENSE) file for details.
 This project is not affiliated with or endorsed by AMD, the Khronos Group,
 or any other organization whose materials appear in the `specs/` directory.
 All trademarks are the property of their respective owners.
+

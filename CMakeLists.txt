@@ -277,7 +277,7 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/include/vkcompress
     )
-    target_link_libraries(test_vkcompress PRIVATE vkcompress Vulkan::Vulkan)
+    target_link_libraries(test_vkcompress PRIVATE vkcompress Vulkan::Vulkan vkruntime)
     add_test(NAME test_vkcompress COMMAND test_vkcompress)
 
     # ── VKRAND library ───────────────────────────────────────────────────

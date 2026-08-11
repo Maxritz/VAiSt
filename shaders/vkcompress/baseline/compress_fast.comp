@@ -1,46 +1,35 @@
 #version 450
-#extension GL_EXT_shader_explicit_arithmetic_types : enable
-
 layout (local_size_x = 256) in;
-
-layout (push_constant) uniform PushConstants {
-    uint num_blocks;
-    uint _pad0;
-    uint _pad1;
-    uint _pad2;
-} pc;
-
-layout (std430, binding = 0) restrict readonly buffer SrcBuf   { uint sdata[]; };
-layout (std430, binding = 1) restrict writeonly buffer DstBuf  { uint ddata[]; };
-layout (std430, binding = 2) restrict buffer MetaBuf          { uint mdata[]; };
-
+layout (push_constant) uniform pc { uint num_blocks; uint _pad0; uint _pad1; uint _pad2; } PC;
+layout (std430, binding = 0) restrict readonly buffer Src { uint sdata[]; };
+layout (std430, binding = 1) restrict buffer Dst { uint ddata[]; };
+layout (std430, binding = 2) restrict buffer Meta { uint mdata[]; };
 void main() {
     uint tid = gl_GlobalInvocationID.x;
-    if (tid >= pc.num_blocks) return;
-
-    uint src_base = tid * 256;  // 256 uints per block
+    if (tid >= PC.num_blocks) return;
+    uint src_base = tid * 256;
     uint dst_base = tid * 256;
-
-    uint i = src_base;
-    uint opos = dst_base;
-
-    while (i < src_base + 256u && i < pc.num_blocks * 256u) {
-        uint val = sdata[i];
+    // Simple RLE: copy literals, compress zeros
+    uint i = 0;
+    uint opos = 0;
+    uint src_end = min(src_base + 256u, PC.num_blocks * 256u);
+    while (i < 256u && src_base + i < src_end) {
+        uint val = sdata[src_base + i];
         if (val == 0u) {
             uint run = 0u;
-            while (i + run < src_base + 256u && i + run < pc.num_blocks * 256u && sdata[i + run] == 0u) run++;
-            ddata[opos] = 0xFFFFFFFFu;
-            ddata[opos + 1u] = run;
+            while (i + run < 256u && src_base + i + run < src_end && sdata[src_base + i + run] == 0u) run++;
+            ddata[dst_base + opos] = 0xFFFFFFFFu;
+            ddata[dst_base + opos + 1u] = run;
             opos += 2u;
             i += run;
         } else {
-            ddata[opos] = 0x00000000u;
-            ddata[opos + 1u] = 1u;
-            ddata[opos + 2u] = val;
+            ddata[dst_base + opos] = 0u;
+            ddata[dst_base + opos + 1u] = 1u;
+            ddata[dst_base + opos + 2u] = val;
             opos += 3u;
             i += 1u;
         }
     }
-    mdata[tid * 2u + 0u] = dst_base;
-    mdata[tid * 2u + 1u] = opos - dst_base;
+    mdata[tid * 2u] = dst_base;
+    mdata[tid * 2u + 1u] = opos;
 }

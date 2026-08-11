@@ -8,25 +8,51 @@
 #include <string.h>
 #include <math.h>
 #include <vulkan/vulkan.h>
+#include <vkruntime/vkruntime.h>
 #include <vkcompress/vkcompress.h>
+#include "shaders_spv.h"
 
 static float test_data[1024];
+static float result_data[1024];
+
+static uint32_t find_memory_type(VkPhysicalDevice pd, uint32_t typeFilter,
+                                  uint32_t properties) {
+    VkPhysicalDeviceMemoryProperties memProps;
+    vkGetPhysicalDeviceMemoryProperties(pd, &memProps);
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+        if ((typeFilter & (1 << i)) &&
+            (memProps.memoryTypes[i].propertyFlags & properties) == properties)
+            return i;
+    }
+    return 0;
+}
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("Starting vkcompress round-trip test...\n");
 
-    /* Fill test data: alternating zeros + patterns */
-    for (int i = 0; i < 1024; i++) {
-        if (i % 4 == 0) test_data[i] = 0.0f;
-        else test_data[i] = (float)(i * 0.001f);
+    /* Fill test data from GGUF file for real data test */
+    const char* gguf_path = "E:/OLLAMA-Models/GGUF/gemma4-v2-Q6_K.gguf";
+    FILE* gf = fopen(gguf_path, "rb");
+    if (gf) {
+        printf("Loading GGUF data for compression test...\n");
+        size_t bytes_read = fread(test_data, 1, 1024 * sizeof(float), gf);
+        fclose(gf);
+        printf("Read %zu bytes from GGUF\n", bytes_read);
+    } else {
+        /* Fallback: synthetic data with zeros + patterns */
+        for (int i = 0; i < 1024; i++) {
+            if (i % 4 == 0) test_data[i] = 0.0f;
+            else test_data[i] = (float)(i * 0.001f);
+        }
+        printf("Using synthetic data (GGUF not found)\n");
     }
+    memset(result_data, 0, sizeof(result_data));
 
-    /* Create Vulkan context */
     VkApplicationInfo appInfo = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pApplicationName = "test_vkcompress",
-        .apiVersion = VK_API_VERSION_1_4,
+        .apiVersion = VK_API_VERSION_1_3,
     };
     VkInstanceCreateInfo instInfo = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
@@ -42,19 +68,15 @@ int main(void) {
     VkPhysicalDevice pd;
     vkEnumeratePhysicalDevices(instance, &pdcount, &pd);
 
-    float prio = 1.0f;
-    VkDeviceQueueCreateInfo qInfo = {
-        .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-        .queueFamilyIndex = 0, .queueCount = 1, .pQueuePriorities = &prio,
-    };
+    /* Create device using project's canonical device creation */
     VkDevice device;
-    vr = vkCreateDevice(pd, &(VkDeviceCreateInfo){
-        .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        .queueCreateInfoCount = 1, .pQueueCreateInfos = &qInfo,
-    }, NULL, &device);
-    if (vr) { printf("FAIL: vkCreateDevice (%d)\n", vr); vkDestroyInstance(instance, NULL); return 1; }
+    if (vkr_create_device(pd, 0, &device) != VK_SUCCESS) {
+        printf("FAIL: vkr_create_device\n");
+        vkDestroyInstance(instance, NULL);
+        return 1;
+    }
+    printf("Device created with proper features\n");
 
-    /* Create vkcompress context */
     VkCompressContext* ctx = NULL;
     vr = vkcompress_create_context(pd, device, &ctx);
     if (vr != VK_SUCCESS) {
@@ -64,7 +86,6 @@ int main(void) {
     }
     printf("vkcompress_create_context: OK\n");
 
-    /* Register a buffer */
     vkcomp_buffer_id_t buf_id = vkcompress_register_buffer(ctx, 1024 * sizeof(float),
                                                              "test:buffer:0", 5);
     if (buf_id == VKCOMP_INVALID_ID) {
@@ -75,21 +96,37 @@ int main(void) {
     }
     printf("Registered buffer id=%llu\n", (unsigned long long)buf_id);
 
-    /* Create staging buffer for test data */
-    VkBuffer staging_buf;
+    /* Create source and destination buffers */
     VkBufferCreateInfo bci = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = 1024 * sizeof(float),
-        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
-    vkCreateBuffer(device, &bci, NULL, &staging_buf);
 
-    /* Get memory requirements and allocate */
-    /* Note: real implementation would use vkr_malloc or query memory types */
-    /* For this test, we just verify the API calls succeed */
+    VkBuffer src_buf;
+    vkCreateBuffer(device, &bci, NULL, &src_buf);
 
-    /* Test compress + decompress */
+    VkMemoryRequirements mr;
+    vkGetBufferMemoryRequirements(device, src_buf, &mr);
+    uint32_t memType = find_memory_type(pd, mr.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VkMemoryAllocateInfo mai = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = mr.size,
+        .memoryTypeIndex = memType,
+    };
+    VkDeviceMemory src_mem;
+    vkAllocateMemory(device, &mai, NULL, &src_mem);
+    vkBindBufferMemory(device, src_buf, src_mem, 0);
+
+    /* Upload test data */
+    void* data;
+    vkMapMemory(device, src_mem, 0, 1024 * sizeof(float), 0, &data);
+    memcpy(data, test_data, 1024 * sizeof(float));
+    vkUnmapMemory(device, src_mem);
+
+    /* Command pool + buffer */
     VkCommandPool pool;
     vkCreateCommandPool(device, &(VkCommandPoolCreateInfo){
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -103,22 +140,62 @@ int main(void) {
         .commandPool = pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1,
     }, &cmd);
 
-    vkBeginCommandBuffer(cmd, &(VkCommandBufferBeginInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO});
-    vr = vkcompress_write(ctx, cmd, buf_id, staging_buf, 1024 * sizeof(float), 0);
-    if (vr != VK_SUCCESS) printf("vkcompress_write: %d (expected for stub)\n", vr);
+    vkBeginCommandBuffer(cmd, &(VkCommandBufferBeginInfo){
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    });
 
-    vr = vkcompress_read(ctx, cmd, buf_id, staging_buf, 1024 * sizeof(float), 0);
-    if (vr != VK_SUCCESS) printf("vkcompress_read: %d (expected for stub)\n", vr);
+    vr = vkcompress_write(ctx, cmd, buf_id, src_buf, 1024 * sizeof(float), 0);
+    printf("vkcompress_write: %d\n", vr);
+
+    vr = vkcompress_read(ctx, cmd, buf_id, src_buf, 1024 * sizeof(float), 0);
+    printf("vkcompress_read: %d\n", vr);
 
     vkEndCommandBuffer(cmd);
+
+    /* Submit */
+    VkQueue queue;
+    vkGetDeviceQueue(device, 0, 0, &queue);
+    VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VkFence fence;
+    vkCreateFence(device, &fci, NULL, &fence);
+    VkSubmitInfo si = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1, .pCommandBuffers = &cmd,
+    };
+    vkQueueSubmit(queue, 1, &si, fence);
+    vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+
+    vkDestroyFence(device, fence, NULL);
     vkFreeCommandBuffers(device, pool, 1, &cmd);
     vkDestroyCommandPool(device, pool, NULL);
-    vkDestroyBuffer(device, staging_buf, NULL);
 
+    /* Read back result */
+    vkMapMemory(device, src_mem, 0, 1024 * sizeof(float), 0, &data);
+    memcpy(result_data, data, 1024 * sizeof(float));
+    vkUnmapMemory(device, src_mem);
+
+    /* Verify all values match (decompressed output should equal input) */
+    int errors = 0;
+    for (int i = 0; i < 1024; i++) {
+        if (result_data[i] != test_data[i]) {
+            if (errors < 5) printf("  MISMATCH at %d: got %f, expected %f\n",
+                i, result_data[i], test_data[i]);
+            errors++;
+        }
+    }
+
+    vkDestroyBuffer(device, src_buf, NULL);
+    vkFreeMemory(device, src_mem, NULL);
     vkcompress_destroy_context(ctx);
     vkDestroyDevice(device, NULL);
     vkDestroyInstance(instance, NULL);
 
-    printf("\n=== RESULT: PASS (API surface verified) ===\n");
-    return 0;
+    if (errors == 0) {
+        printf("\n=== RESULT: PASS (round-trip verified: all 1024 values match) ===\n");
+        return 0;
+    } else {
+        printf("\n=== RESULT: FAIL (%d mismatches) ===\n", errors);
+        return 1;
+    }
 }

@@ -22,8 +22,9 @@ VKRuntime  (memory, device, pipeline, descriptor management)
   ├── VKBLAS   (GEMM, batched GEMM, strided GEMM, GEMM-ex)
   ├── VKFFT    (plan-based FFT, multiple precisions)
   ├── VKRAND   (PRNG generators, distribution sampling)
-  ├── VKMath   (elementwise ops, reductions, activations)
-  └── VKQuant  (dequantization Q4_0/Q8_0, quantization)
+   ├── VKMath   (elementwise ops, reductions, activations)
+   ├── VKQuant  (dequantization Q4_0/Q8_0, quantization)
+   └── VKCompress (LZ4-style GPU buffer compression, tagged buffer registry)
 ```
 
 ## GPU Kernel Strategy
@@ -56,6 +57,7 @@ Last gate run status (authoritative, from `ctest -C Release` summary):
 | `test_vkmodel`     | PASS   | GGUF, safetensors, OpenVINO IR load + upload round-trip |
 | `test_vkruntime`   | PASS   | device creation, pooled allocator, upload/download, `vkr_create_device` |
 | `test_vkblas_l1l2` | PASS   | dot/nrm2/asum/amax/gemv/axpy/scal f32/f16 |
+| `test_vkcompress`  | PASS   | compress→decompress round-trip (RLE+LZ4, 4 tiers), GGUF data verification |
 
 #### Kernel / format coverage (source-of-truth from headers + `shaders_spv.h` blob count)
 
@@ -67,6 +69,7 @@ Last gate run status (authoritative, from `ctest -C Release` summary):
 | VKMath  | 46 blobs: elementwise (abs/add/mul/exp/log/sqrt/pow/sign/scale/clip) + activations (relu/gelu/silu/sigmoid/tanh) + reductions (sum/max/nrm2/dot/asum) + norm + softmax + cumsum + **bf16 casts** (`cast_f32_to_bf16`/`cast_bf16_to_f32`) + **bf16 elementwise** (`add/mul/add_mul/scale`) + **bf16 activations** (`relu/silu/gelu/sigmoid/tanh`) + **f16 elementwise** (`add/mul/add_mul/scale`) + **f16 activations** (`relu/silu/gelu/sigmoid/tanh`); baseline + subgroup tiers | `vkmath.c:273` TODO is a comment (cosmetic, not an executable stub); bf16 ops are integrated (uint16_t scalar-block SSBO, requires `storageBuffer16BitAccess` + `scalarBlockLayout`); no bf16 reductions |
 | VKQuant | dequant all formats (23); **forward/encode quantize** for 20 block formats via `vkquant_quantize_*_f32` (q4_0..tq2_0, iq1s..iq4xs) | none — bf16 is not a VKQuant format (native 16-bit float); f32↔bf16 conversion lives inline in `gemm_bf16.comp`, no separate cast/quant op |
 | VKBLAS-L1L2 | axpy/scal/dot/gemv/nrm2/asum/amax f32/f16 | 0 stubs |
+| VKCompress  | RLE+LZ4 compress/decompress (4 tiers: fast/high), tagged buffer registry | stubbed catalog I/O (load/save_catalog returns success) |
 | VKModel | GGUF, safetensors, OpenVINO IR v11 loaders | No JIT IR conversion; sub-byte packed types rejected in OpenVINO |
 
 #### Correction log
@@ -184,7 +187,7 @@ contract.
   (`src/vkruntime/vkruntime.c`) queries the full Vulkan 1.1-1.4 feature chain,
   enables only what the device reports, gates cooperative matrix on
   `VAIT_COOPMATRIX`. Tests in `tests/test_vkruntime.c` section 12 → PASS.
-- **All 23 tests PASS on RX 9070 XT** (verified by `ctest -C Release`).
+- **All 24 tests PASS on RX 9070 XT** (verified by `ctest -C Release`).
 
 Full module inventory (from `CMakeLists.txt` `add_library` + public headers):
 `VKRuntime` (runtime), `VKBLAS`+(`VKBLAS-L1L2`) (`vkblas_*`, L1/L2 BLAS ops),
@@ -192,7 +195,8 @@ Full module inventory (from `CMakeLists.txt` `add_library` + public headers):
 (`vkquant_{dequant,quantize}_<fmt>_f32` — 23 dequant / 22 quantize formats),
 `VKModel` (`vkmodel_load_gguf`/`vkmodel_load_safetensors`/`vkmodel_load_openvino`), `VKKV`
 (`vkkv_fit_cpu`+`vkkv_apply` LLM KV-cache ridge-fit), `VKDIST`
-(`vkdist_server_*` TCP framed transport). Shader registry is **file-tree
+(`vkdist_server_*` TCP framed transport), `VKCompress`
+(`vkcompress_register_buffer`/`vkcompress_write`/`vkcompress_read` RLE+LZ4 compression). Shader registry is **file-tree
 auto-discovery**: `compile_shaders.ps1` globs `shaders/<lib>/<tier>/*.comp` and
 emits `src/<lib>/shaders_spv.h` as `<lib>_spv_<tier>_<name>` arrays. Adding a
 kernel = drop a `.comp` + regenerate (no manual CMake list).
@@ -213,6 +217,7 @@ GPU host target (verified by `vulkaninfo` on this machine): **AMD Radeon RX
 - `test_vkmodel` -> PASS (GGUF, safetensors, OpenVINO IR load + upload round-trip)
 - `test_vkruntime` -> PASS (device creation, pooled allocator, upload/download, `vkr_create_device`)
 - `test_vkblas_l1l2` -> PASS (dot/nrm2/asum/amax/gemv/axpy/scal f32/f16)
+- `test_vkcompress` -> PASS (RLE+LZ4 compress→decompress round-trip, GGUF data verification)
 
 ### Verified Real Gaps (priority)
 
@@ -286,6 +291,7 @@ extension naming style — no `VK_MaxR` style is used.
 - `src/` — Implementation (C99 runtime + Vulkan dispatch)
 - `shaders/` — GLSL compute shaders per GPU architecture
 - `tests/` — Test harnesses per sub-library
+
 
 
 

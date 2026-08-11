@@ -205,10 +205,21 @@ vkcomp_buffer_id_t vkcompress_register_buffer(VkCompressContext* ctx,
 
     VkMemoryRequirements mr;
     vkGetBufferMemoryRequirements(ctx->device, e->comp_buffer, &mr);
+    /* Find device-local memory type */
+    VkPhysicalDeviceMemoryProperties memProps;
+    vkGetPhysicalDeviceMemoryProperties(ctx->physical_device, &memProps);
+    uint32_t memTypeIndex = 0;
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+        if ((mr.memoryTypeBits & (1 << i)) &&
+            (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+            memTypeIndex = i; break;
+        }
+    }
+
     VkMemoryAllocateInfo mai = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = mr.size,
-        .memoryTypeIndex = 0,
+        .memoryTypeIndex = memTypeIndex,
     };
     if (vkAllocateMemory(ctx->device, &mai, NULL, &e->comp_memory) != VK_SUCCESS) {
         vkDestroyBuffer(ctx->device, e->comp_buffer, NULL);
@@ -218,6 +229,7 @@ vkcomp_buffer_id_t vkcompress_register_buffer(VkCompressContext* ctx,
     vkBindBufferMemory(ctx->device, e->comp_buffer, e->comp_memory, 0);
 
     vkGetBufferMemoryRequirements(ctx->device, e->meta_buffer, &mr);
+    /* Reuse device-local type — meta buffer has same flags */
     mai.allocationSize = mr.size;
     if (vkAllocateMemory(ctx->device, &mai, NULL, &e->meta_memory) != VK_SUCCESS) {
         vkDestroyBuffer(ctx->device, e->comp_buffer, NULL);
@@ -251,10 +263,20 @@ VkResult vkcompress_write(VkCompressContext* ctx, VkCommandBuffer cmd,
     const uint32_t* comp_spv = (e->compression_level > 3)
         ? vkcompress_spv_baseline_compress_high
         : vkcompress_spv_baseline_compress_fast;
-
-    VKCOMP_CHECK(ensure_shader_module(ctx->device, comp_spv,
-        vkcompress_spv_baseline_compress_fast_size, &e->module_write));
-    VKCOMP_CHECK(ensure_pipeline(ctx, &e->pipeline_write, e->module_write));
+    size_t spirv_size = (e->compression_level > 3)
+        ? vkcompress_spv_baseline_compress_high_size
+        : vkcompress_spv_baseline_compress_fast_size;
+    VkShaderModuleCreateInfo smci = {
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .pNext = NULL,
+        .flags = 0,
+        .codeSize = spirv_size,
+        .pCode = comp_spv,
+    };
+    VkResult r = vkCreateShaderModule(ctx->device, &smci, NULL, &e->module_write);
+    if (r) return r;
+    r = ensure_pipeline(ctx, &e->pipeline_write, e->module_write);
+    if (r) return r;
 
     /* Allocate descriptor set if needed */
     if (!e->desc_set) {
@@ -321,9 +343,11 @@ VkResult vkcompress_read(VkCompressContext* ctx, VkCommandBuffer cmd,
     const uint32_t* decomp_spv = (e->compression_level > 3)
         ? vkcompress_spv_baseline_decompress_high
         : vkcompress_spv_baseline_decompress_fast;
+    size_t decomp_size = (e->compression_level > 3)
+        ? vkcompress_spv_baseline_decompress_high_size
+        : vkcompress_spv_baseline_decompress_fast_size;
 
-    VKCOMP_CHECK(ensure_shader_module(ctx->device, decomp_spv,
-        vkcompress_spv_baseline_decompress_fast_size, &e->module_read));
+    VKCOMP_CHECK(ensure_shader_module(ctx->device, decomp_spv, decomp_size, &e->module_read));
     VKCOMP_CHECK(ensure_pipeline(ctx, &e->pipeline_read, e->module_read));
 
     if (!e->desc_set) {
