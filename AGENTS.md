@@ -273,14 +273,11 @@ GPU host target (verified by `vulkaninfo` on this machine): **AMD Radeon RX
 
 ### Remaining Gaps
 
-1. **Coopmatrix tier for plain f32/f16/bf16/f64 GEMM exists** — baseline + subgroup twins exist, coopmatrix tier exists for all 14 qgemm variants (q8_0/q4_0/q4k/q5k/q6k/q3k/iq4xs × f32/f16 output) but is dormant-by-default on AMD 26.7.1 driver (crashes on coopMatMulAddKHR). Safe subgroup tier is the active path.
-2. **No sparse BLAS** — baseline + subgroup qgemm exist, no rocSPARSE equivalent.
-3. **No NPP-equivalent** — conv3d via MIOpen available as VJITC bridge (static link MIOpen.lib).
-4. **No runtime JIT** — offline compile by default, `VAIT_JIT` feature flag enables hipRTC dynamic
-   kernel generation (hiprtc714.dll available).
-5. **No GPU-accelerated neural network inference** — Cholesky Decomposition,
-   Eigenvalue Decomposition (conv1d/2d/3d, pool2d, batchnorm, transpose,
-   determinant, inverse, LU, QR are implemented; sparse GEMM via VJITC bridge).
+1. **Cholesky Decomposition** — not yet bridged via rocSOLVER (`rocsolver_spotrf`).
+2. **Eigenvalue Decomposition** — not yet bridged via rocSOLVER (`rocsolver_dsyev`).
+3. **No sparse BLAS** — baseline + subgroup + coopmatrix qgemm all exist; no rocSPARSE equivalent for sparse matrix formats.
+4. **No NPP-equivalent** — conv1d/conv2d/3d via MIOpen bridge exists; conv3d via MIOpen, JIT via hipRTC+shaderc. No runtime JIT by default.
+5. **No runtime JIT** — offline compile by default; `VAIT_JIT` feature flag (OFF) enables hipRTC + shaderc dynamic compilation. Coopmatrix (COOPMATRIX tier) dormant by default due to driver crash.
 
 Note on vendor naming: this stack uses the Vulkan `VK_AMD_*` vendor-extension
 nomenclature for AMD GPU features (e.g. `VK_AMD_SHADER_CORE_PROPERTIES(2)`,

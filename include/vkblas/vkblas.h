@@ -1236,6 +1236,24 @@ VkResult vkblas_qr_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
                        void* A, uint32_t lda,
                        void* tau, void* info);
 
+/**
+ * \brief VJITC-bridge Cholesky decomposition: A = L * L^T
+ * A is n x n (column-major), symmetric positive-definite. On return, A
+ * contains L in its lower triangle.
+ */
+VkResult vkblas_cholesky_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                             uint32_t n, void* A, uint32_t lda,
+                             void* info);
+
+/**
+ * \brief VJITC-bridge Eigenvalue Decomposition: A = V * diag(W) * V^T
+ * A is n x n (column-major), symmetric. On return, A contains eigenvectors
+ * (columns of V), and W contains eigenvalues.
+ */
+VkResult vkblas_eigendecomp_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                                uint32_t n, void* A, uint32_t lda,
+                                void* W, void* info);
+
 /* ===========================================================================
  * VJITC-bridge: 3D convolution (MIOpen) and JIT compilation (hipRTC/shaderc)
  * ========================================================================== */

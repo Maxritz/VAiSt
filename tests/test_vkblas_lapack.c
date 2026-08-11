@@ -90,9 +90,11 @@ int main(void) {
     /* === Test 1: LU Decomposition === */
     printf("\n--- Test 1: LU Decomposition ---\n");
     void* d_A;
+    void* d_W;
     void* d_ipiv;
     void* d_info;
     hipMalloc(&d_A, N * N * sizeof(double));
+    hipMalloc(&d_W, N * sizeof(double));
     hipMalloc(&d_ipiv, N * sizeof(int));
     hipMalloc(&d_info, sizeof(int));
     hipMemcpy(d_A, A_host, N * N * sizeof(double), hipMemcpyHostToDevice);
@@ -211,9 +213,99 @@ int main(void) {
     }
     hipFree(d_tau);
 
+    /* === Test 5: Cholesky Decomposition === */
+    printf("\n--- Test 5: Cholesky Decomposition ---\n");
+    /* SPD matrix: A = [[4, 2, 2], [2, 5, 1], [2, 1, 6]] */
+    float ch_A[N*N] = { 4.0f, 2.0f, 2.0f,
+                        2.0f, 5.0f, 1.0f,
+                        2.0f, 1.0f, 6.0f };
+    float ch_L[N*N] = { 0 };
+    hipMemcpy(d_A, ch_A, N * N * sizeof(float), hipMemcpyHostToDevice);
+    hipMemset(d_info, 0, sizeof(int));
+
+    vr = vkblas_cholesky_f32(ctx, cmd, N, d_A, N, d_info);
+    int info_val = 0;
+    hipMemcpy(&info_val, d_info, sizeof(int), hipMemcpyDeviceToHost);
+    if (vr != VK_SUCCESS || info_val != 0) {
+        printf("  cholesky_f32    : FAIL (vr=%d, info=%d)\n", vr, info_val);
+        pass = 0;
+    } else {
+        float L[N*N];
+        hipMemcpy(L, d_A, N * N * sizeof(float), hipMemcpyDeviceToHost);
+        /* Verify: L * L^T = A (L stored lower-triangular, column-major) */
+        float recon[N*N] = {0};
+        for (int i = 0; i < N; i++) {
+            for (int j = 0; j < N; j++) {
+                for (int k = 0; k <= i && k <= j; k++) {
+                    float lvi = L[k * N + i];  /* L[i,k] (col-major) */
+                    float lvj = L[k * N + j];  /* L[j,k] */
+                    recon[i * N + j] += lvi * lvj;
+                }
+            }
+        }
+        int ch_ok = 1;
+        for (int i = 0; i < N; i++) {
+            for (int j = 0; j < N; j++) {
+                if (fabsf(recon[i * N + j] - ch_A[i * N + j]) > 1e-5f) {
+                    ch_ok = 0;
+                }
+            }
+        }
+        if (ch_ok) {
+            printf("  cholesky_f32    : PASS (L * L^T = A)\n");
+        } else {
+            printf("  cholesky_f32    : FAIL (reconstruction mismatch)\n");
+            pass = 0;
+        }
+    }
+
+    /* === Test 6: Eigenvalue Decomposition === */
+    printf("\n--- Test 6: Eigenvalue Decomposition ---\n");
+    /* Same SPD matrix A = [[4,2,2],[2,5,1],[2,1,6]] (eigenvalues ~2,4,9) */
+    double eig_V[N*N] = { 4.0, 2.0, 2.0,
+                          2.0, 5.0, 1.0,
+                          2.0, 1.0, 6.0 };
+    double eig_W[N] = {0};
+    hipMemcpy(d_A, eig_V, N * N * sizeof(double), hipMemcpyHostToDevice);
+    hipMemset(d_info, 0, sizeof(int));
+
+    vr = vkblas_eigendecomp_f32(ctx, cmd, N, d_A, N, d_W, d_info);
+    info_val = 0;
+    hipMemcpy(&info_val, d_info, sizeof(int), hipMemcpyDeviceToHost);
+    if (vr != VK_SUCCESS || info_val != 0) {
+        printf("  eigendecomp_f32 : FAIL (vr=%d, info=%d)\n", vr, info_val);
+        pass = 0;
+    } else {
+        double W[N];
+        hipMemcpy(W, d_W, N * sizeof(double), hipMemcpyDeviceToHost);
+        /* Eigenvalues of [[4,2,2],[2,5,1],[2,1,6]]: char poly λ³-15λ²+62λ-52=0
+           Exact roots: 2.126, 4.486, 8.388 (approximately) */
+        double expected_eigs[N] = { 2.126, 4.486, 8.388 };
+        int eig_ok = 1;
+        for (int i = 0; i < N; i++) {
+            int found = 0;
+            for (int j = 0; j < N; j++) {
+                if (fabs(W[i] - expected_eigs[j]) < 0.01) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) eig_ok = 0;
+        }
+        if (eig_ok) {
+            printf("  eigendecomp_f32 : PASS (eigenvalues: %.3f %.3f %.3f)\n",
+                   W[0], W[1], W[2]);
+        } else {
+            printf("  eigendecomp_f32 : FAIL (got: %.3f %.3f %.3f)\n",
+                   W[0], W[1], W[2]);
+            pass = 0;
+        }
+    }
+
     /* === Cleanup === */
     hipFree(d_info);
     hipFree(d_ipiv);
+    hipFree(d_W);
     hipFree(d_A);
     vkblas_destroy_context(ctx);
     vkDestroyDevice(dev, NULL);

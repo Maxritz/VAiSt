@@ -135,3 +135,45 @@ VkResult vkblas_qr_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
 
     return (st == rocblas_status_success) ? VK_SUCCESS : VK_ERROR_UNKNOWN;
 }
+
+/* === Cholesky Decomposition: A = L * L^T (SPD matrix) === */
+VkResult vkblas_cholesky_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                             uint32_t n, void* A, uint32_t lda,
+                             void* info) {
+    if (!ctx || !A) return VK_ERROR_INITIALIZATION_FAILED;
+    (void)cmd;
+
+    rocblas_handle h = get_rocsolver_handle();
+    if (!h) return VK_ERROR_INITIALIZATION_FAILED;
+
+    rocblas_status st = rocsolver_spotrf(h, rocblas_fill_lower, (int)n,
+                                         (float*)A, (int)lda,
+                                         (rocblas_int*)info);
+    hipDeviceSynchronize();
+
+    return (st == rocblas_status_success) ? VK_SUCCESS : VK_ERROR_UNKNOWN;
+}
+
+/* === Eigenvalue Decomposition: A = V * diag(W) * V^T (symmetric) === */
+VkResult vkblas_eigendecomp_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                                uint32_t n, void* A, uint32_t lda,
+                                void* W, void* info) {
+    if (!ctx || !A || !W) return VK_ERROR_INITIALIZATION_FAILED;
+    (void)cmd;
+
+    rocblas_handle h = get_rocsolver_handle();
+    if (!h) return VK_ERROR_INITIALIZATION_FAILED;
+
+    size_t n2 = (size_t)n * (size_t)lda;
+    void* E = NULL;
+    hipMalloc(&E, n * sizeof(double));
+
+    rocblas_status st = rocsolver_dsyev(h, rocblas_evect_original, rocblas_fill_lower,
+                                        (int)n, (double*)A, (int)lda,
+                                        (double*)W, (double*)E,
+                                        (rocblas_int*)info);
+    hipDeviceSynchronize();
+    hipFree(E);
+
+    return (st == rocblas_status_success) ? VK_SUCCESS : VK_ERROR_UNKNOWN;
+}
