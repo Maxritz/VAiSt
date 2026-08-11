@@ -254,7 +254,7 @@ int main(void) {
                          1, &bmb_out2, 0, NULL);
 
     /* readback max pool result */
-    float max_got[4];
+    float max_got[9];
     /* We need to wait, read, then re-record for avg pool. Simplest: end cmd, submit, wait, check. */
 
 submit:

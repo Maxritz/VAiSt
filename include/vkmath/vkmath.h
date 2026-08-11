@@ -725,6 +725,40 @@ VkResult vkmath_pool2d_f32(VkMathContext *ctx, VkCommandBuffer cmd,
                            uint32_t pool_type,
                            VkBuffer input, VkBuffer output);
 
+/**
+ * \brief Batch normalization inference (NCHW, batch=1, per-channel params).
+ *
+ * out = gamma * (x - mean) / sqrt(var + eps) + beta
+ *
+ * scale/params buffer layout: [gamma[C], beta[C], mean[C], var[C]]
+ *
+ * \param h, w Spatial dimensions.
+ * \param channels Number of channels C.
+ * \param eps Epsilon added to variance.
+ * \param scale_offset Offset (in floats) into params buffer where gamma starts.
+ * \param bias_offset  Offset where beta starts.
+ * \param mean_offset  Offset where mean starts.
+ * \param var_offset   Offset where var starts.
+ * \param input Input buffer [C, H, W].
+ * \param params Scale/bias/mean/var buffer.
+ * \param output Output buffer [C, H, W].
+ */
+VkResult vkmath_batchnorm_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                              uint32_t in_w, uint32_t in_h,
+                              uint32_t channels, float eps,
+                              uint32_t scale_offset, uint32_t bias_offset,
+                              uint32_t mean_offset, uint32_t var_offset,
+                              VkBuffer input, VkBuffer params, VkBuffer output);
+
+/**
+ * \brief 2D tensor transpose: out[j][i] = in[i][j] (row-major both sides).
+ * Input:  [rows * cols] (binding 0)
+ * Output: [cols * rows] (binding 1)
+ */
+VkResult vkmath_transpose_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                              uint32_t rows, uint32_t cols,
+                              VkBuffer input, VkBuffer output);
+
 /* ===========================================================================
  * Utility
  * ========================================================================== */

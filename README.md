@@ -315,9 +315,9 @@ in `specs/VKDIST-DESIGN.md`.
 
 - **GPU-accelerated linear algebra**: LU, QR, Cholesky, Eigenvalue Decomposition,
   determinant, matrix inverse — hardware-specific kernels needed.
-- **GPU-accelerated batch normalization** (conv2d and pool2d are now implemented).
-- **GPU-accelerated sparse matrix operations**: sparse gemm, solve, factorize.
-- **GPU-accelerated matrix operations**: transpose, determinant, inverse.
+- **GPU-accelerated batch normalization** — `vkmath_batchnorm_f32` implemented.
+- **GPU-accelerated matrix operations**: transpose — `vkmath_transpose_f32` implemented.
+  Determinant, inverse still pending.
 
 ### Already Implemented (not deferred)
 
@@ -333,6 +333,8 @@ already present in the codebase:
 - **FFT**: radix-2 forward/inverse, f32 and f16, 1D and 2D.
 - **GPU conv2d**: NCHW 2D convolution (f32), 3x3/5x5 kernels, arbitrary stride/pad.
 - **GPU pool2d**: Max and average pooling (f32), arbitrary window/stride/pad.
+- **GPU batchnorm**: Per-channel batch normalization inference (f32).
+- **GPU transpose**: 2D tensor transpose (f32).
 
 ---
 

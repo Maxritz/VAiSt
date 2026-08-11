@@ -83,6 +83,8 @@ static const shader_blob_t s_shader_table[] = {
     {VKMATH_KERNEL_TANH_BF16,        VKMATH_DTYPE_BF16, VKMATH_TIER_BASELINE, vkmath_spv_baseline_tanh_bf16,         vkmath_spv_baseline_tanh_bf16_size},
     {VKMATH_KERNEL_CONV2D_F32,       VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_conv2d_f32,         vkmath_spv_baseline_conv2d_f32_size},
     {VKMATH_KERNEL_POOL2D_F32,       VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_pool2d_f32,         vkmath_spv_baseline_pool2d_f32_size},
+    {VKMATH_KERNEL_BATCHNORM_F32,    VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_batchnorm_f32,      vkmath_spv_baseline_batchnorm_f32_size},
+    {VKMATH_KERNEL_TRANSPOSE_F32,    VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_transpose_f32,      vkmath_spv_baseline_transpose_f32_size},
     /* subgroup tier — only kernels with subgroup .comp files */
     {VKMATH_KERNEL_SILU,       VKMATH_DTYPE_F32, VKMATH_TIER_SUBGROUP, vkmath_spv_subgroup_silu_f32,          vkmath_spv_subgroup_silu_f32_size},
     {VKMATH_KERNEL_SILU,       VKMATH_DTYPE_F16, VKMATH_TIER_SUBGROUP, vkmath_spv_subgroup_silu_f16,          vkmath_spv_subgroup_silu_f16_size},
@@ -1300,5 +1302,150 @@ VkResult vkmath_pool2d_f32(VkMathContext *ctx, VkCommandBuffer cmd,
     pc.pad_w = pad_w; pc.pad_h = pad_h; pc.in_c = in_c; pc.pool_type = pool_type;
 
     return vkmath_cmd_dispatch_pool2d(ctx, cmd, &pc,
+        groups > 0 ? groups : 1, input, output);
+}
+
+/* ── BatchNorm ──────────────────────────────────────────────────────────────── */
+
+typedef struct {
+    uint32_t h;
+    uint32_t w;
+    uint32_t channels;
+    float    eps;
+    uint32_t scale_offset;
+    uint32_t bias_offset;
+    uint32_t mean_offset;
+    uint32_t var_offset;
+} batchnorm_pc_t;
+
+static VkResult vkmath_cmd_dispatch_batchnorm(VkMathContext *ctx, VkCommandBuffer cmd,
+    const batchnorm_pc_t *pc,
+    uint32_t dispatch_x, VkBuffer input, VkBuffer params, VkBuffer output) {
+
+    VkPipeline pipeline;
+    VkResult r = vkmath_ensure_pipeline(ctx, VKMATH_KERNEL_BATCHNORM_F32,
+        VKMATH_DTYPE_F32, &pipeline);
+    if (r != VK_SUCCESS) return r;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdPushConstants(cmd, ctx->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(*pc), pc);
+
+    VkDescriptorBufferInfo info_in = { input,  0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo info_p = { params, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo info_out = { output, 0, VK_WHOLE_SIZE };
+
+    VkWriteDescriptorSet writes[3];
+    memset(writes, 0, sizeof(writes));
+    for (int i = 0; i < 3; i++) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstBinding = (uint32_t)i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    }
+    writes[0].pBufferInfo = &info_in;
+    writes[1].pBufferInfo = &info_p;
+    writes[2].pBufferInfo = &info_out;
+
+    if (ctx->push_desc_fn) {
+        ctx->push_desc_fn(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          ctx->pipeline_layout, 0, 3, writes);
+    } else {
+        VkDescriptorSet ds;
+        r = vkmath_alloc_descriptor_set(ctx, &ds);
+        if (r != VK_SUCCESS) return r;
+        for (int i = 0; i < 3; i++) writes[i].dstSet = ds;
+        vkUpdateDescriptorSets(ctx->device, 3, writes, 0, NULL);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                ctx->pipeline_layout, 0, 1, &ds, 0, NULL);
+    }
+
+    if (dispatch_x == 0) dispatch_x = 1;
+    vkCmdDispatch(cmd, dispatch_x, 1, 1);
+    return VK_SUCCESS;
+}
+
+VkResult vkmath_batchnorm_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                              uint32_t in_w, uint32_t in_h,
+                              uint32_t channels, float eps,
+                              uint32_t scale_offset, uint32_t bias_offset,
+                              uint32_t mean_offset, uint32_t var_offset,
+                              VkBuffer input, VkBuffer params, VkBuffer output) {
+    uint32_t total = channels * in_h * in_w;
+    uint32_t groups = (total + VKMATH_WORKGROUP_SIZE - 1) / VKMATH_WORKGROUP_SIZE;
+
+    batchnorm_pc_t pc;
+    pc.h = in_h; pc.w = in_w; pc.channels = channels; pc.eps = eps;
+    pc.scale_offset = scale_offset; pc.bias_offset = bias_offset;
+    pc.mean_offset = mean_offset; pc.var_offset = var_offset;
+
+    return vkmath_cmd_dispatch_batchnorm(ctx, cmd, &pc,
+        groups > 0 ? groups : 1, input, params, output);
+}
+
+/* ── Transpose ──────────────────────────────────────────────────────────────── */
+
+typedef struct {
+    uint32_t rows;
+    uint32_t cols;
+    uint32_t _pad0;
+    uint32_t _pad1;
+} transpose_pc_t;
+
+static VkResult vkmath_cmd_dispatch_transpose(VkMathContext *ctx, VkCommandBuffer cmd,
+    const transpose_pc_t *pc,
+    uint32_t dispatch_x, VkBuffer input, VkBuffer output) {
+
+    VkPipeline pipeline;
+    VkResult r = vkmath_ensure_pipeline(ctx, VKMATH_KERNEL_TRANSPOSE_F32,
+        VKMATH_DTYPE_F32, &pipeline);
+    if (r != VK_SUCCESS) return r;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdPushConstants(cmd, ctx->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(*pc), pc);
+
+    VkDescriptorBufferInfo info_in  = { input,   0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo info_out = { output,  0, VK_WHOLE_SIZE };
+
+    VkWriteDescriptorSet writes[2];
+    memset(writes, 0, sizeof(writes));
+    for (int i = 0; i < 2; i++) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstBinding = (uint32_t)i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    }
+    writes[0].pBufferInfo = &info_in;
+    writes[1].pBufferInfo = &info_out;
+
+    if (ctx->push_desc_fn) {
+        ctx->push_desc_fn(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          ctx->pipeline_layout, 0, 2, writes);
+    } else {
+        VkDescriptorSet ds;
+        r = vkmath_alloc_descriptor_set(ctx, &ds);
+        if (r != VK_SUCCESS) return r;
+        for (int i = 0; i < 2; i++) writes[i].dstSet = ds;
+        vkUpdateDescriptorSets(ctx->device, 2, writes, 0, NULL);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                ctx->pipeline_layout, 0, 1, &ds, 0, NULL);
+    }
+
+    if (dispatch_x == 0) dispatch_x = 1;
+    vkCmdDispatch(cmd, dispatch_x, 1, 1);
+    return VK_SUCCESS;
+}
+
+VkResult vkmath_transpose_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                              uint32_t rows, uint32_t cols,
+                              VkBuffer input, VkBuffer output) {
+    uint32_t total = rows * cols;
+    uint32_t groups = (total + VKMATH_WORKGROUP_SIZE - 1) / VKMATH_WORKGROUP_SIZE;
+
+    transpose_pc_t pc;
+    pc.rows = rows; pc.cols = cols; pc._pad0 = 0; pc._pad1 = 0;
+
+    return vkmath_cmd_dispatch_transpose(ctx, cmd, &pc,
         groups > 0 ? groups : 1, input, output);
 }

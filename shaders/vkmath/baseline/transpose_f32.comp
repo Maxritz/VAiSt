@@ -1,0 +1,36 @@
+#version 450
+
+/**
+ * \brief 2D tensor transpose: out[j][i] = in[i][j]
+ * Input:  [rows * cols] (row-major)  (binding 0)
+ * Output: [cols * rows] (transposed)  (binding 1)
+ *
+ * Push constant (std140, 16 bytes):
+ *   rows, cols
+ */
+
+layout(push_constant) uniform TransPC {
+    uint  rows;
+    uint  cols;
+    uint  _pad0;
+    uint  _pad1;
+} pc;
+
+layout(set = 0, binding = 0) buffer BufIn  { float in_data[];  };
+layout(set = 0, binding = 1) buffer BufOut { float out_data[]; };
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = pc.rows * pc.cols;
+    if (idx >= total) { return; }
+
+    uint row = idx / pc.cols;
+    uint col = idx % pc.cols;
+
+    /* out is [cols * rows], element out[col][row] = in[row][col] */
+    uint in_idx = row * pc.cols + col;
+    uint out_idx = col * pc.rows + row;
+    out_data[out_idx] = in_data[in_idx];
+}
