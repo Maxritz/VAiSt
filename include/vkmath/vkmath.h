@@ -710,6 +710,41 @@ VkResult vkmath_conv2d_f32(VkMathContext *ctx,
                            VkBuffer output);
 
 /**
+ * \brief 1D convolution (NCHW, batch=1, groups=1, with optional bias).
+ *
+ * Conv1D is a thin wrapper over the existing conv2d shader with kh=1.
+ * Input:  [in_c, in_w]            (binding 0, SSBO float)
+ * Weight: [out_c, in_c, 1, kw]    (binding 1, SSBO float)
+ * Output: [out_c, in_w]           (binding 2, SSBO float)
+ *
+ * out_w computed from in_w, kw, stride_w, pad_w.
+ *
+ * \param in_w     Input width (sequence length).
+ * \param kw       Kernel width (receptive field).
+ * \param stride_w Stride in width dimension.
+ * \param pad_w    Zero-padding on each side of width.
+ * \param in_c     Number of input channels.
+ * \param out_c    Number of output channels.
+ * \param w_offset Offset (in floats) into weights buffer where weights start
+ *                 (bias follows weights immediately: b_offset = w_elements).
+ * \param b_offset Offset where bias starts.
+ * \param input Input buffer.
+ * \param weights Bias+weights buffer.
+ * \param output Output buffer.
+ */
+VkResult vkmath_conv1d_f32(VkMathContext *ctx,
+                           VkCommandBuffer cmd,
+                           uint32_t in_w,
+                           uint32_t kw,
+                           uint32_t stride_w,
+                           uint32_t pad_w,
+                           uint32_t in_c, uint32_t out_c,
+                           uint32_t w_offset, uint32_t b_offset,
+                           VkBuffer input,
+                           VkBuffer weights,
+                           VkBuffer output);
+
+/**
  * \brief 2D pooling (NCHW, batch=1).
  * Input:  [in_c, H_in, W_in]     (binding 0)
  * Output: [in_c, H_out, W_out]   (binding 1)

@@ -1221,6 +1221,27 @@ VkResult vkmath_conv2d_f32(VkMathContext *ctx, VkCommandBuffer cmd,
         groups > 0 ? groups : 1, input, weights, output);
 }
 
+/* ── Conv1D (thin wrapper over Conv2D with kh=1) ───────────────────────────── */
+
+VkResult vkmath_conv1d_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                           uint32_t in_w,
+                           uint32_t kw,
+                           uint32_t stride_w,
+                           uint32_t pad_w,
+                           uint32_t in_c, uint32_t out_c,
+                           uint32_t w_offset, uint32_t b_offset,
+                           VkBuffer input, VkBuffer weights, VkBuffer output) {
+    /* Conv1D = Conv2D with kernel height 1, spatial height 1, no vertical padding */
+    return vkmath_conv2d_f32(ctx, cmd,
+        in_w, 1,   /* in_w, in_h=1 (sequence is 1D) */
+        kw, 1,     /* kw, kh=1 (1D kernel) */
+        stride_w, 1, /* stride_w, stride_h=1 */
+        pad_w, 0,  /* pad_w, pad_h=0 */
+        in_c, out_c,
+        w_offset, b_offset,
+        input, weights, output);
+}
+
 /* ── Pool2D (max/avg) ───────────────────────────────────────────────────────── */
 
 typedef struct {

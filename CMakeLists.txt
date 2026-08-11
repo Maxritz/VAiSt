@@ -122,6 +122,14 @@ if(BUILD_TESTING)
     target_link_libraries(test_vkmath_transpose PRIVATE vkmath Vulkan::Vulkan)
     add_test(NAME test_vkmath_transpose COMMAND test_vkmath_transpose)
 
+    add_executable(test_vkmath_conv1d tests/test_vkmath_conv1d.c)
+    target_include_directories(test_vkmath_conv1d PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkmath
+    )
+    target_link_libraries(test_vkmath_conv1d PRIVATE vkmath Vulkan::Vulkan)
+    add_test(NAME test_vkmath_conv1d COMMAND test_vkmath_conv1d)
+
     add_executable(test_vkblas tests/test_vkblas.c)
     target_include_directories(test_vkblas PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
