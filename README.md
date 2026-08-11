@@ -32,10 +32,11 @@ you're outside AMD's specific supported paths.
 
 VAiSt fixes this by starting from first principles:
 
-- **One command buffer per decode step.** All dispatches for a model are
-  recorded into a single `VkCommandBuffer` with explicit pipeline barriers,
-  eliminating the per-op `vkQueueSubmit` + `vkWaitForFences` round-trips
-  that serialize CPU-bound work on the legacy path.
+- **One command buffer per decode step.** At the engine level, all dispatches
+  for a decode step are recorded into a single `VkCommandBuffer` with explicit
+  pipeline barriers, eliminating the per-op `vkQueueSubmit` + `vkWaitForFences`
+  round-trips that serialize CPU-bound work. At the library level, each `vkblas_*`
+  call records into a caller-supplied `VkCommandBuffer`.
 
 - **Push descriptors everywhere.** Zero per-dispatch descriptor pool
   allocations. Every `vkCmdPushDescriptorSetKHR` binds directly.
@@ -85,7 +86,7 @@ VAiSt
 │   ├── Common_Issues.md        GPU hang / device-lost / fence issues (catalog)
 │   └── (per-subsystem specs)
 ├── tests/                23+ test harnesses (build + run green on RX 9070 XT)
-└── docs/                 Pointers into specs/
+└── docs/                 (empty placeholder — spec pointers live in specs/)
 ```
 
 ### VKBLAS (implemented)
@@ -106,7 +107,7 @@ automatically based on GPU capabilities:
 All plain GEMM precisions dispatch a shared-memory tiled baseline plus a
 **subgroup twin** (32×8 warp tile, `subgroupShuffle` x-broadcast, no shared
 memory) where `VK_KHR_shader_subgroup` is available. A cooperative-matrix tier
-exists for f32 but is dormant by default (see note below).
+exists for f32/f16/bf16/f64 but is dormant by default (see note below).
 
 **Fused quantized GEMM (qgemm)** — dequant + MAC fused in one shader, the
 decode hot path. All seven ggml weight formats dispatch a 16×16 baseline and a
@@ -125,7 +126,7 @@ in y/z (f16 output storage).
 | `vkblas_qgemm_q6k_f32` / `_f16` | Fused GEMM with Q6_K weights |
 | `vkblas_qgemm_q3k_f32` / `_f16` | Fused GEMM with Q3_K weights |
 | `vkblas_qgemm_iq4xs_f32` / `_f16` | Fused GEMM with IQ4_XS weights |
-| `vkblas_qgemm_get_tier` | Query resolved tier (BASELINE/SUBGROUP) per format |
+| `vkblas_qgemm_get_tier` | Query resolved tier (BASELINE/SUBGROUP/COOPMATRIX) per format |
 
 **Cooperative Matrix GEMM** — the `GL_KHR_cooperative_matrix` 
 `coopMatLoad`/`coopMatMulAdd`/`coopMatStore` path is compiled into valid
@@ -140,7 +141,7 @@ mechanical find-and-replace:
 
 ```c
 VkBLASContext* ctx;
-vkblas_create_context(physicalDevice, device, &ctx);
+vkblas_create_context(instance, physicalDevice, device, &ctx);
 // First call: detects extensions, lazily creates pipelines
 vkblas_sgemm(ctx, cmd, VKBLAS_OP_N, VKBLAS_OP_N,
              m, n, k, &alpha, bufA, lda, bufB, ldb,
@@ -168,6 +169,8 @@ reuses `VkBLASContext`):
 | `vkblas_l1_nrm2` | f32 | Euclidean norm |
 | `vkblas_l1_asum` | f32 | Sum of absolute values |
 | `vkblas_l1_amax` | f32 | Index of max |x| (0-based) |
+| `vkblas_l1_max_reduce_f32` | f32 | Max reduction |
+| `vkblas_l1_min_reduce_f32` | f32 | Min reduction |
 | `vkblas_l2_gemv` | f32/f16 | `y = alpha*op(A)*x + beta*y` (N and T) |
 
 ### VKMath (implemented)
@@ -177,14 +180,14 @@ compute dispatches. Mirrors the VKBLAS context/pipeline-caching pattern.
 
 | Function | Description |
 |----------|-------------|
-| `vkmath_relu_f32/f16` | ReLU activation |
-| `vkmath_silu_f32/f16` | SiLU (Swish) activation |
-| `vkmath_gelu_f32/f16` | GELU (tanh approx) activation |
-| `vkmath_tanh_f32/f16` | Hyperbolic tangent |
-| `vkmath_sigmoid_f32/f16` | Sigmoid |
-| `vkmath_add_f32/f16`, `vkmath_mul_f32/f16` | Elementwise binary ops |
-| `vkmath_add_mul_f32/f16` | Fused `(a+b)*alpha` |
-| `vkmath_scale_f32/f16` | `alpha * in` |
+| `vkmath_relu_f32/f16/bf16` | ReLU activation |
+| `vkmath_silu_f32/f16/bf16` | SiLU (Swish) activation |
+| `vkmath_gelu_f32/f16/bf16` | GELU (tanh approx) activation |
+| `vkmath_tanh_f32/f16/bf16` | Hyperbolic tangent |
+| `vkmath_sigmoid_f32/f16/bf16` | Sigmoid |
+| `vkmath_add_f32/f16/bf16`, `vkmath_mul_f32/f16/bf16` | Elementwise binary ops |
+| `vkmath_add_mul_f32/f16/bf16` | Fused `(a+b)*alpha` |
+| `vkmath_scale_f32/f16/bf16` | `alpha * in` |
 | `vkmath_max_reduce_dim_f32`, `vkmath_sum_reduce_dim_f32` | Row reductions |
 | `vkmath_softmax_f32`, `vkmath_rms_norm_f32`, `vkmath_layernorm_f32` | Normalization ops |
 | `vkmath_argmax_f32`, `vkmath_argmin_f32`, `vkmath_cumsum_f32` | Index / scan ops |
@@ -249,7 +252,7 @@ The hipRuntime-equivalent base layer every library sits on. Vulkan-native.
 
 | Function | Description |
 |----------|-------------|
-| `vkr_create_runtime` / `vkr_destroy_runtime` | Device/queue wrapper + capability detection |
+| `vkr_create_device` / `vkr_destroy_device` | Device/queue wrapper + capability detection |
 | `vkr_detect_capabilities` | Shared feature/property detection + arch ladder |
 | `vkr_malloc` / `vkr_free` | Pooled buffer allocator (hipMalloc-equivalent) |
 | `vkr_upload` / `vkr_download` | Staging upload/download with sync |
@@ -269,7 +272,7 @@ as ready-to-use components.
 
 | Function | Description |
 |----------|-------------|
-| `vkmodel_load` / `vkmodel_destroy` | Load/free a GGUF model (all metadata value types, streamed tensor upload) |
+| `vkmodel_load_gguf` / `vkmodel_destroy` | Load/free a GGUF model (all metadata value types, streamed tensor upload) |
 | `vkmodel_load_safetensors` | Load a safetensors model (self-contained JSON header parser, `__metadata__` KV exposure, verbatim offsets) |
 | `vkmodel_load_openvino` | Load an OpenVINO IR v11 model (`<xml>` + `.bin`; tag-scans Const `<data>` + legacy `<weights>`/`<biases>`, element types f32/f16/bf16/f64/i8..i64 mapped natively, per-tensor size + `.bin` span validation) |
 | `vkmodel_get_kv_count/_key/_string` | Host-side metadata access |
@@ -278,9 +281,9 @@ as ready-to-use components.
 
 ### VKKV (implemented)
 
-Cross-model KV cache transfer per arXiv:2608.03893 — per-head closed-form
-ridge mapper that maps a source model's K/V cache to a target so prefill can
-be skipped when swapping same-family models.
+Cross-model KV cache transfer — per-head closed-form ridge mapper that maps
+a source model's K/V cache to a target so prefill can be skipped when
+swapping same-family models (design doc pending).
 
 | Function | Description |
 |----------|-------------|
@@ -330,32 +333,6 @@ in `specs/VKDIST-DESIGN.md`.
 - No runtime JIT by default — `VAIT_JIT` CMake option (OFF) enables hipRTC + shaderc.
 - Coopmatrix (COOPMATRIX tier) dormant by default due to AMD driver 26.7.1 crash; activated via `VAIT_COOPMATRIX=1`.
 
-### Already Implemented (not deferred)
-
-The following primitives were previously listed as "Not Yet Implemented" but are
-already present in the codebase:
-
-- **Math primitives**: exp, log, sqrt, pow, sign, scale, clip — all dispatch via
-  `vkmath_*_f32` (and f16/bf16 where applicable). See `shaders/vkmath/baseline/`.
-- **Activations**: relu, silu, gelu, sigmoid, tanh — f32 and f16 variants.
-- **Reductions**: sum, max, argmax, argmin, cumsum — row-wise and global.
-- **Normalization**: softmax, rms_norm, layernorm — f32 and f16.
-- **PRNG**: threefry (ThreeFry2x32-20), uniform, normal — see `shaders/vkrand/baseline/`.
-- **FFT**: radix-2 forward/inverse, f32 and f16, 1D and 2D.
-- **GPU conv1d/conv2d/conv3d** (VJITC bridge): `vkblas_conv1d_f32`,
-  `vkblas_conv2d_f32`, `vkblas_conv3d_f32`   via MIOpen `miopenConvolutionForward`.
-- **GPU pool2d**: Max and average pooling (f32), arbitrary window/stride/pad.
-- **GPU batchnorm**: Per-channel batch normalization inference (f32).
-- **GPU transpose**: 2D tensor transpose (f32).
-- **Sparse GEMM** (VJITC bridge): `vkblas_sparse_gemm_f32()` via hipSPARSE
-  `hipsparseSpMM` — CSR sparse-dense matmul with zero-copy VkBuffer↔HIP ptr.
-- **GPU-accelerated linear algebra** (VJITC bridge): `vkblas_lu_f32`,
-  `vkblas_inverse_f32`, `vkblas_determinant_f32`, `vkblas_qr_f32`,
-  `vkblas_cholesky_f32`, `vkblas_eigendecomp_f32` via rocSOLVER.
-- **Runtime JIT compilation**: `vkblas_jit_compile_hip` (hipRTC),
-  `vkblas_jit_compile_glsl_to_spirv` (shaderc), `vkblas_jit_load_hip_module`
-  — gated behind `VAIT_JIT=ON` CMake option.
-
 ---
 
 ## Building
@@ -364,7 +341,9 @@ already present in the codebase:
 
 - **Vulkan SDK 1.4.357.0** or newer (https://vulkan.lunarg.com)
 - **CMake 3.20+** or Visual Studio 2022 with C++ build tools
-- **AMD GPU** with Vulkan 1.4 support (RDNA2 or RDNA4 recommended)
+- **AMD GPU** with Vulkan 1.1+ support (RDNA2 = Vulkan 1.1 baseline for
+  shaders; Vulkan 1.4 + `VK_KHR_cooperative_matrix` required for the dormant
+  coopmatrix tier)
 
 ### Compile Shaders
 
@@ -428,16 +407,16 @@ hipblasDestroy(...) →  vkblas_destroy_context(...)
 ```
 
 Types follow the same scheme: `s` = f32, `d` = f64, `h` = f16, `bf` = bf16,
-`c` = complex-f32, `z` = complex-f64, `i8` = int8.
+`c` = complex-f32, `z` = complex-f64. (int8 GEMM reserved but unimplemented.)
 
 ### Specialization Constants Over #define
 
 Tile dimensions, unroll factors, and wave widths are SPIR-V specialization
 constants (`constant_id`), not pre-compiled `#define` variants. One SPIR-V
-binary can be reconfigured at pipeline creation time without recompilation.
-This keeps the shader count manageable — 126 sources produce 126 binaries
-because we only vary by wave size (32 vs 64) and tile via specialization
-constants, not by pre-compiled `#define` variants.
+binary per shader source can be reconfigured at pipeline creation time without
+recompilation. The 191 `.comp` files compile to 191 SPIR-V blobs in the
+checked-in `shaders_spv.h` headers — specialization varies tile/wave at
+pipeline-creation time, not by pre-compiled variants.
 
 ---
 
@@ -449,8 +428,9 @@ We welcome contributions. Here is how to get started:
 
 1. Read the root `AGENTS.md` — it is the binding contract for this repo.
 2. Check the `specs/` directory for reference material and the design docs.
-3. Pick an unimplemented component (VKFFT, VKRAND, VKMath, VKQuant, or the
-   LLM engine layers) and open an issue to claim it.
+3. Pick an unimplemented component or enhancement (bf16 reductions, f16 ext-GEMM
+   coopmatrix tiers, int8 ops, new block-quant formats, or a new shader tier)
+   and open an issue to claim it.
 4. Read the per-component `AGENTS.md` (e.g. `src/vkblas/AGENTS.md`) before
    writing any code.
 
@@ -497,10 +477,12 @@ open-standard projects:
   handles VkDeviceMemory allocation and is bundled under
   `third_party/vk_mem_alloc.h`.
 
-- **ROCm / AMD** — for hipBLAS, rocFFT, rocBLAS, and rocrand. VAiSt mirrors
-  their API names, data type conventions, and algorithm structures. The
-  reference ROCm headers used during development are mirrored under
-  `specs/rocm-reference/` with attribution.
+- **ROCm / AMD** — for hipBLAS (API naming reference), rocSPARSE, rocsolver, and
+  MIOpen. VAiSt bridges to these libraries for sparse GEMM (`vkblas_sparse_gemm_f32`),
+  LAPACK factorizations (`vkblas_lu_f32`/`_inverse_f32`/`_determinant_f32`/`_qr_f32`/
+  `_cholesky_f32`/`_eigendecomp_f32`), and conv1d/2d/3d (`vkblas_conv{1d,2d,3d}_f32`)
+  via zero-copy VkBuffer↔HIP-device-pointer interop. `specs/rocm-reference/`
+  mirrors reference headers with attribution.
   (https://rocmd.docs.amd.com/)
 
 - **LunarG** — for the Vulkan SDK (1.4.357.0), glslangValidator, spirv-val,

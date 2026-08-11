@@ -32,14 +32,14 @@
 | RNG / distribution sampling | cuRAND | rocRAND / rocPRIM | (OV runtime RNG) | VKRAND | exists (Threefry + uniform/normal) |
 | Elementwise / activations / reductions / softmax | (kernels/CUB) | rocPRIM + MIOpen | ngraph ops | VKMath | exists; **bf16 elementwise compute ops integrated** (`add/mul/add_mul/scale`, uint16_t bf16 I/O, f32 compute) — no bf16 activations/reductions; f16 add/mul/scale public APIs lack blobs → `VK_ERROR_FEATURE_NOT_PRESENT` |
 | Weight quantization (block formats) | cuTensor/cuQuant (via) | MIOpen | NNCF | VKQuant | exists (dequant 23 + forward-quant 22 formats) |
-| Sparse BLAS | cuSPARSE | rocSPARSE | — | (none) | gap |
-| Signal/image processing | NPP | rocAL | — | (none) | gap |
+| Sparse BLAS | cuSPARSE | rocSPARSE | — | VKBLAS (sparse_gemm_f32) | exists (CSR SpMM via rocSPARSE bridge); no sparse LU etc. |
+| Signal/image processing | NPP | rocAL | — | (VJITC bridge: MIOpen conv) | conv1d/2d/3d via `vkblas_conv{1d,2d,3d}_f32`
 
 ### Compiler / JIT
 | CUDA nvcc/NVRTC (runtime compile) | ROCm hipcc/hipRTC | OpenVINO Model Optimizer | This SDK |
 |---|---|---|---|
 | JIT compile of kernels | hipcc compile; hipRTC JIT | convert model -> IR (.xml/.bin) | `compile_shaders.ps1` -> `shaders_spv.h` embedded SPIR-V |
-Status: **offline static compile only**, no runtime JIT (NVRTC/hipRTC-style). Shader blobs are compile-time embedded arrays; "add a kernel" = drop a `.comp` + regenerate.
+Status: **offline static compile by default**; runtime JIT available via `VAIT_JIT=ON` CMake option (hipRTC + shaderc). Shader blobs are compile-time embedded arrays; "add a kernel" = drop a `.comp` + regenerate.
 
 ### Distributed / transport
 | NCCL (GPU-aware collectives) | rccl | — | VKDIST |
@@ -82,9 +82,9 @@ VKKDIST: u32-LE length+opcode framing, OS-agnostic sockets, <=1 MiB frames, `vkd
 1. **qgemm + f16/bf16/f64 GEMM: baseline shared-mem tiled only** — no subgroup/coopmatrix dequant+MAC tier. qgemm is the decode hot path (>80 tok/s goal); RX 9070 XT (coopmatrix) can host this tier. **Highest perf priority.**
 2. **qgemm outputs f32 only** — no fp16 output storage path (all writes f32).
 3. **VKMath: bf16 elementwise ops integrated** — `vkmath_add_bf16`/`vkmath_mul_bf16`/`vkmath_add_mul_bf16`/`vkmath_scale_bf16` (`baseline/{add,mul,add_mul,scale}_bf16.comp`, uint16_t bf16 I/O, f32 compute, truncate) PASS on RX 9070 XT; bf16 casts already integrated. Remaining VKMath: bf16 activations/reductions; f16 add/mul/scale public APIs lack `(KERNEL, DTYPE_F16)` table entries → `VK_ERROR_FEATURE_NOT_PRESENT`.
-4. No cuSPARSE-equivalent (sparse BLAS) / no NPP-equivalent (signal/image).
-5. No runtime JIT (NVRTC/hipRTC) — offline shader compile only.
+4. No higher-level sparse ops beyond CSR SpMM (sparse LU, etc.).
+5. No runtime JIT by default — `VAIT_JIT` CMake option (OFF) enables hipRTC + shaderc; coopmatrix dormant by default (AMD driver 26.7.1 crash).
 
 ## Next action queue
 1. (STARTING) **qgemm subgroup/coopmatrix dequant+MAC tier** (RX 9070 XT), then f16/bf16/f64 GEMM tier — the >80 tok/s path.
-2. (optional) OpenVINO IR loader; sparse BLAS; runtime JIT — lower priority.
+2. (optional) f16/bf16 GEMM subgroup tiers; bf16 activations/reductions — lower priority.

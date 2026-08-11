@@ -251,8 +251,7 @@ GPU host target (verified by `vulkaninfo` on this machine): **AMD Radeon RX
    from f16 bit patterns to f32 via `vkblas_f16_to_f32` before dispatch
    (matching the pattern already used in `vkblas_fill_pc_f32` for GEMM).
    `test_vkblas` PASS on RX 9070 XT — all 8 ext ops now pass in both f32 and f16.
-5. No sparse BLAS (cuSPARSE/rocSPARSE), no NPP-equivalent (signal/image), no
-   runtime JIT (NVRTC/hipRTC) — offline shader compile only.
+5. No runtime JIT by default — `VAIT_JIT` CMake option (OFF) enables hipRTC + shaderc dynamic compilation. Coopmatrix (COOPMATRIX tier) dormant by default due to driver crash.
 6. **DONE: OpenVINO IR loader** — `vkmodel_load_openvino(rt, xml, bin, &m)`
    (tag-scans IR v11 `.xml` for Const `<data>` + legacy `<weights>`/`<biases>`
    with output-port precision/dim fallback; element types f32/f16/bf16/f64/
