@@ -311,13 +311,22 @@ in `specs/VKDIST-DESIGN.md`.
 - **All 8 ext BLAS ops** (trsv/trsm/symv/hemv/symm/hemm/syrk/herk) pass in both
   f32 and f16 — f16 variants convert alpha/beta via `vkblas_f16_to_f32` before dispatch.
 
-### Not Yet Implemented
+### Not Yet Implemented (VJITC bridge candidates)
 
+These are architecturally feasible via HIP→Vulkan zero-copy bridge but deferred:
+
+- **Sparse BLAS**: sparse gemm, solve, factorize — bridgeable via rocSPARSE
+  (rocsparse.dll/lib available in ROCm 7.14, device pointers map directly to
+  VkBuffer handles via the shared-memory import path).
+- **NPP-equivalent**: conv1d (via rocFFT), conv3d, image processing ops —
+  MIOpen (MIOpen.lib available) provides conv1d/conv3d primitives.
+- **Runtime JIT compilation**: hipRTC (hiprtc0714.dll available) enables dynamic
+  kernel generation for variable tensor shapes. Would require architectural
+  change to AGENTS.md ("offline compile only" → "offline compile by default,
+  hipRTC JIT behind feature flag").
 - **GPU-accelerated linear algebra**: LU, QR, Cholesky, Eigenvalue Decomposition,
-  determinant, matrix inverse — hardware-specific kernels needed.
-- **GPU-accelerated batch normalization** — `vkmath_batchnorm_f32` implemented.
-- **GPU-accelerated matrix operations**: transpose — `vkmath_transpose_f32` implemented.
-  Determinant, inverse still pending.
+  determinant, matrix inverse — rocsolver available for bridge (transpose is
+  implemented via `vkmath_transpose_f32`).
 
 ### Already Implemented (not deferred)
 
