@@ -318,8 +318,8 @@ These are architecturally feasible via HIP→Vulkan zero-copy bridge but deferre
 - **Sparse BLAS**: sparse gemm, solve, factorize — bridgeable via rocSPARSE
   (rocsparse.dll/lib available in ROCm 7.14, device pointers map directly to
   VkBuffer handles via the shared-memory import path).
-- **NPP-equivalent**: conv1d (via rocFFT), conv3d, image processing ops —
-  MIOpen (MIOpen.lib available) provides conv1d/conv3d primitives.
+- **NPP-equivalent**: conv3d — MIOpen (MIOpen.lib available) provides
+  conv3d primitives.
 - **Runtime JIT compilation**: hipRTC (hiprtc0714.dll available) enables dynamic
   kernel generation for variable tensor shapes. Would require architectural
   change to AGENTS.md ("offline compile only" → "offline compile by default,
@@ -340,7 +340,8 @@ already present in the codebase:
 - **Normalization**: softmax, rms_norm, layernorm — f32 and f16.
 - **PRNG**: threefry (ThreeFry2x32-20), uniform, normal — see `shaders/vkrand/baseline/`.
 - **FFT**: radix-2 forward/inverse, f32 and f16, 1D and 2D.
-- **GPU conv2d**: NCHW 2D convolution (f32), 3x3/5x5 kernels, arbitrary stride/pad.
+- **GPU conv1d/conv2d**: 1D and 2D convolution (f32), arbitrary kernel/stride/pad.
+  Conv1d is a thin wrapper over conv2d (kh=1).
 - **GPU pool2d**: Max and average pooling (f32), arbitrary window/stride/pad.
 - **GPU batchnorm**: Per-channel batch normalization inference (f32).
 - **GPU transpose**: 2D tensor transpose (f32).
