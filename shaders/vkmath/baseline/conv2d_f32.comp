@@ -1,0 +1,80 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : require
+
+/**
+ * \brief 2D cross-correlation convolution (NCHW, batch=1, groups=1, no bias separate).
+ *
+ * Input:  [in_c, in_h, in_w]      (binding 0, SSBO float)
+ * Weight: [out_c, in_c, kh, kw]   (binding 1, SSBO float)
+ * Bias:   [out_c]                  (binding 1, appended after weights)
+ * Output: [out_c, out_h, out_w]   (binding 2, SSBO float)
+ *
+ * Push constant (std140, 64 bytes):
+ *   in_w, in_h, out_w, out_h, kw, kh,
+ *   stride_w, stride_h, pad_w, pad_h,
+ *   in_c, out_c, w_offset, b_offset
+ */
+
+layout(push_constant) uniform ConvPC {
+    uint  in_w;
+    uint  in_h;
+    uint  out_w;
+    uint  out_h;
+    uint  kw;
+    uint  kh;
+    uint  stride_w;
+    uint  stride_h;
+    uint  pad_w;
+    uint  pad_h;
+    uint  in_c;
+    uint  out_c;
+    uint  w_offset;
+    uint  b_offset;
+} pc;
+
+layout(set = 0, binding = 0) buffer BufIn  { float in_data[];  };
+layout(set = 0, binding = 1) buffer BufWB  { float wb_data[];  };
+layout(set = 0, binding = 2) buffer BufOut { float out_data[]; };
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = pc.out_c * pc.out_h * pc.out_w;
+    if (idx >= total) { return; }
+
+    uint oc = idx % pc.out_c;
+    uint rest = idx / pc.out_c;
+    uint ow = rest % pc.out_w;
+    uint oh = rest / pc.out_w;
+
+    float acc = 0.0;
+    for (uint fy = 0u; fy < pc.kh; ++fy) {
+        int iy = int(oh * pc.stride_h) - int(pc.pad_h) + int(fy);
+        if (iy < 0 || uint(iy) >= pc.in_h) { continue; }
+
+        for (uint fx = 0u; fx < pc.kw; ++fx) {
+            int ix = int(ow * pc.stride_w) - int(pc.pad_w) + int(fx);
+            if (ix < 0 || uint(ix) >= pc.in_w) { continue; }
+
+            uint in_idx = uint(iy) * pc.in_w + uint(ix);
+            float in_val = in_data[in_idx];
+
+            uint w_idx = pc.w_offset
+                       + oc * pc.in_c * pc.kh * pc.kw
+                       + fy * pc.kw * pc.in_c
+                       + fx * pc.in_c;
+            float w_val = wb_data[w_idx];
+
+            acc += in_val * w_val;
+        }
+    }
+
+    uint b_idx = pc.b_offset + oc;
+    float bias = wb_data[b_idx];
+
+    uint out_idx = oc * pc.out_h * pc.out_w
+                 + oh * pc.out_w
+                 + ow;
+    out_data[out_idx] = acc + bias;
+}

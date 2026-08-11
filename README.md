@@ -43,10 +43,10 @@ VAiSt fixes this by starting from first principles:
   (VK_KHR_cooperative_matrix). The runtime picks the best tier your GPU
   supports and falls back gracefully.
 
-- **Shared shader sources.** 126 GLSL compute shader sources compile into 126
-  SPIR-V binaries via compile-time specialization (vkblas 30, vkmath 46,
-  vkquant 44, vkrand 4, vkfft 2) — one source, multiple tile sizes, multiple
-  wave sizes, multiple quantization types.
+- **Shared shader sources.** 175 GLSL compute shader sources compile into 175
+  SPIR-V binaries via compile-time specialization (vkblas 49, vkblas_l1l2 15,
+  vkmath 60, vkquant 44, vkrand 4, vkfft 2) — one source, multiple tile sizes,
+  multiple wave sizes, multiple quantization types.
 
 ---
 
@@ -315,8 +315,7 @@ in `specs/VKDIST-DESIGN.md`.
 
 - **GPU-accelerated linear algebra**: LU, QR, Cholesky, Eigenvalue Decomposition,
   determinant, matrix inverse — hardware-specific kernels needed.
-- **GPU-accelerated neural network inference**: conv2d, pool2d, batchnorm —
-  hardware-specific kernels needed.
+- **GPU-accelerated batch normalization** (conv2d and pool2d are now implemented).
 - **GPU-accelerated sparse matrix operations**: sparse gemm, solve, factorize.
 - **GPU-accelerated matrix operations**: transpose, determinant, inverse.
 
@@ -332,6 +331,8 @@ already present in the codebase:
 - **Normalization**: softmax, rms_norm, layernorm — f32 and f16.
 - **PRNG**: threefry (ThreeFry2x32-20), uniform, normal — see `shaders/vkrand/baseline/`.
 - **FFT**: radix-2 forward/inverse, f32 and f16, 1D and 2D.
+- **GPU conv2d**: NCHW 2D convolution (f32), 3x3/5x5 kernels, arbitrary stride/pad.
+- **GPU pool2d**: Max and average pooling (f32), arbitrary window/stride/pad.
 
 ---
 
@@ -491,7 +492,8 @@ it brings the same capabilities to platforms where ROCm does not run.
 
 ## License
 
-[License details to be determined — see LICENSE file]
+This project is licensed under the Apache License, Version 2.0.
+See the [LICENSE](LICENSE) file for details.
 
 This project is not affiliated with or endorsed by AMD, the Khronos Group,
 or any other organization whose materials appear in the `specs/` directory.

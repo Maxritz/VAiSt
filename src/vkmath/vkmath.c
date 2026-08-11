@@ -81,6 +81,8 @@ static const shader_blob_t s_shader_table[] = {
     {VKMATH_KERNEL_GELU_BF16,        VKMATH_DTYPE_BF16, VKMATH_TIER_BASELINE, vkmath_spv_baseline_gelu_bf16,         vkmath_spv_baseline_gelu_bf16_size},
     {VKMATH_KERNEL_SIGMOID_BF16,     VKMATH_DTYPE_BF16, VKMATH_TIER_BASELINE, vkmath_spv_baseline_sigmoid_bf16,      vkmath_spv_baseline_sigmoid_bf16_size},
     {VKMATH_KERNEL_TANH_BF16,        VKMATH_DTYPE_BF16, VKMATH_TIER_BASELINE, vkmath_spv_baseline_tanh_bf16,         vkmath_spv_baseline_tanh_bf16_size},
+    {VKMATH_KERNEL_CONV2D_F32,       VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_conv2d_f32,         vkmath_spv_baseline_conv2d_f32_size},
+    {VKMATH_KERNEL_POOL2D_F32,       VKMATH_DTYPE_F32, VKMATH_TIER_BASELINE, vkmath_spv_baseline_pool2d_f32,         vkmath_spv_baseline_pool2d_f32_size},
     /* subgroup tier — only kernels with subgroup .comp files */
     {VKMATH_KERNEL_SILU,       VKMATH_DTYPE_F32, VKMATH_TIER_SUBGROUP, vkmath_spv_subgroup_silu_f32,          vkmath_spv_subgroup_silu_f32_size},
     {VKMATH_KERNEL_SILU,       VKMATH_DTYPE_F16, VKMATH_TIER_SUBGROUP, vkmath_spv_subgroup_silu_f16,          vkmath_spv_subgroup_silu_f16_size},
@@ -1124,4 +1126,179 @@ VkResult vkmath_tanh_bf16(VkMathContext *ctx, VkCommandBuffer cmd,
     return vkmath_cmd_dispatch(ctx, cmd, VKMATH_KERNEL_TANH_BF16,
         VKMATH_DTYPE_BF16, &pc, elem_to_groups(num_elements), 1, 1,
         input, VK_NULL_HANDLE, output, 1);
+}
+
+/* ── Conv2D (custom push-constant layout) ───────────────────────────────────── */
+
+typedef struct {
+    uint32_t in_w;
+    uint32_t in_h;
+    uint32_t out_w;
+    uint32_t out_h;
+    uint32_t kw;
+    uint32_t kh;
+    uint32_t stride_w;
+    uint32_t stride_h;
+    uint32_t pad_w;
+    uint32_t pad_h;
+    uint32_t in_c;
+    uint32_t out_c;
+    uint32_t w_offset;
+    uint32_t b_offset;
+} conv2d_pc_t;
+
+static VkResult vkmath_cmd_dispatch_conv2d(VkMathContext *ctx, VkCommandBuffer cmd,
+    const conv2d_pc_t *pc,
+    uint32_t dispatch_x, VkBuffer input, VkBuffer weights, VkBuffer output) {
+
+    VkPipeline pipeline;
+    VkResult r = vkmath_ensure_pipeline(ctx, VKMATH_KERNEL_CONV2D_F32,
+        VKMATH_DTYPE_F32, &pipeline);
+    if (r != VK_SUCCESS) return r;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdPushConstants(cmd, ctx->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(*pc), pc);
+
+    VkDescriptorBufferInfo info_in  = { input,   0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo info_w   = { weights, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo info_out = { output,  0, VK_WHOLE_SIZE };
+
+    VkWriteDescriptorSet writes[3];
+    memset(writes, 0, sizeof(writes));
+    for (int i = 0; i < 3; i++) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstBinding = (uint32_t)i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    }
+    writes[0].pBufferInfo = &info_in;
+    writes[1].pBufferInfo = &info_w;
+    writes[2].pBufferInfo = &info_out;
+
+    if (ctx->push_desc_fn) {
+        ctx->push_desc_fn(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          ctx->pipeline_layout, 0, 3, writes);
+    } else {
+        VkDescriptorSet ds;
+        r = vkmath_alloc_descriptor_set(ctx, &ds);
+        if (r != VK_SUCCESS) return r;
+        for (int i = 0; i < 3; i++) writes[i].dstSet = ds;
+        vkUpdateDescriptorSets(ctx->device, 3, writes, 0, NULL);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                ctx->pipeline_layout, 0, 1, &ds, 0, NULL);
+    }
+
+    if (dispatch_x == 0) dispatch_x = 1;
+    vkCmdDispatch(cmd, dispatch_x, 1, 1);
+    return VK_SUCCESS;
+}
+
+VkResult vkmath_conv2d_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                           uint32_t in_w, uint32_t in_h,
+                           uint32_t kw, uint32_t kh,
+                           uint32_t stride_w, uint32_t stride_h,
+                           uint32_t pad_w, uint32_t pad_h,
+                           uint32_t in_c, uint32_t out_c,
+                           uint32_t w_offset, uint32_t b_offset,
+                           VkBuffer input, VkBuffer weights, VkBuffer output) {
+    uint32_t out_w = (in_w + 2u * pad_w - (kw - 1u)) / stride_w + 1u;
+    uint32_t out_h = (in_h + 2u * pad_h - (kh - 1u)) / stride_h + 1u;
+    uint32_t total = out_c * out_h * out_w;
+    uint32_t groups = (total + VKMATH_WORKGROUP_SIZE - 1) / VKMATH_WORKGROUP_SIZE;
+
+    conv2d_pc_t pc;
+    pc.in_w = in_w; pc.in_h = in_h; pc.out_w = out_w; pc.out_h = out_h;
+    pc.kw = kw; pc.kh = kh; pc.stride_w = stride_w; pc.stride_h = stride_h;
+    pc.pad_w = pad_w; pc.pad_h = pad_h; pc.in_c = in_c; pc.out_c = out_c;
+    pc.w_offset = w_offset; pc.b_offset = w_offset + out_c * in_c * kw * kh;
+
+    if (b_offset > 0) pc.b_offset = b_offset;
+
+    return vkmath_cmd_dispatch_conv2d(ctx, cmd, &pc,
+        groups > 0 ? groups : 1, input, weights, output);
+}
+
+/* ── Pool2D (max/avg) ───────────────────────────────────────────────────────── */
+
+typedef struct {
+    uint32_t in_w;
+    uint32_t in_h;
+    uint32_t out_w;
+    uint32_t out_h;
+    uint32_t kw;
+    uint32_t kh;
+    uint32_t stride_w;
+    uint32_t stride_h;
+    uint32_t pad_w;
+    uint32_t pad_h;
+    uint32_t in_c;
+    uint32_t pool_type;
+} pool2d_pc_t;
+
+static VkResult vkmath_cmd_dispatch_pool2d(VkMathContext *ctx, VkCommandBuffer cmd,
+    const pool2d_pc_t *pc,
+    uint32_t dispatch_x, VkBuffer input, VkBuffer output) {
+
+    VkPipeline pipeline;
+    VkResult r = vkmath_ensure_pipeline(ctx, VKMATH_KERNEL_POOL2D_F32,
+        VKMATH_DTYPE_F32, &pipeline);
+    if (r != VK_SUCCESS) return r;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdPushConstants(cmd, ctx->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(*pc), pc);
+
+    VkDescriptorBufferInfo info_in  = { input,   0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo info_out = { output,  0, VK_WHOLE_SIZE };
+
+    VkWriteDescriptorSet writes[2];
+    memset(writes, 0, sizeof(writes));
+    for (int i = 0; i < 2; i++) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstBinding = (uint32_t)i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    }
+    writes[0].pBufferInfo = &info_in;
+    writes[1].pBufferInfo = &info_out;
+
+    if (ctx->push_desc_fn) {
+        ctx->push_desc_fn(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          ctx->pipeline_layout, 0, 2, writes);
+    } else {
+        VkDescriptorSet ds;
+        r = vkmath_alloc_descriptor_set(ctx, &ds);
+        if (r != VK_SUCCESS) return r;
+        for (int i = 0; i < 2; i++) writes[i].dstSet = ds;
+        vkUpdateDescriptorSets(ctx->device, 2, writes, 0, NULL);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                ctx->pipeline_layout, 0, 1, &ds, 0, NULL);
+    }
+
+    if (dispatch_x == 0) dispatch_x = 1;
+    vkCmdDispatch(cmd, dispatch_x, 1, 1);
+    return VK_SUCCESS;
+}
+
+VkResult vkmath_pool2d_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                           uint32_t in_w, uint32_t in_h,
+                           uint32_t kw, uint32_t kh,
+                           uint32_t stride_w, uint32_t stride_h,
+                           uint32_t pad_w, uint32_t pad_h,
+                           uint32_t in_c,
+                           uint32_t pool_type,
+                           VkBuffer input, VkBuffer output) {
+    uint32_t out_w = (in_w + 2u * pad_w - (kw - 1u)) / stride_w + 1u;
+    uint32_t out_h = (in_h + 2u * pad_h - (kh - 1u)) / stride_h + 1u;
+    uint32_t total = in_c * out_h * out_w;
+    uint32_t groups = (total + VKMATH_WORKGROUP_SIZE - 1) / VKMATH_WORKGROUP_SIZE;
+
+    pool2d_pc_t pc;
+    pc.in_w = in_w; pc.in_h = in_h; pc.out_w = out_w; pc.out_h = out_h;
+    pc.kw = kw; pc.kh = kh; pc.stride_w = stride_w; pc.stride_h = stride_h;
+    pc.pad_w = pad_w; pc.pad_h = pad_h; pc.in_c = in_c; pc.pool_type = pool_type;
+
+    return vkmath_cmd_dispatch_pool2d(ctx, cmd, &pc,
+        groups > 0 ? groups : 1, input, output);
 }

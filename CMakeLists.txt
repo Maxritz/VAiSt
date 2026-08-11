@@ -88,6 +88,22 @@ if(BUILD_TESTING)
     target_link_libraries(test_vkmath PRIVATE vkmath Vulkan::Vulkan)
     add_test(NAME test_vkmath COMMAND test_vkmath)
 
+    add_executable(test_vkmath_conv2d tests/test_vkmath_conv2d.c)
+    target_include_directories(test_vkmath_conv2d PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkmath
+    )
+    target_link_libraries(test_vkmath_conv2d PRIVATE vkmath Vulkan::Vulkan)
+    add_test(NAME test_vkmath_conv2d COMMAND test_vkmath_conv2d)
+
+    add_executable(test_vkmath_pool2d tests/test_vkmath_pool2d.c)
+    target_include_directories(test_vkmath_pool2d PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkmath
+    )
+    target_link_libraries(test_vkmath_pool2d PRIVATE vkmath Vulkan::Vulkan)
+    add_test(NAME test_vkmath_pool2d COMMAND test_vkmath_pool2d)
+
     add_executable(test_vkblas tests/test_vkblas.c)
     target_include_directories(test_vkblas PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include

@@ -673,6 +673,58 @@ VkResult vkmath_tanh_bf16(VkMathContext *ctx,
                           VkBuffer input,
                           VkBuffer output);
 
+/**
+ * \brief Conv2D (NCHW, single batch, no bias in separate buffer).
+ *
+ * Performs a 2D cross-correlation (convolution with flipped kernel).
+ * Input layout:  [C_in, H_in, W_in] (N=1)
+ * Weight+bias:   buffer containing [C_out * C_in * kH * kW] weight floats
+ *                 followed by [C_out] bias floats.
+ * Output layout: [C_out, H_out, W_out]
+ *
+ * \param ctx Valid context.
+ * \param cmd Command buffer in recording state.
+ * \param in_w, in_h Input spatial dimensions.
+ * \param kw, kh Kernel height/width.
+ * \param stride_w, stride_h Stride.
+ * \param pad_w, pad_h Padding.
+ * \param in_c, out_c Input/output channels (groups=1).
+ * \param w_stride Byte stride from binding 1 to weight data (elements, = 0 if
+ *                 weights start at offset 0).
+ * \param b_stride Byte stride from weight end to bias (elements; if 0, bias
+ *                 follows weights immediately: b_offset = w_elements).
+ * \param input Input buffer.
+ * \param weights Bias+weights buffer.
+ * \param output Output buffer.
+ */
+VkResult vkmath_conv2d_f32(VkMathContext *ctx,
+                           VkCommandBuffer cmd,
+                           uint32_t in_w, uint32_t in_h,
+                           uint32_t kw, uint32_t kh,
+                           uint32_t stride_w, uint32_t stride_h,
+                           uint32_t pad_w, uint32_t pad_h,
+                           uint32_t in_c, uint32_t out_c,
+                           uint32_t w_offset, uint32_t b_offset,
+                           VkBuffer input,
+                           VkBuffer weights,
+                           VkBuffer output);
+
+/**
+ * \brief 2D pooling (NCHW, batch=1).
+ * Input:  [in_c, H_in, W_in]     (binding 0)
+ * Output: [in_c, H_out, W_out]   (binding 1)
+ *
+ * \param pool_type 0 = max, 1 = average
+ */
+VkResult vkmath_pool2d_f32(VkMathContext *ctx, VkCommandBuffer cmd,
+                           uint32_t in_w, uint32_t in_h,
+                           uint32_t kw, uint32_t kh,
+                           uint32_t stride_w, uint32_t stride_h,
+                           uint32_t pad_w, uint32_t pad_h,
+                           uint32_t in_c,
+                           uint32_t pool_type,
+                           VkBuffer input, VkBuffer output);
+
 /* ===========================================================================
  * Utility
  * ========================================================================== */

@@ -1,0 +1,93 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : require
+
+/**
+ * \brief 2D max/avg pooling (NCHW, batch=1).
+ * Input:  [C, H_in, W_in]      (binding 0)
+ * Output: [C, H_out, W_out]    (binding 1)
+ *
+ * Push constant (std140, 48 bytes):
+ *   in_w, in_h, out_w, out_h, kw, kh,
+ *   stride_w, stride_h, pad_w, pad_h,
+ *   in_c, pool_type (0=max, 1=avg)
+ */
+
+layout(push_constant) uniform PoolPC {
+    uint  in_w;
+    uint  in_h;
+    uint  out_w;
+    uint  out_h;
+    uint  kw;
+    uint  kh;
+    uint  stride_w;
+    uint  stride_h;
+    uint  pad_w;
+    uint  pad_h;
+    uint  in_c;
+    uint  pool_type;
+} pc;
+
+layout(set = 0, binding = 0) buffer BufIn  { float in_data[];  };
+layout(set = 0, binding = 1) buffer BufOut { float out_data[]; };
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = pc.in_c * pc.out_h * pc.out_w;
+    if (idx >= total) { return; }
+
+    uint oc = idx % pc.in_c;
+    uint rest = idx / pc.in_c;
+    uint ow = rest % pc.out_w;
+    uint oh = rest / pc.out_w;
+
+    float result;
+    uint count = 0u;
+
+    if (pc.pool_type == 0u) {
+        /* max pool */
+        result = -1.0e30;
+        for (uint fy = 0u; fy < pc.kh; ++fy) {
+            int iy = int(oh * pc.stride_h) - int(pc.pad_h) + int(fy);
+            if (iy < 0 || uint(iy) >= pc.in_h) { continue; }
+
+            for (uint fx = 0u; fx < pc.kw; ++fx) {
+                int ix = int(ow * pc.stride_w) - int(pc.pad_w) + int(fx);
+                if (ix < 0 || uint(ix) >= pc.in_w) { continue; }
+
+                uint in_idx = oc * pc.in_h * pc.in_w
+                            + uint(iy) * pc.in_w
+                            + uint(ix);
+                float v = in_data[in_idx];
+                result = max(result, v);
+                count++;
+            }
+        }
+        if (count == 0u) result = 0.0;
+    } else {
+        /* avg pool */
+        float sum = 0.0;
+        for (uint fy = 0u; fy < pc.kh; ++fy) {
+            int iy = int(oh * pc.stride_h) - int(pc.pad_h) + int(fy);
+            if (iy < 0 || uint(iy) >= pc.in_h) { continue; }
+
+            for (uint fx = 0u; fx < pc.kw; ++fx) {
+                int ix = int(ow * pc.stride_w) - int(pc.pad_w) + int(fx);
+                if (ix < 0 || uint(ix) >= pc.in_w) { continue; }
+
+                uint in_idx = oc * pc.in_h * pc.in_w
+                            + uint(iy) * pc.in_w
+                            + uint(ix);
+                sum += in_data[in_idx];
+                count++;
+            }
+        }
+        result = (count > 0u) ? (sum / float(count)) : 0.0;
+    }
+
+    uint out_idx = oc * pc.out_h * pc.out_w
+                 + oh * pc.out_w
+                 + ow;
+    out_data[out_idx] = result;
+}
