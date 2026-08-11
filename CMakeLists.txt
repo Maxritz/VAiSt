@@ -290,10 +290,20 @@ if(BUILD_TESTING)
         target_link_libraries(test_hip_bar PRIVATE vkstream vkruntime Vulkan::Vulkan F:/ROCM-7.14.0-Windows/lib/amdhip64.lib)
         target_compile_options(test_hip_bar PRIVATE -std=c99)
         add_test(NAME test_hip_bar COMMAND test_hip_bar)
-    endif()
 
-
-
+        # VJITC bridge library validation test
+        add_executable(test_hip_bridge_libraries tests/test_hip_bridge_libraries.c)
+        target_include_directories(test_hip_bridge_libraries PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            F:/ROCM-7.14.0-Windows/include
+        )
+        target_link_libraries(test_hip_bridge_libraries PRIVATE
+            vkruntime Vulkan::Vulkan
+            F:/ROCM-7.14.0-Windows/lib/amdhip64.lib
+        )
+        target_compile_options(test_hip_bridge_libraries PRIVATE -std=c99)
+        add_test(NAME test_hip_bridge_libraries COMMAND test_hip_bridge_libraries)
+    endif() # HIP runtime available
     # ── VKDist library (distributed compute, loopback Phase 0) ─────────────
     # POSIX-only implementation (pthread.h); skipped under MSVC until a
     # Win32-thread port lands.
