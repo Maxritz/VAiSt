@@ -4,8 +4,13 @@ A Vulkan compute AI stack, built from scratch, implementing BLAS, FFT, RNG and
 math primitives for AMD RDNA2 (gfx103x) and RDNA4 (gfx1201) GPUs, and really 
 any GPU that speaks Vulkan 1.4.
 
-No ROCm. No HIP. No CUDA. Just Vulkan compute shaders, 
-C99 headers, and Vulkan-native handles.
+No CUDA. Just Vulkan compute shaders, C99 headers, and Vulkan-native handles.
+
+Vulkan compute paths run on GPU directly. For linear-algebra primitives not
+yet covered by Vulkan shaders (sparse SpMM, LAPACK factorizations, conv1d/2d/3d),
+a VJITC bridge dispatches into ROCm libraries (hipSPARSE, rocsolver, MIOpen)
+over zero-copy VkBuffer↔HIP-device-pointer interop — no CUDA, no ROCm runtime
+dependency for the core compute paths.
 ---
 
 ## Why This Exists
