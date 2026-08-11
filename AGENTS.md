@@ -271,12 +271,13 @@ GPU host target (verified by `vulkaninfo` on this machine): **AMD Radeon RX
 ### Remaining Gaps
 
 1. **Coopmatrix tiers for f16/bf16/f64 GEMM and qgemm** — baseline + subgroup exist, coopmatrix tier is future perf work (qgemm is the decode hot path).
-2. **No sparse BLAS** (cuSPARSE/rocSPARSE equivalent).
-3. **No NPP-equivalent** (conv3d only — conv1d and conv2d are implemented).
-4. **No runtime JIT** (NVRTC/hipRTC) — offline shader compile only.
-5. **No GPU-accelerated neural network inference** — conv3d, Cholesky
-   Decomposition, Eigenvalue Decomposition (conv2d, pool2d, batchnorm, transpose,
-   conv1d, determinant, inverse, LU, QR are implemented; sparse GEMM via VJITC bridge).
+2. **No sparse BLAS** — baseline + subgroup qgemm exist, no rocSPARSE equivalent.
+3. **No NPP-equivalent** — conv3d via MIOpen available as VJITC bridge (static link MIOpen.lib).
+4. **No runtime JIT** — offline compile by default, `VAIT_JIT` feature flag enables hipRTC dynamic
+   kernel generation (hiprtc714.dll available).
+5. **No GPU-accelerated neural network inference** — Cholesky Decomposition,
+   Eigenvalue Decomposition (conv1d/2d/3d, pool2d, batchnorm, transpose,
+   determinant, inverse, LU, QR are implemented; sparse GEMM via VJITC bridge).
 
 Note on vendor naming: this stack uses the Vulkan `VK_AMD_*` vendor-extension
 nomenclature for AMD GPU features (e.g. `VK_AMD_SHADER_CORE_PROPERTIES(2)`,
@@ -290,3 +291,8 @@ extension naming style — no `VK_MaxR` style is used.
 - `src/` — Implementation (C99 runtime + Vulkan dispatch)
 - `shaders/` — GLSL compute shaders per GPU architecture
 - `tests/` — Test harnesses per sub-library
+
+
+
+
+

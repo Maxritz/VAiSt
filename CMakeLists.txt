@@ -66,6 +66,8 @@ add_library(vkblas STATIC
     src/vkblas/vkblas.c
     src/vkblas/vkblas_sparse.c
     src/vkblas/vkblas_lapack.c
+    src/vkblas/vkblas_conv3d.c
+    src/vkblas/vkblas_jit.c
 )
 target_include_directories(vkblas PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -75,10 +77,19 @@ target_include_directories(vkblas PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
     F:/ROCM-7.14.0-Windows/include
 )
-    target_link_libraries(vkblas PUBLIC Vulkan::Vulkan vkruntime
-        F:/ROCM-7.14.0-Windows/lib/hipsparse.lib
-        F:/ROCM-7.14.0-Windows/lib/rocblas.lib
-        F:/ROCM-7.14.0-Windows/lib/rocsolver.lib)
+# VAIT_JIT: enable hipRTC + shaderc runtime compilation (off by default)
+option(VAIT_JIT "Enable JIT compilation via hipRTC and shaderc" OFF)
+if(VAIT_JIT)
+    target_compile_definitions(vkblas PUBLIC VAIT_JIT)
+    target_link_libraries(vkblas PUBLIC
+        F:/ROCM-7.14.0-Windows/lib/hiprtc.lib)
+endif()
+target_link_libraries(vkblas PUBLIC Vulkan::Vulkan vkruntime
+    F:/ROCM-7.14.0-Windows/lib/amdhip64.lib
+    F:/ROCM-7.14.0-Windows/lib/hipsparse.lib
+    F:/ROCM-7.14.0-Windows/lib/rocblas.lib
+    F:/ROCM-7.14.0-Windows/lib/rocsolver.lib
+    F:/ROCM-7.14.0-Windows/lib/MIOpen.lib)
 target_compile_options(vkblas PRIVATE ${VAIT_WARN_FLAGS})
 
 # ── Test harnesses ──────────────────────────────────────────────────────────
@@ -142,7 +153,7 @@ if(BUILD_TESTING)
     target_link_libraries(test_vkblas PRIVATE vkblas Vulkan::Vulkan)
     add_test(NAME test_vkblas COMMAND test_vkblas)
 
-    # Sparse GEMM VJITC bridge test (requires HIP runtime)
+# Sparse GEMM VJITC bridge test (requires HIP runtime)
     add_executable(test_vkblas_sparse tests/test_vkblas_sparse.c)
     target_include_directories(test_vkblas_sparse PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -154,6 +165,40 @@ if(BUILD_TESTING)
         F:/ROCM-7.14.0-Windows/lib/amdhip64.lib
     )
     add_test(NAME test_vkblas_sparse COMMAND test_vkblas_sparse)
+
+    # Conv3d VJITC bridge test (requires MIOpen)
+    add_executable(test_vkblas_conv3d tests/test_vkblas_conv3d.c)
+    target_include_directories(test_vkblas_conv3d PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkblas
+        F:/ROCM-7.14.0-Windows/include
+    )
+    target_link_libraries(test_vkblas_conv3d PRIVATE
+        vkblas vkruntime Vulkan::Vulkan
+        F:/ROCM-7.14.0-Windows/lib/amdhip64.lib
+    )
+    add_test(NAME test_vkblas_conv3d COMMAND test_vkblas_conv3d)
+    set_tests_properties(test_vkblas_conv3d PROPERTIES
+        ENVIRONMENT "PATH=F:/ROCM-7.14.0-Windows/bin\\;C:/VulkanSDK/1.4.357.0/Bin"
+    )
+
+    # JIT compilation test (requires hipRTC + shaderc)
+    add_executable(test_vkblas_jit tests/test_vkblas_jit.c)
+    target_include_directories(test_vkblas_jit PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkblas
+        F:/ROCM-7.14.0-Windows/include
+        ${Vulkan_SDK}/Include
+    )
+    target_link_libraries(test_vkblas_jit PRIVATE
+        vkblas vkruntime Vulkan::Vulkan
+        F:/ROCM-7.14.0-Windows/lib/amdhip64.lib
+        F:/ROCM-7.14.0-Windows/lib/hiprtc.lib
+    )
+    add_test(NAME test_vkblas_jit COMMAND test_vkblas_jit)
+    set_tests_properties(test_vkblas_jit PROPERTIES
+        ENVIRONMENT "PATH=F:/ROCM-7.14.0-Windows/bin\\;C:/VulkanSDK/1.4.357.0/Bin"
+    )
 
     # LAPACK VJITC bridge test (requires HIP runtime)
     add_executable(test_vkblas_lapack tests/test_vkblas_lapack.c)
@@ -169,10 +214,10 @@ if(BUILD_TESTING)
     )
     add_test(NAME test_vkblas_lapack COMMAND test_vkblas_lapack)
     set_tests_properties(test_vkblas_lapack PROPERTIES
-        ENVIRONMENT "PATH=F:/ROCM-7.14.0-Windows/bin;$ENV{PATH}"
+        ENVIRONMENT "PATH=F:/ROCM-7.14.0-Windows/bin\\;C:/VulkanSDK/1.4.357.0/Bin"
     )
     set_tests_properties(test_vkblas_sparse PROPERTIES
-        ENVIRONMENT "PATH=F:/ROCM-7.14.0-Windows/bin;$ENV{PATH}"
+        ENVIRONMENT "PATH=F:/ROCM-7.14.0-Windows/bin\\;C:/VulkanSDK/1.4.357.0/Bin"
     )
 
     # ── VKQuant library ──────────────────────────────────────────────────
