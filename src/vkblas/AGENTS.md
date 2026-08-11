@@ -28,7 +28,8 @@ context's capability fields. The driver-guarded `use_coopmat` (env
 ### SPIR-V embedding
 - All shader SPIR-V files are compiled to C arrays (`shaders_spv.h`)
 - Embedded as `static const uint32_t` arrays — zero dynamic allocation
-- `embed_spv.ps1` runs during CMake configure to generate the header
+- `embed_spv.ps1` is now `shaders/compile_shaders.ps1` — a custom target makes this
+available as:  `cmake --build . --target shaders`
 - If shader files are missing, context creation returns `VK_ERROR_FEATURE_NOT_PRESENT`
 
 ### Push constant layout (std140)

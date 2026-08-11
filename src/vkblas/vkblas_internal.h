@@ -16,8 +16,7 @@
 #define VKBLAS_DTYPE_F32 0
 #define VKBLAS_DTYPE_F16 1
 #define VKBLAS_DTYPE_BF16 2
-#define VKBLAS_DTYPE_I8   3
-#define VKBLAS_DTYPE_F64  4
+#define VKBLAS_DTYPE_F64 4
 
 /* ── Fused quantized-GEMM kernel codes ──────────────────────────────────── *
  * Distinct from every plain-GEMM data type so pipeline-cache hash keys

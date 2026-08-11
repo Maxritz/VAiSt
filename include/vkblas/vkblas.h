@@ -75,7 +75,7 @@ typedef enum {
     VKBLAS_COMPUTE_32F         = 0,  /**< f32 compute */
     VKBLAS_COMPUTE_16F         = 1,  /**< f16 compute */
     VKBLAS_COMPUTE_16B         = 2,  /**< bf16 compute */
-    VKBLAS_COMPUT_32F_FAST_TF32 = 3, /**< tf32 compute (truncated f32) */
+    VKBLAS_COMPUTE_32F_FAST_TF32 = 3, /**< tf32 compute (truncated f32) */
 } VkBLASComputeType_t;
 
 /**

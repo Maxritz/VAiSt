@@ -27,10 +27,10 @@ you're outside AMD's specific supported paths.
 
 VAiSt fixes this by starting from first principles:
 
-- **One command buffer per decode step.** All 225 dispatches for a 32-layer
-  model are recorded into a single `VkCommandBuffer` with explicit pipeline
-  barriers, eliminating the 640 `vkQueueSubmit` + `vkWaitForFences` round-trips
-  that burned 64ms per token on the legacy path.
+- **One command buffer per decode step.** All dispatches for a model are
+  recorded into a single `VkCommandBuffer` with explicit pipeline barriers,
+  eliminating the per-op `vkQueueSubmit` + `vkWaitForFences` round-trips
+  that serialize CPU-bound work on the legacy path.
 
 - **Push descriptors everywhere.** Zero per-dispatch descriptor pool
   allocations. Every `vkCmdPushDescriptorSetKHR` binds directly.
@@ -43,10 +43,12 @@ VAiSt fixes this by starting from first principles:
   (VK_KHR_cooperative_matrix). The runtime picks the best tier your GPU
   supports and falls back gracefully.
 
-- **Shared shader sources.** 175 GLSL compute shader sources compile into 175
-  SPIR-V binaries via compile-time specialization (vkblas 49, vkblas_l1l2 15,
-  vkmath 60, vkquant 44, vkrand 4, vkfft 2) — one source, multiple tile sizes,
-  multiple wave sizes, multiple quantization types.
+- **Shared shader sources.** ~191 GLSL compute shader sources compile into
+  SPIR-V binaries via compile-time specialization (vkblas ~63 source shaders,
+  vkmath 60, vkquant 44, vkrand 4, vkfft 2, vkblas_l1l2 18) — one source,
+  multiple tile sizes, multiple wave sizes, multiple quantization types.
+  Actual SPIR-V blob count varies (Wave32/Wave64 variants) and is
+  auto-discovered by `shaders/compile_shaders.ps1`.
 
 ---
 
@@ -77,7 +79,7 @@ VAiSt
 ├── specs/                Design docs, ISA reference, architecture notes
 │   ├── Common_Issues.md        GPU hang / device-lost / fence issues (catalog)
 │   └── (per-subsystem specs)
-├── tests/                10 per-library test harnesses (build + run green on RX 9070 XT)
+├── tests/                23+ test harnesses (build + run green on RX 9070 XT)
 └── docs/                 Pointers into specs/
 ```
 
@@ -126,7 +128,7 @@ SPIR-V but dormant by default. Enable with `VAIT_COOPMATRIX=1` on a newer
 driver (RDNA4, RX 9070 XT). It bypasses shared-memory staging entirely and
 dramatically accelerates GEMM on RDNA.
 
-> **Note**: the f16/bf16/f64 coopmatrix tiers are now built (`shaders/vkblas/coopmatrix/gemm_{f16,bf16,f64}.comp`). A `_f16` twin per format stores the f32 accumulator as `float16_t`. The cooperative-matrix tier is also now **testable** (see `tests/cmprobe.c`).
+> **Note**: the f16/bf16/f64 coopmatrix tiers are now built (`shaders/vkblas/coopmatrix/gemm_{f16,bf16,f64}.comp`). A `_f16` twin per format stores the f32 accumulator as `float16_t`. The cooperative-matrix tier is tested via `test_vkblas` (coopmatrix qgemm correctness, all 14 variants + _f16 twins).
 
 API mirrors `hipblasSgemm` parameter order exactly — porting from HIP is a
 mechanical find-and-replace:
@@ -301,13 +303,19 @@ in `specs/VKDIST-DESIGN.md`.
 ### Completed Deliverables
 
 - **Real cooperative-matrix GEMM** — `shaders/vkblas/coopmatrix/gemm_{f16,bf16,f64}.comp`
-  all built and testable via `tests/cmprobe.c`. `VAIT_COOPMATRIX=1` enables on
-  RDNA4 (RX 9070 XT) and newer. Coopmatrix path dormant by default (driver 26.7.1
-  crashes on init, per `specs/GAP_ANALYSIS.md`).
+  and `qgemm_{<fmt>,_f16}.comp` all built and tested via `test_vkblas` (all 14
+  qgemm variants + _f16 twins). `VAIT_COOPMATRIX=1` enables on RDNA4 (RX 9070 XT)
+  and newer. Coopmatrix path dormant by default (driver 26.7.1 crashes on
+  coopMatMulAddKHR, per `specs/GAP_ANALYSIS.md`).
 - **`vkr_create_device` deliverable** — canonical full-feature device creation
   (`src/vkruntime/vkruntime.c`); all Vulkan 1.1-1.4 features enabled, cooperative
   matrix gated on `VAIT_COOPMATRIX`.
-- **All 10/10 harnesses PASS on RX 9070 XT** (verified by `tests/run_all.ps1`).
+- **All 23+ tests PASS on RX 9070 XT** (verified by running `ctest -C Release`).
+
+> Note: test count grew from 10 (original per-library harnesses) to 23+ as VJITC
+> bridge tests (conv3d, conv12d, sparse, lapack, jit, model, runtime, math,
+> quant, fft, rand, dist) were added. Run `ctest -C Release` for the authoritative
+> count.
 - **All 8 ext BLAS ops** (trsv/trsm/symv/hemv/symm/hemm/syrk/herk) pass in both
   f32 and f16 — f16 variants convert alpha/beta via `vkblas_f16_to_f32` before dispatch.
 
@@ -330,7 +338,7 @@ already present in the codebase:
 - **PRNG**: threefry (ThreeFry2x32-20), uniform, normal — see `shaders/vkrand/baseline/`.
 - **FFT**: radix-2 forward/inverse, f32 and f16, 1D and 2D.
 - **GPU conv1d/conv2d/conv3d** (VJITC bridge): `vkblas_conv1d_f32`,
-  `vkblas_conv2d_f32`, `vkblas_conv3d_f32` via MIOpen `miopenConvolutionForward`.
+  `vkblas_conv2d_f32`, `vkblas_conv3d_f32`   via MIOpen `miopenConvolutionForward`.
 - **GPU pool2d**: Max and average pooling (f32), arbitrary window/stride/pad.
 - **GPU batchnorm**: Per-channel batch normalization inference (f32).
 - **GPU transpose**: 2D tensor transpose (f32).
@@ -342,10 +350,6 @@ already present in the codebase:
 - **Runtime JIT compilation**: `vkblas_jit_compile_hip` (hipRTC),
   `vkblas_jit_compile_glsl_to_spirv` (shaderc), `vkblas_jit_load_hip_module`
   — gated behind `VAIT_JIT=ON` CMake option.
-- **LU decomposition** (VJITC bridge): `vkblas_lu_f32()` via rocsolver `dgetrf`.
-- **Matrix inverse** (VJITC bridge): `vkblas_inverse_f32()` via rocsolver `dgetrf`+`dgetri`.
-- **Determinant** (VJITC bridge): `vkblas_determinant_f32()` computed from LU diagonal.
-- **QR decomposition** (VJITC bridge): `vkblas_qr_f32()` via rocsolver `dgeqrf`.
 
 ---
 
@@ -383,6 +387,8 @@ cmake --build . --config Release
 ```powershell
 ctest -C Release
 ```
+
+All 23 tests pass on RX 9070 XT (ROCm 7.14.0, Vulkan SDK 1.4.357.0).
 
 ---
 

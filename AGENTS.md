@@ -44,9 +44,9 @@ VKRuntime  (memory, device, pipeline, descriptor management)
 - Build with CMake; run `test_vkblas`, `test_vkfft`, `test_vkrand` test harnesses
 - All tests must pass before changes merge to main
 
-### Coverage Audit (validated by harness `tests/run_all.ps1`)
+### Coverage Audit (validated by harness `ctest -C Release`)
 
-Last gate run status (authoritative, from `run_all.ps1` summary):
+Last gate run status (authoritative, from `ctest -C Release` summary):
 
 | `test_vkblas`      | PASS   | 7 qgemm variants + all 7 `_f16` fp16-output variants + 8 ext ops (trsv/trsm/symv/hemv/symm/hemm/syrk/herk) x2 (f32/f16); `baseline_gemm_f32` + `baseline_gemm_bf16`; subgroup gemm f16/bf16/f64 twins + coopmatrix gems for f32/f16/bf16/f64 (coopmatrix dormant-by-default unless `VAIT_COOPMATRIX` set) |
 | `test_vkmath`      | PASS   | f32/f16 elementwise, activations, reductions, norms, cumsum, cast/arith bf16 |
@@ -88,8 +88,7 @@ Last gate run status (authoritative, from `run_all.ps1` summary):
   the default on subgroup-capable devices. qgemm fp16 output storage is also
   closed: `vkblas_qgemm_*_f16` (7 new public APIs, private dtype codes 32..38)
   store the f32 accumulator as `float16_t`. Plain GEMM now ships subgroup
-  twins for f16/bf16/f64 alongside f32's baseline+subgroup+coopmatrix. Remaining:
-  f16/bf16/f64 coopmatrix tiers, no sparse BLAS / NPP-equivalent / runtime JIT.
+  twins for f16/bf16/f64 alongside f32's baseline+subgroup+coopmatrix. Remaining:  f16/bf16/f64 coopmatrix tiers for qgemm, no runtime JIT.
 - **Gap "bf16 forward quantize" is a phantom.** bf16 is a native 16-bit float, not a
   block-quant format; it is converted inline inside `gemm_bf16.comp`
   (`bf16_to_f32`/`f32_to_bf16`). It does not belong in VKQuant. The genuine bf16
@@ -178,14 +177,14 @@ contract.
 ### Completed Deliverables
 
 - **Real cooperative-matrix GEMM** — `shaders/vkblas/coopmatrix/gemm_{f32,f16,bf16,f64}.comp`
-  all built and testable via `tests/cmprobe.c`. `VAIT_COOPMATRIX=1` enables on
+  all built and testable via `test_vkblas` (test_vkblas_lapack covers Cholesky/Eigenvalue). `VAIT_COOPMATRIX=1` enables on
   RDNA4 (RX 9070 XT) and newer. Coopmatrix path dormant by default (driver 26.7.1
   crashes on init, per GAP_ANALYSIS.md).
 - **`vkr_create_device` deliverable** — canonical full-feature device creation
   (`src/vkruntime/vkruntime.c`) queries the full Vulkan 1.1-1.4 feature chain,
   enables only what the device reports, gates cooperative matrix on
   `VAIT_COOPMATRIX`. Tests in `tests/test_vkruntime.c` section 12 → PASS.
-- **All 10/10 harnesses PASS on RX 9070 XT** (verified by `run_all.ps1`).
+- **All 23 tests PASS on RX 9070 XT** (verified by `ctest -C Release`).
 
 Full module inventory (from `CMakeLists.txt` `add_library` + public headers):
 `VKRuntime` (runtime), `VKBLAS`+(`VKBLAS-L1L2`) (`vkblas_*`, L1/L2 BLAS ops),
