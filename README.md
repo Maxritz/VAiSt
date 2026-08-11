@@ -315,18 +315,13 @@ in `specs/VKDIST-DESIGN.md`.
 
 These are architecturally feasible via HIP→Vulkan zero-copy bridge but deferred:
 
-- **Sparse BLAS**: sparse gemm, solve, factorize — bridgeable via rocSPARSE
-  (rocsparse.dll/lib available in ROCm 7.14, device pointers map directly to
-  VkBuffer handles via the shared-memory import path).
-- **NPP-equivalent**: conv3d — MIOpen (MIOpen.lib available) provides
-  conv3d primitives.
+- **NPP-equivalent**: conv3d — MIOpen (MIOpen.lib available) provides conv3d.
 - **Runtime JIT compilation**: hipRTC (hiprtc0714.dll available) enables dynamic
   kernel generation for variable tensor shapes. Would require architectural
   change to AGENTS.md ("offline compile only" → "offline compile by default,
   hipRTC JIT behind feature flag").
-- **GPU-accelerated linear algebra**: LU, QR, Cholesky, Eigenvalue Decomposition,
-  determinant, matrix inverse — rocsolver available for bridge (transpose is
-  implemented via `vkmath_transpose_f32`).
+- **GPU-accelerated linear algebra**: Cholesky Decomposition,
+  Eigenvalue Decomposition — rocsolver available for bridge.
 
 ### Already Implemented (not deferred)
 
@@ -345,6 +340,12 @@ already present in the codebase:
 - **GPU pool2d**: Max and average pooling (f32), arbitrary window/stride/pad.
 - **GPU batchnorm**: Per-channel batch normalization inference (f32).
 - **GPU transpose**: 2D tensor transpose (f32).
+- **Sparse GEMM** (VJITC bridge): `vkblas_sparse_gemm_f32()` via hipSPARSE
+  `hipsparseSpMM` — CSR sparse-dense matmul with zero-copy VkBuffer↔HIP ptr.
+- **LU decomposition** (VJITC bridge): `vkblas_lu_f32()` via rocsolver `dgetrf`.
+- **Matrix inverse** (VJITC bridge): `vkblas_inverse_f32()` via rocsolver `dgetrf`+`dgetri`.
+- **Determinant** (VJITC bridge): `vkblas_determinant_f32()` computed from LU diagonal.
+- **QR decomposition** (VJITC bridge): `vkblas_qr_f32()` via rocsolver `dgeqrf`.
 
 ---
 

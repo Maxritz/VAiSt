@@ -272,10 +272,11 @@ GPU host target (verified by `vulkaninfo` on this machine): **AMD Radeon RX
 
 1. **Coopmatrix tiers for f16/bf16/f64 GEMM and qgemm** — baseline + subgroup exist, coopmatrix tier is future perf work (qgemm is the decode hot path).
 2. **No sparse BLAS** (cuSPARSE/rocSPARSE equivalent).
-3. **No NPP-equivalent** (signal/image processing).
+3. **No NPP-equivalent** (conv3d only — conv1d and conv2d are implemented).
 4. **No runtime JIT** (NVRTC/hipRTC) — offline shader compile only.
-5. **No GPU-accelerated neural network inference** — conv2d, pool2d, batchnorm,
-   transpose, determinant, inverse, LU/QR/Cholesky/Eigenvalue decomposition.
+5. **No GPU-accelerated neural network inference** — conv3d, Cholesky
+   Decomposition, Eigenvalue Decomposition (conv2d, pool2d, batchnorm, transpose,
+   conv1d, determinant, inverse, LU, QR are implemented; sparse GEMM via VJITC bridge).
 
 Note on vendor naming: this stack uses the Vulkan `VK_AMD_*` vendor-extension
 nomenclature for AMD GPU features (e.g. `VK_AMD_SHADER_CORE_PROPERTIES(2)`,
