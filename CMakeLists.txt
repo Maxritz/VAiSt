@@ -64,6 +64,7 @@ target_compile_options(vkmath PRIVATE ${VAIT_WARN_FLAGS})
 # ── VKBLAS library ──────────────────────────────────────────────────────────
 add_library(vkblas STATIC
     src/vkblas/vkblas.c
+    src/vkblas/vkblas_sparse.c
 )
 target_include_directories(vkblas PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -71,8 +72,9 @@ target_include_directories(vkblas PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vkblas
     ${CMAKE_CURRENT_SOURCE_DIR}/include/vkruntime
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
+    F:/ROCM-7.14.0-Windows/include
 )
-target_link_libraries(vkblas PUBLIC Vulkan::Vulkan vkruntime)
+target_link_libraries(vkblas PUBLIC Vulkan::Vulkan vkruntime F:/ROCM-7.14.0-Windows/lib/hipsparse.lib)
 target_compile_options(vkblas PRIVATE ${VAIT_WARN_FLAGS})
 
 # ── Test harnesses ──────────────────────────────────────────────────────────
@@ -127,6 +129,22 @@ if(BUILD_TESTING)
     )
     target_link_libraries(test_vkblas PRIVATE vkblas Vulkan::Vulkan)
     add_test(NAME test_vkblas COMMAND test_vkblas)
+
+    # Sparse GEMM VJITC bridge test (requires HIP runtime)
+    add_executable(test_vkblas_sparse tests/test_vkblas_sparse.c)
+    target_include_directories(test_vkblas_sparse PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkblas
+        F:/ROCM-7.14.0-Windows/include
+    )
+    target_link_libraries(test_vkblas_sparse PRIVATE
+        vkblas vkruntime Vulkan::Vulkan
+        F:/ROCM-7.14.0-Windows/lib/amdhip64.lib
+    )
+    add_test(NAME test_vkblas_sparse COMMAND test_vkblas_sparse)
+    set_tests_properties(test_vkblas_sparse PROPERTIES
+        ENVIRONMENT "PATH=F:/ROCM-7.14.0-Windows/bin;$ENV{PATH}"
+    )
 
     # ── VKQuant library ──────────────────────────────────────────────────
     add_library(vkquant STATIC src/vkquant/vkquant.c)

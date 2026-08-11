@@ -1151,6 +1151,49 @@ VkBLASPointerMode_t vkblas_get_pointer_mode(VkBLASContext* context);
  */
 void vkblas_flush_pipelines(VkBLASContext* context);
 
+/**
+ * \brief VJITC-bridge sparse-dense GEMM: C = alpha * op(A)_sparse @ op(B) + beta * C
+ *
+ * A is a CSR-format sparse matrix; B and C are dense. The matrix A and vectors
+ * B, C are HIP device pointers that must be allocated via hipMalloc and exported
+ * to Vulkan via VK_EXT_external_memory_host (see vkstream.h for the import path).
+ *
+ * This function bridges into rocSPARSE's hipsparseSpMM — no Vulkan shader
+ * dispatch occurs. The caller's VkCommandBuffer is unused (the HIP call
+ * executes on the default stream).
+ *
+ * \param ctx     Valid VkBLASContext (for capability detection).
+ * \param op_A    Operation for A (VKBLAS_OP_N, VKBLAS_OP_T, VKBLAS_OP_C).
+ * \param op_B    Operation for B.
+ * \param m       Number of rows in C (= rows in op(A)).
+ * \param n       Number of columns in C (= cols in op(B)).
+ * \param k       Inner dimension (cols in op(A) = rows in op(B)).
+ * \param nnz     Number of non-zero elements in A.
+ * \param alpha   Host scalar multiplier for A*B.
+ * \param csr_row_ptr  CSR row pointers (length = rows_A + 1).
+ * \param csr_col_ind  CSR column indices (length = nnz).
+ * \param csr_val      CSR values (length = nnz).
+ * \param B       Dense matrix B (device pointer, op_B(K, N) column-major).
+ * \param beta    Host scalar multiplier for C.
+ * \param C       Dense matrix C (device pointer, (M, N) column-major, in/out).
+ * \param cmd     VkCommandBuffer (unused for bridge calls).
+ * \retval VK_SUCCESS on success.
+ */
+VkResult vkblas_sparse_gemm_f32(
+    VkBLASContext* ctx,
+    VkBLASOperation_t op_A,
+    VkBLASOperation_t op_B,
+    uint32_t m, uint32_t n, uint32_t k,
+    uint32_t nnz,
+    const float* alpha,
+    const uint32_t* csr_row_ptr,
+    const uint32_t* csr_col_ind,
+    const float* csr_val,
+    const void* B,
+    const float* beta,
+    void* C,
+    VkCommandBuffer cmd);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
