@@ -1194,6 +1194,48 @@ VkResult vkblas_sparse_gemm_f32(
     void* C,
     VkCommandBuffer cmd);
 
+/**
+ * \brief VJITC-bridge LU decomposition: A = P * L * U
+ *
+ * A is overwritten with L (lower, unit diagonal) and U (upper).
+ * piv is the pivot vector (1-based, LAPACK style).
+ * info = 0 on success, >0 if U is singular.
+ *
+ * Device pointers must be allocated via hipMalloc and exported to Vulkan
+ * via VK_EXT_external_memory_host.
+ */
+VkResult vkblas_lu_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                       uint32_t n, void* A, uint32_t lda,
+                       void* ipiv, void* info);
+
+/**
+ * \brief VJITC-bridge matrix inverse via LU.
+ * A must be n x n, column-major. On return, A contains A^{-1}.
+ * Requires lu (ipiv) from a prior vkblas_lu_f32 call on A.
+ */
+VkResult vkblas_inverse_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                            uint32_t n, void* A, uint32_t lda,
+                            void* ipiv, void* info);
+
+/**
+ * \brief VJITC-bridge determinant via LU.
+ * Computes det(A) by performing LU on a copy of A, then multiplying
+ * the diagonal of U with the permutation sign.
+ */
+VkResult vkblas_determinant_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                                uint32_t n, void* A, uint32_t lda,
+                                void* ipiv, void* info, double* det);
+
+/**
+ * \brief VJITC-bridge QR decomposition: A = Q * R
+ * A is m x n (m >= n), column-major. On return, A contains R (upper)
+ * and tau contains the elementary reflectors for Q.
+ */
+VkResult vkblas_qr_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                       uint32_t m, uint32_t n,
+                       void* A, uint32_t lda,
+                       void* tau, void* info);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

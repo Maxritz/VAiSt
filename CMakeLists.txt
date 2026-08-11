@@ -65,6 +65,7 @@ target_compile_options(vkmath PRIVATE ${VAIT_WARN_FLAGS})
 add_library(vkblas STATIC
     src/vkblas/vkblas.c
     src/vkblas/vkblas_sparse.c
+    src/vkblas/vkblas_lapack.c
 )
 target_include_directories(vkblas PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -74,7 +75,10 @@ target_include_directories(vkblas PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
     F:/ROCM-7.14.0-Windows/include
 )
-target_link_libraries(vkblas PUBLIC Vulkan::Vulkan vkruntime F:/ROCM-7.14.0-Windows/lib/hipsparse.lib)
+    target_link_libraries(vkblas PUBLIC Vulkan::Vulkan vkruntime
+        F:/ROCM-7.14.0-Windows/lib/hipsparse.lib
+        F:/ROCM-7.14.0-Windows/lib/rocblas.lib
+        F:/ROCM-7.14.0-Windows/lib/rocsolver.lib)
 target_compile_options(vkblas PRIVATE ${VAIT_WARN_FLAGS})
 
 # ── Test harnesses ──────────────────────────────────────────────────────────
@@ -150,6 +154,23 @@ if(BUILD_TESTING)
         F:/ROCM-7.14.0-Windows/lib/amdhip64.lib
     )
     add_test(NAME test_vkblas_sparse COMMAND test_vkblas_sparse)
+
+    # LAPACK VJITC bridge test (requires HIP runtime)
+    add_executable(test_vkblas_lapack tests/test_vkblas_lapack.c)
+    target_include_directories(test_vkblas_lapack PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkblas
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkmath
+        F:/ROCM-7.14.0-Windows/include
+    )
+    target_link_libraries(test_vkblas_lapack PRIVATE
+        vkblas vkruntime Vulkan::Vulkan
+        F:/ROCM-7.14.0-Windows/lib/amdhip64.lib
+    )
+    add_test(NAME test_vkblas_lapack COMMAND test_vkblas_lapack)
+    set_tests_properties(test_vkblas_lapack PROPERTIES
+        ENVIRONMENT "PATH=F:/ROCM-7.14.0-Windows/bin;$ENV{PATH}"
+    )
     set_tests_properties(test_vkblas_sparse PROPERTIES
         ENVIRONMENT "PATH=F:/ROCM-7.14.0-Windows/bin;$ENV{PATH}"
     )
