@@ -64,7 +64,7 @@ Last gate run status (authoritative, from `run_all.ps1` summary):
 | VKBLAS  | `gemm_baseline_f32/f16/bf16/f64` (shared-mem tiled), `subgroup/gemm_{f32,f16,bf16,f64}` twins, `coopmatrix/gemm_{f32,f16,bf16,f64}`; qgemm with on-the-fly dequant for q4_0/q4k/q5k/q6k/q3k/q8_0/iq4xs; **subgroup-tier qgemm all 7 formats** (32x8 warp-tiled, subgroupShuffle x-broadcast, no shared memory) + **`_f16` fp16-output-storage twin per format** (f32 accumulate, `float16_t` y/z, private dtype codes 32..38); ext BLAS ops (trsv, trsm, symv, hemv, symm, hemm, syrk, herk) in f32 and f16 — f16 variants convert alpha/beta from f16 bit-patterns to f32 via `vkblas_f16_to_f32` before dispatch | No f16/bf16/f64 coopmatrix tier for qgemm (baseline+subgroup only); no sparse BLAS / NPP-equivalent / runtime JIT |
 | VKFFT   | radix-2 forward+inverse, `fft_f16` + `fft_f32` blobs (no TODO/stub markers) | No f64, no bf16, no non-radix-2 (non-power-of-2) plans |
 | VKRAND  | PRNG generators (threefry, uniform, normal) + distribution sampling (4 blobs, 0 stubs) | (none known) |
-| VKMath  | 51 blobs: elementwise (abs/add/mul/exp/log/sqrt/pow/sign/scale/clip) + activations (relu/gelu/silu/sigmoid/tanh) + reductions (sum/max/nrm2/dot/asum) + norm + softmax + cumsum + **bf16 casts** (`cast_f32_to_bf16`/`cast_bf16_to_f32`) + **bf16 elementwise** (`add/mul/add_mul/scale`) + **bf16 activations** (`relu/silu/gelu/sigmoid/tanh`) + **f16 elementwise** (`add/mul/scale/add_mul`) + **f16 activations** (`relu/silu/gelu/sigmoid/tanh`); baseline + subgroup tiers | `vkmath.c:273` TODO is a comment (cosmetic, not an executable stub); bf16 ops are integrated (uint16_t scalar-block SSBO, requires `storageBuffer16BitAccess` + `scalarBlockLayout`); no bf16 reductions |
+| VKMath  | 46 blobs: elementwise (abs/add/mul/exp/log/sqrt/pow/sign/scale/clip) + activations (relu/gelu/silu/sigmoid/tanh) + reductions (sum/max/nrm2/dot/asum) + norm + softmax + cumsum + **bf16 casts** (`cast_f32_to_bf16`/`cast_bf16_to_f32`) + **bf16 elementwise** (`add/mul/add_mul/scale`) + **bf16 activations** (`relu/silu/gelu/sigmoid/tanh`) + **f16 elementwise** (`add/mul/add_mul/scale`) + **f16 activations** (`relu/silu/gelu/sigmoid/tanh`); baseline + subgroup tiers | `vkmath.c:273` TODO is a comment (cosmetic, not an executable stub); bf16 ops are integrated (uint16_t scalar-block SSBO, requires `storageBuffer16BitAccess` + `scalarBlockLayout`); no bf16 reductions |
 | VKQuant | dequant all formats (23); **forward/encode quantize** for 20 block formats via `vkquant_quantize_*_f32` (q4_0..tq2_0, iq1s..iq4xs) | none — bf16 is not a VKQuant format (native 16-bit float); f32↔bf16 conversion lives inline in `gemm_bf16.comp`, no separate cast/quant op |
 | VKBLAS-L1L2 | axpy/scal/dot/gemv/nrm2/asum/amax f32/f16 | 0 stubs |
 | VKModel | GGUF, safetensors, OpenVINO IR v11 loaders | No JIT IR conversion; sub-byte packed types rejected in OpenVINO |
@@ -172,10 +172,33 @@ RDNA2 serves as the compatibility baseline.
 
 The architectural redesign (single CB, push descriptors, fused kernels, pooled
 staging) removes the CPU/driver-side overhead that serializes per-op work.
-Every doc in `docs/specs/` and every shader in `shaders/` is anchored to this
+Every doc in `specs/` and every shader in `shaders/` is anchored to this
 contract.
 
-## Active Work Items
+### Completed Deliverables
+
+- **Real cooperative-matrix GEMM** — `shaders/vkblas/coopmatrix/gemm_{f32,f16,bf16,f64}.comp`
+  all built and testable via `tests/cmprobe.c`. `VAIT_COOPMATRIX=1` enables on
+  RDNA4 (RX 9070 XT) and newer. Coopmatrix path dormant by default (driver 26.7.1
+  crashes on init, per GAP_ANALYSIS.md).
+- **`vkr_create_device` deliverable** — canonical full-feature device creation
+  (`src/vkruntime/vkruntime.c`) queries the full Vulkan 1.1-1.4 feature chain,
+  enables only what the device reports, gates cooperative matrix on
+  `VAIT_COOPMATRIX`. Tests in `tests/test_vkruntime.c` section 12 → PASS.
+- **All 10/10 harnesses PASS on RX 9070 XT** (verified by `run_all.ps1`).
+
+Full module inventory (from `CMakeLists.txt` `add_library` + public headers):
+`VKRuntime` (runtime), `VKBLAS`+(`VKBLAS-L1L2`) (`vkblas_*`, L1/L2 BLAS ops),
+`VKFFT` (`vkfft_*`), `VKRAND` (`vkrand_*`), `VKMath` (`vkmath_*`), `VKQuant`
+(`vkquant_{dequant,quantize}_<fmt>_f32` — 23 dequant / 22 quantize formats),
+`VKModel` (`vkmodel_load_gguf`/`vkmodel_load_safetensors`/`vkmodel_load_openvino`), `VKKV`
+(`vkkv_fit_cpu`+`vkkv_apply` LLM KV-cache ridge-fit), `VKDIST`
+(`vkdist_server_*` TCP framed transport). Shader registry is **file-tree
+auto-discovery**: `compile_shaders.ps1` globs `shaders/<lib>/<tier>/*.comp` and
+emits `src/<lib>/shaders_spv.h` as `<lib>_spv_<tier>_<name>` arrays. Adding a
+kernel = drop a `.comp` + regenerate (no manual CMake list).
+
+## Verification Results
 
 GPU host target (verified by `vulkaninfo` on this machine): **AMD Radeon RX
 9070 XT**, RDNA4, Vulkan 1.4.349, driver 2.0.395; host Ryzen 9 5900X (16c/32t)
@@ -192,18 +215,8 @@ GPU host target (verified by `vulkaninfo` on this machine): **AMD Radeon RX
 - `test_vkruntime` -> PASS (device creation, pooled allocator, upload/download, `vkr_create_device`)
 - `test_vkblas_l1l2` -> PASS (dot/nrm2/asum/amax/gemv/axpy/scal f32/f16)
 
-Full module inventory (from `CMakeLists.txt` `add_library` + public headers):
-`VKRuntime` (runtime), `VKBLAS`+(`VKBLAS-L1L2`) (`vkblas_*`, L1/L2 BLAS ops),
-`VKFFT` (`vkfft_*`), `VKRAND` (`vkrand_*`), `VKMath` (`vkmath_*`), `VKQuant`
-(`vkquant_{dequant,quantize}_<fmt>_f32` — 23 dequant / 22 quantize formats),
-`VKModel` (`vkmodel_load_gguf`/`vkmodel_load_safetensors`/`vkmodel_load_openvino`), `VKKV`
-(`vkkv_fit_cpu`+`vkkv_apply` LLM KV-cache ridge-fit), `VKDIST`
-(`vkdist_server_*` TCP framed transport). Shader registry is **file-tree
-auto-discovery**: `compile_shaders.ps1` globs `shaders/<lib>/<tier>/*.comp` and
-emits `src/<lib>/shaders_spv.h` as `<lib>_spv_<tier>_<name>` arrays. Adding a
-kernel = drop a `.comp` + regenerate (no manual CMake list).
+### Verified Real Gaps (priority)
 
-Verified real gaps (priority):
 1. **DONE: subgroup-tier qgemm all 7 formats integrated** —
    `shaders/vkblas/subgroup/qgemm_<fmt>.comp` for q8_0/q4_0/q4k/q5k/q6k/q3k/
    iq4xs (32x8 tile, one 32-lane subgroup per block, `subgroupShuffle`
@@ -254,6 +267,15 @@ Verified real gaps (priority):
    Tests in `tests/test_vkruntime.c` section 12 — build + run on RX 9070 XT ->
    **PASS**. Remaining VKRuntime scope: no shader reflection (no `shaders/`
    subtree); cooperative matrix stays behind `VAIT_COOPMATRIX`.
+
+### Remaining Gaps
+
+1. **Coopmatrix tiers for f16/bf16/f64 GEMM and qgemm** — baseline + subgroup exist, coopmatrix tier is future perf work (qgemm is the decode hot path).
+2. **No sparse BLAS** (cuSPARSE/rocSPARSE equivalent).
+3. **No NPP-equivalent** (signal/image processing).
+4. **No runtime JIT** (NVRTC/hipRTC) — offline shader compile only.
+5. **No GPU-accelerated neural network inference** — conv2d, pool2d, batchnorm,
+   transpose, determinant, inverse, LU/QR/Cholesky/Eigenvalue decomposition.
 
 Note on vendor naming: this stack uses the Vulkan `VK_AMD_*` vendor-extension
 nomenclature for AMD GPU features (e.g. `VK_AMD_SHADER_CORE_PROPERTIES(2)`,

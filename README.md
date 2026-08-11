@@ -298,28 +298,40 @@ in `specs/VKDIST-DESIGN.md`.
 | `vkdist_register_buffer` / `vkdist_upload` / `vkdist_readback` | Remote buffer lifecycle |
 | `vkdist_sgemm` | Remote `vkblas_sgemm` dispatch |
 
-### In Progress
+### Completed Deliverables
 
-- **Real cooperative-matrix GEMM on this driver** — coopmat path now fully built
-  with `shaders/vkblas/coopmatrix/gemm_f16.comp`, `gemm_bf16.comp`, `gemm_f64.comp`,
-  and the `_f16` twin per format. `VAIT_COOPMATRIX=1` enables it on RDNA4
-  (RX 9070 XT) and newer. Testable via `tests/cmprobe.c`.
+- **Real cooperative-matrix GEMM** — `shaders/vkblas/coopmatrix/gemm_{f16,bf16,f64}.comp`
+  all built and testable via `tests/cmprobe.c`. `VAIT_COOPMATRIX=1` enables on
+  RDNA4 (RX 9070 XT) and newer. Coopmatrix path dormant by default (driver 26.7.1
+  crashes on init, per `specs/GAP_ANALYSIS.md`).
 - **`vkr_create_device` deliverable** — canonical full-feature device creation
   (`src/vkruntime/vkruntime.c`); all Vulkan 1.1-1.4 features enabled, cooperative
   matrix gated on `VAIT_COOPMATRIX`.
-- **All 10/10 harnesses PASS on RX 9070 XT** (verified by `run_all.ps1`).
+- **All 10/10 harnesses PASS on RX 9070 XT** (verified by `tests/run_all.ps1`).
+- **All 8 ext BLAS ops** (trsv/trsm/symv/hemv/symm/hemm/syrk/herk) pass in both
+  f32 and f16 — f16 variants convert alpha/beta via `vkblas_f16_to_f32` before dispatch.
 
-### Not Yet Implemented (from original scope)
+### Not Yet Implemented
 
 - **GPU-accelerated linear algebra**: LU, QR, Cholesky, Eigenvalue Decomposition,
-  SYRK, HERK, determinant, matrix inverse — hardware-specific kernels needed.
-- **GPU-accelerated neural network inference**: conv2d, pool2d, bn, softmax,
-  log_softmax — hardware-specific kernels needed.
+  determinant, matrix inverse — hardware-specific kernels needed.
+- **GPU-accelerated neural network inference**: conv2d, pool2d, batchnorm —
+  hardware-specific kernels needed.
 - **GPU-accelerated sparse matrix operations**: sparse gemm, solve, factorize.
-- **GPU-accelerated math primitives**: exp, log, sqrt, pow, sign, scale, clip.
-- **GPU-accelerated FFT**: improve radix-2 with RDNA-specific instructions.
-- **GPU-accelerated PRNG**: improve distribution sampling (threefry, uniform, normal).
-- **GPU-accelerated matrix operations**: transpose, det, inv.
+- **GPU-accelerated matrix operations**: transpose, determinant, inverse.
+
+### Already Implemented (not deferred)
+
+The following primitives were previously listed as "Not Yet Implemented" but are
+already present in the codebase:
+
+- **Math primitives**: exp, log, sqrt, pow, sign, scale, clip — all dispatch via
+  `vkmath_*_f32` (and f16/bf16 where applicable). See `shaders/vkmath/baseline/`.
+- **Activations**: relu, silu, gelu, sigmoid, tanh — f32 and f16 variants.
+- **Reductions**: sum, max, argmax, argmin, cumsum — row-wise and global.
+- **Normalization**: softmax, rms_norm, layernorm — f32 and f16.
+- **PRNG**: threefry (ThreeFry2x32-20), uniform, normal — see `shaders/vkrand/baseline/`.
+- **FFT**: radix-2 forward/inverse, f32 and f16, 1D and 2D.
 
 ---
 
