@@ -207,7 +207,8 @@ Full module inventory (from `CMakeLists.txt` `add_library` + public headers):
 (`vkkv_fit_cpu`+`vkkv_apply` LLM KV-cache ridge-fit), `VKDIST`
 (`vkdist_server_*` TCP framed transport; capability handshake
 `vkdist_query_caps`; master/worker coordinator `vkdist_master_*` with an
-SSH-key gate `vkdist_verify_ssh_key`). Shader registry is **file-tree
+SSH-key gate `vkdist_verify_ssh_key` — loopback 127.0.0.1/localhost workers
+skip the SSH gate so the local GPU can join the pool). Shader registry is **file-tree
 auto-discovery**: `compile_shaders.ps1` globs `shaders/<lib>/<tier>/*.comp` and
 emits `src/<lib>/shaders_spv.h` as `<lib>_spv_<tier>_<name>` arrays. Adding a
 kernel = drop a `.comp` + regenerate (no manual CMake list).

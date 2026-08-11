@@ -1231,8 +1231,14 @@ VkResult vkdist_master_add_worker(VkDistMaster *m, const char *ip,
     if (m->count >= VKDIST_MASTER_MAX_WORKERS)
         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 
-    /* Security gate: refuse any worker the controlling host has no SSH key to. */
-    if (vkdist_ssh_key_ok(ip, ssh_user) == 0)
+    /* Security gate: refuse any remote worker the controlling host has no
+       SSH key to. Loopback (127.0.0.1 / localhost) is inherently the local
+       machine — no SSH auth needed to talk to yourself, and it lets a master
+       add the local GPU as a worker beside remote ones. */
+    int is_loopback = (strcmp(ip, "127.0.0.1") == 0 ||
+                       strcmp(ip, "localhost") == 0 ||
+                       strcmp(ip, "::1") == 0);
+    if (!is_loopback && vkdist_ssh_key_ok(ip, ssh_user) == 0)
         return VK_ERROR_UNKNOWN;
 
     int fd = vkdist_client_connect(ip, port);
