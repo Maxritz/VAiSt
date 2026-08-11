@@ -273,8 +273,9 @@ are future work.
 |-------|-------|--------------|
 | **P0 (done)** | Loopback vertical slice | Design spec, `vkdist` lib, `tests/test_vkdist.c` (local sgemm via TCP, passes) |
 | **P1 (this subtree, done)** | Multi-connection + partitioned GEMM | `vkdist_server_accept_many`/`vkdist_server_serve_many` (N concurrent worker connections, one pthread each, shared-BLAS mutex), `vkdist_sgemm_partitioned` (column split n_i = n/n_workers, last takes remainder; per-worker register/upload of A + B strip + C strip, dispatch, read-back merge), tests (2w [8,8], 3w uneven [5,5,6], beta-accumulation), all passing. Cross-PC: run the server on one host (RX 9070 XT) and the client on another (MacX 6700 XT) — the transport is plain routable TCP, so the same code exercises it |
+| **P1.5 (done)** | Capability handshake + master/worker + SSH-key gate | `vkdist_query_caps` (GPU name, device-local VRAM by heap, arch tier, subgroup size, max frame — the capability broadcast P3 planned, now on the wire), `vkdist_verify_ssh_key` + enforced gate in `vkdist_master_add_worker` (BatchMode key check; untrusted hosts refused), `vkdist_master_create`/`add_worker`/`worker_caps`/`sgemm`/`destroy` coordinator, `tests/test_vkdist_xpc.c` cross-PC (server/client/master modes) verified on RX 9070 XT ↔ RX 6700 XT. Transport encryption intentionally NOT in-library: run the client through an external `ssh -N -L` port-forward |
 | **P2** | Attention / KV sharding | Remote KV-cache buffers with incremental upload (cache-miss only), sharded attention (head or sequence partition), weight sharding (row/column split of Q/K/V/O and FFN), fused remote dequant GEMM (`qgemm_q4k`) |
-| **P3** | Rendezvous / discovery + TLS | mDNS/JSON rendezvous to find worker GPUs, health + capability broadcast (VRAM, arch tier), mutual TLS, payload encryption, per-connection auth tokens, quotas |
+| **P3** | Rendezvous / discovery + TLS | mDNS/JSON rendezvous to find worker GPUs (capability broadcast partially done in P1.5), mutual TLS / payload encryption, per-connection auth tokens, quotas |
 
 ### 9.1 Example multi-worker topology (Phase 1 implemented)
 

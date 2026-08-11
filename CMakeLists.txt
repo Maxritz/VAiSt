@@ -260,34 +260,6 @@ if(BUILD_TESTING)
     target_link_libraries(test_vkquant PRIVATE vkquant Vulkan::Vulkan)
     add_test(NAME test_vkquant COMMAND test_vkquant)
 
-    # ── VKCompress library ────────────────────────────────────────────────────
-    add_library(vkcompress STATIC src/vkcompress/vkcompress.c)
-    target_include_directories(vkcompress PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkcompress
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkcompress
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkruntime
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
-    )
-    target_link_libraries(vkcompress PUBLIC Vulkan::Vulkan vkruntime)
-    target_compile_options(vkcompress PRIVATE ${VAIT_WARN_FLAGS})
-
-    add_executable(test_vkcompress tests/test_vkcompress.c)
-    target_include_directories(test_vkcompress PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkcompress
-    )
-    target_link_libraries(test_vkcompress PRIVATE vkcompress Vulkan::Vulkan vkruntime)
-    add_test(NAME test_vkcompress COMMAND test_vkcompress)
-
-    add_executable(test_vkcompress_stream tests/test_vkcompress_stream.c)
-    target_include_directories(test_vkcompress_stream PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkcompress
-    )
-    target_link_libraries(test_vkcompress_stream PRIVATE vkcompress Vulkan::Vulkan vkruntime)
-    add_test(NAME test_vkcompress_stream COMMAND test_vkcompress_stream)
-
     # ── VKRAND library ───────────────────────────────────────────────────
     add_library(vkrand STATIC src/vkrand/vkrand.c)
     target_include_directories(vkrand PUBLIC
@@ -474,5 +446,15 @@ if(BUILD_TESTING)
         target_link_libraries(test_vkdist PRIVATE ws2_32)
     endif()
     add_test(NAME test_vkdist COMMAND test_vkdist)
+
+    add_executable(test_vkdist_xpc tests/test_vkdist_xpc.c)
+    target_include_directories(test_vkdist_xpc PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkdist
+    )
+    target_link_libraries(test_vkdist_xpc PRIVATE vkdist vkblas vkruntime Vulkan::Vulkan)
+    if(WIN32)
+        target_link_libraries(test_vkdist_xpc PRIVATE ws2_32)
+    endif()
     endif() # NOT MSVC (vkdist)
 endif()

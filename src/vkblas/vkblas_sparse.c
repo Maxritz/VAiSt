@@ -165,3 +165,130 @@ VkResult vkblas_sparse_gemm_f32(
     hipDeviceSynchronize();
     return VK_SUCCESS;
 }
+
+VkResult vkblas_sparse_spsv_f32(
+    VkBLASContext* ctx,
+    VkBLASOperation_t op_A,
+    uint32_t m,
+    uint32_t nnz,
+    const float* alpha,
+    const uint32_t* csr_row_ptr,
+    const uint32_t* csr_col_ind,
+    const float* csr_val,
+    const void* x,
+    void* y,
+    VkCommandBuffer cmd)
+{
+    if (!ctx || !csr_val || !csr_row_ptr || !csr_col_ind || !x || !y || !alpha || m == 0) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    (void)cmd;  /* Bridge calls happen on the HIP stream, not via VkCommandBuffer */
+
+    hipsparseHandle_t sp_handle;
+    hipsparseStatus_t st = hipsparseCreate(&sp_handle);
+    if (st != HIPSPARSE_STATUS_SUCCESS) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    hipsparseOperation_t sp_op_A = (op_A == VKBLAS_OP_T) ? HIPSPARSE_OPERATION_TRANSPOSE
+                                                         : HIPSPARSE_OPERATION_NON_TRANSPOSE;
+
+    /* === Create sparse CSR descriptor === */
+    hipsparseSpMatDescr_t A_descr;
+    st = hipsparseCreateCsr(&A_descr,
+        (int64_t)m, (int64_t)m, (int64_t)nnz,
+        (void*)csr_row_ptr,
+        (void*)csr_col_ind,
+        (void*)csr_val,
+        HIPSPARSE_INDEX_32I,
+        HIPSPARSE_INDEX_32I,
+        HIPSPARSE_INDEX_BASE_ZERO,
+        HIP_R_32F);
+    if (st != HIPSPARSE_STATUS_SUCCESS) {
+        hipsparseDestroy(sp_handle);
+        return VK_ERROR_UNKNOWN;
+    }
+
+    /* === Create dense vector descriptors for x and y === */
+    hipsparseDnVecDescr_t x_descr;
+    st = hipsparseCreateDnVec(&x_descr, (int64_t)m, (void*)x, HIP_R_32F);
+    if (st != HIPSPARSE_STATUS_SUCCESS) {
+        hipsparseDestroySpMat(A_descr);
+        hipsparseDestroy(sp_handle);
+        return VK_ERROR_UNKNOWN;
+    }
+
+    hipsparseDnVecDescr_t y_descr;
+    st = hipsparseCreateDnVec(&y_descr, (int64_t)m, y, HIP_R_32F);
+    if (st != HIPSPARSE_STATUS_SUCCESS) {
+        hipsparseDestroyDnVec(x_descr);
+        hipsparseDestroySpMat(A_descr);
+        hipsparseDestroy(sp_handle);
+        return VK_ERROR_UNKNOWN;
+    }
+
+    /* === Create SpSV descriptor === */
+    hipsparseSpSVDescr_t spsv_descr;
+    st = hipsparseSpSV_createDescr(&spsv_descr);
+    if (st != HIPSPARSE_STATUS_SUCCESS) {
+        hipsparseDestroyDnVec(y_descr);
+        hipsparseDestroyDnVec(x_descr);
+        hipsparseDestroySpMat(A_descr);
+        hipsparseDestroy(sp_handle);
+        return VK_ERROR_UNKNOWN;
+    }
+
+    /* === Query buffer size === */
+    size_t buffer_size = 0;
+    st = hipsparseSpSV_bufferSize(sp_handle, sp_op_A, alpha,
+        A_descr, x_descr, y_descr, HIP_R_32F,
+        HIPSPARSE_SPSV_ALG_DEFAULT, spsv_descr, &buffer_size);
+    if (st != HIPSPARSE_STATUS_SUCCESS) {
+        hipsparseSpSV_destroyDescr(spsv_descr);
+        hipsparseDestroyDnVec(y_descr);
+        hipsparseDestroyDnVec(x_descr);
+        hipsparseDestroySpMat(A_descr);
+        hipsparseDestroy(sp_handle);
+        return VK_ERROR_UNKNOWN;
+    }
+
+    void* buffer = NULL;
+    if (buffer_size > 0) {
+        hipMalloc(&buffer, buffer_size);
+    }
+
+    /* === Analysis === */
+    st = hipsparseSpSV_analysis(sp_handle, sp_op_A, alpha,
+        A_descr, x_descr, y_descr, HIP_R_32F,
+        HIPSPARSE_SPSV_ALG_DEFAULT, spsv_descr, buffer);
+    if (st != HIPSPARSE_STATUS_SUCCESS) {
+        if (buffer) hipFree(buffer);
+        hipsparseSpSV_destroyDescr(spsv_descr);
+        hipsparseDestroyDnVec(y_descr);
+        hipsparseDestroyDnVec(x_descr);
+        hipsparseDestroySpMat(A_descr);
+        hipsparseDestroy(sp_handle);
+        return VK_ERROR_UNKNOWN;
+    }
+
+    /* === Solve op(A) * y = alpha * x === */
+    st = hipsparseSpSV_solve(sp_handle, sp_op_A, alpha,
+        A_descr, x_descr, y_descr, HIP_R_32F,
+        HIPSPARSE_SPSV_ALG_DEFAULT, spsv_descr);
+
+    /* === Cleanup === */
+    if (buffer) hipFree(buffer);
+    hipsparseSpSV_destroyDescr(spsv_descr);
+    hipsparseDestroyDnVec(y_descr);
+    hipsparseDestroyDnVec(x_descr);
+    hipsparseDestroySpMat(A_descr);
+    hipsparseDestroy(sp_handle);
+
+    if (st != HIPSPARSE_STATUS_SUCCESS) {
+        return VK_ERROR_UNKNOWN;
+    }
+
+    hipDeviceSynchronize();
+    return VK_SUCCESS;
+}

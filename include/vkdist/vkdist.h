@@ -40,6 +40,24 @@ extern "C" {
  */
 #define VKDIST_PROTOCOL_VERSION 1u
 
+/**
+ * \brief Capability advertisement for a connected vkdist server.
+ *
+ * Filled by vkdist_query_caps(). Lets a master/coordinator discover what a
+ * worker GPU can do before routing work to it: GPU name, VRAM budget, the
+ * stack's shader-tier arch index (0=baseline, 1=subgroup, 2=coopmatrix), and
+ * the server's frame-size limit.
+ */
+typedef struct {
+    uint32_t protocol_version;  /**< VKDIST_PROTOCOL_VERSION echoed by server. */
+    uint64_t vram_total;        /**< Device-local heap size in bytes.          */
+    uint64_t vram_free;         /**< Device-local heap currently free (bytes). */
+    uint32_t arch_index;        /**< 0=baseline, 1=subgroup, 2=coopmatrix.     */
+    uint32_t subgroup_size;     /**< Device subgroup size (e.g. 64 RDNA2).      */
+    uint32_t max_frame;         /**< Max payload bytes/frame on this server.    */
+    char     gpu_name[128];     /**< VkPhysicalDeviceProperties::deviceName.    */
+} VkDistCaps;
+
 /* ===========================================================================
  * Server
  * ========================================================================== */
@@ -161,6 +179,19 @@ VkResult vkdist_server_serve_many(VkPhysicalDevice pd, VkDevice dev,
  * \return Connection descriptor, or -1 on error.
  */
 int vkdist_client_connect(const char *ip, uint16_t port);
+
+/**
+ * \brief Query a connected server's capabilities (GPU name, VRAM, arch tier).
+ *
+ * Sends a CAPS request and fills \p caps from the server's reply. Lets a
+ * master decide which worker to route work to based on VRAM and shader tier.
+ *
+ * \param fd   Connected socket from vkdist_client_connect().
+ * \param caps Receives the capability struct.
+ * \retval VK_SUCCESS
+ * \retval VK_ERROR_UNKNOWN Transport/protocol error or truncated reply.
+ */
+VkResult vkdist_query_caps(int fd, VkDistCaps *caps);
 
 /**
  * \brief Register a remote buffer of \p size bytes on the server device.
@@ -292,6 +323,117 @@ VkResult vkdist_sgemm_partitioned(int n_workers, const int *fds,
  * \param fd Connection or listen descriptor to close.
  */
 void vkdist_close(int fd);
+
+/* ===========================================================================
+ * Master / worker coordinator
+ * ========================================================================== */
+
+/** \brief Opaque master context holding N connected worker connections. */
+typedef struct VkDistMaster VkDistMaster;
+
+/**
+ * \brief Verify SSH key-based authentication to a host (security gate).
+ *
+ * Runs `ssh -o BatchMode=yes <user>@<host> "exit 0"` so no password prompt is
+ * possible: BatchMode makes ssh fail instead of prompting for a password.
+ * Returns VK_SUCCESS only if key-based auth succeeds and the host answers.
+ *
+ * This is the security gate the master enforces before accepting any worker:
+ * a worker is only usable when the controlling host has an established SSH
+ * key to it. On Windows the OpenSSH client (`ssh.exe`) must be on PATH.
+ *
+ * \param host IPv4 address or resolvable hostname of the target.
+ * \param user SSH login user on the target.
+ * \retval VK_SUCCESS SSH key auth to host works.
+ * \retval VK_ERROR_INITIALIZATION_FAILED NULL argument.
+ * \retval VK_ERROR_UNKNOWN ssh not found, auth failed, or host unreachable.
+ */
+VkResult vkdist_verify_ssh_key(const char *host, const char *user);
+
+/**
+ * \brief Create an empty master coordinator.
+ *
+ * \param out Receives the new master (call vkdist_master_destroy() when done).
+ * \retval VK_SUCCESS
+ * \retval VK_ERROR_OUT_OF_HOST_MEMORY
+ */
+VkResult vkdist_master_create(VkDistMaster **out);
+
+/**
+ * \brief Connect a worker and record its capabilities.
+ *
+ * Security: verifies SSH key-based auth to \p ip (as \p ssh_user) FIRST via
+ * vkdist_verify_ssh_key(). Only if that succeeds does it connect (HELLO
+ * handshake inside vkdist_client_connect), query capabilities, and add the
+ * worker to the master. A worker the controlling host has no SSH key to is
+ * rejected with VK_ERROR_UNKNOWN — the distributed system will not operate
+ * between hosts that do not trust each other via SSH.
+ *
+ * Note on transport encryption: vkdist does not tunnel its own traffic.
+ * The SSH key gate authenticates the worker; to encrypt the data path, run
+ * the vkdist client through an SSH local port-forward established outside
+ * the library, e.g. `ssh -N -L 7001:127.0.0.1:7000 user@worker` and point
+ * vkdist_client_connect() at 127.0.0.1:7001.
+ *
+ * The connection is owned by the master and closed by vkdist_master_destroy().
+ *
+ * \param m        Master context.
+ * \param ip       Worker IPv4 address.
+ * \param ssh_user SSH login user on the worker (verified before connect).
+ * \param port     Worker vkdist listen port.
+ * \param out_caps Optional; filled with the worker's capabilities.
+ * \retval VK_SUCCESS
+ * \retval VK_ERROR_INITIALIZATION_FAILED NULL master.
+ * \retval VK_ERROR_UNKNOWN SSH-key gate failed, connect/handshake/caps failure.
+ */
+VkResult vkdist_master_add_worker(VkDistMaster *m, const char *ip,
+                                  const char *ssh_user, uint16_t port,
+                                  VkDistCaps *out_caps);
+
+/**
+ * \brief Number of connected workers.
+ */
+uint32_t vkdist_master_worker_count(VkDistMaster *m);
+
+/**
+ * \brief Capabilities of worker \p i.
+ * \retval NULL on invalid index or NULL master.
+ */
+const VkDistCaps *vkdist_master_worker_caps(VkDistMaster *m, uint32_t i);
+
+/**
+ * \brief Column-partitioned f32 GEMM across all connected workers.
+ *
+ * Reuses vkdist_sgemm_partitioned() with the master's worker fds, so C's
+ * columns are split across every worker (n_i = n/count, last takes the
+ * remainder) and the strips are merged back into the host C buffer.
+ *
+ * \param m     Master with >= 1 worker.
+ * \param m_    Rows of op(A) and C.
+ * \param n_    Cols of op(B) and C.
+ * \param k_    Contraction dimension.
+ * \param alpha Host alpha scalar.
+ * \param A     Host A buffer (m x k, lda stride).
+ * \param lda   Leading dimension of A (>= m).
+ * \param B     Host B buffer (k x n, ldb stride).
+ * \param ldb   Leading dimension of B (>= k).
+ * \param beta  Host beta scalar.
+ * \param C     Host C buffer (m x n, ldc stride); read for beta, overwritten.
+ * \param ldc   Leading dimension of C (>= m).
+ * \retval VK_SUCCESS
+ * \retval VK_ERROR_INITIALIZATION_FAILED No workers or bad args.
+ * \retval VK_ERROR_UNKNOWN Any worker transport failure.
+ */
+VkResult vkdist_master_sgemm(VkDistMaster *m,
+                             int32_t m_, int32_t n_, int32_t k_,
+                             const float *alpha, const float *A, int32_t lda,
+                             const float *B, int32_t ldb,
+                             const float *beta, float *C, int32_t ldc);
+
+/**
+ * \brief Close every worker connection and free the master.
+ */
+void vkdist_master_destroy(VkDistMaster *m);
 
 #ifdef __cplusplus
 } /* extern "C" */

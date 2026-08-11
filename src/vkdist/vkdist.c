@@ -646,6 +646,46 @@ static VkResult vkdist_server_run_ex(VkPhysicalDevice pd, VkDevice dev,
             continue;
         }
 
+        if (opcode == VKDIST_OP_CAPS) {
+            /* Reply: i32 result + VKDIST_CAPS_PAYLOAD_SIZE bytes. */
+            uint8_t p[4 + VKDIST_CAPS_PAYLOAD_SIZE];
+            vkdist_put_i32_le(p, 0);
+
+            VkPhysicalDeviceProperties props;
+            vkGetPhysicalDeviceProperties(st.pd, &props);
+            VkRuntimeCaps rcaps;
+            memset(&rcaps, 0, sizeof(rcaps));
+            vkr_detect_capabilities(st.pd, st.dev, &rcaps);
+
+            VkPhysicalDeviceMemoryProperties mem;
+            vkGetPhysicalDeviceMemoryProperties(st.pd, &mem);
+            uint64_t vram_total = 0, vram_free = 0;
+            /* Sum distinct device-local heaps once each (multiple memory types
+               can reference the same heap, so summing per-type double counts). */
+            for (uint32_t h = 0; h < mem.memoryHeapCount; h++) {
+                if (mem.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+                    vram_total += mem.memoryHeaps[h].size;
+                    vram_free  += mem.memoryHeaps[h].size;
+                }
+            }
+
+            uint8_t *q = p + 4;
+            vkdist_put_u32_le(q, VKDIST_PROTOCOL_VERSION);
+            vkdist_put_u64_le(q + 4, vram_total);
+            vkdist_put_u64_le(q + 12, vram_free);
+            vkdist_put_u32_le(q + 20, rcaps.arch_index);
+            vkdist_put_u32_le(q + 24, rcaps.subgroup_size);
+            vkdist_put_u32_le(q + 28, VKDIST_MAX_FRAME);
+            memset(q + 32, 0, 128);
+            strncpy((char *)q + 32, props.deviceName, 127);
+
+            if (vkdist_frame_send(s, opcode, p, sizeof(p)) != 0) {
+                result = VK_ERROR_UNKNOWN;
+                break;
+            }
+            continue;
+        }
+
         if (opcode == VKDIST_OP_BYE) {
             result = VK_SUCCESS; /* graceful close, no reply */
             break;
@@ -872,6 +912,38 @@ int vkdist_client_connect(const char *ip, uint16_t port)
     return (int)s;
 }
 
+VkResult vkdist_query_caps(int fd, VkDistCaps *caps)
+{
+    if (fd < 0 || caps == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+
+    if (vkdist_frame_send((vkdist_sock_t)fd, VKDIST_OP_CAPS, NULL, 0) != 0)
+        return VK_ERROR_UNKNOWN;
+
+    uint8_t reply[4 + VKDIST_CAPS_PAYLOAD_SIZE];
+    uint32_t len = 0;
+    if (vkdist_client_recv_frame((vkdist_sock_t)fd, VKDIST_OP_CAPS,
+                                 reply, sizeof(reply), &len) != 0)
+        return VK_ERROR_UNKNOWN;
+    if (len != sizeof(reply))
+        return VK_ERROR_UNKNOWN;
+
+    int32_t result = vkdist_get_i32_le(reply);
+    if (result != 0)
+        return (VkResult)result;
+
+    const uint8_t *q = reply + 4;
+    caps->protocol_version = vkdist_get_u32_le(q);
+    caps->vram_total = vkdist_get_u64_le(q + 4);
+    caps->vram_free  = vkdist_get_u64_le(q + 12);
+    caps->arch_index = vkdist_get_u32_le(q + 20);
+    caps->subgroup_size = vkdist_get_u32_le(q + 24);
+    caps->max_frame = vkdist_get_u32_le(q + 28);
+    memcpy(caps->gpu_name, q + 32, 128);
+    caps->gpu_name[127] = '\0';
+    return VK_SUCCESS;
+}
+
 VkResult vkdist_register_buffer(int fd, VkDeviceSize size, uint64_t *handle)
 {
     if (handle != NULL)
@@ -1083,4 +1155,133 @@ void vkdist_close(int fd)
     /* Best-effort BYE so the server tears down its session cleanly. */
     vkdist_frame_send(s, VKDIST_OP_BYE, NULL, 0);
     vkdist_sock_close(s);
+}
+
+/* ===========================================================================
+ * Master / worker coordinator
+ * ========================================================================== */
+
+#define VKDIST_MASTER_MAX_WORKERS 8u
+
+/* Run `ssh -o BatchMode=yes <user>@<host> "exit 0"`; return 0 iff key auth OK.
+   On Windows uses the OpenSSH client. _popen gives us the exit code portably
+   (cmd.exe on Win, sh elsewhere); BatchMode guarantees no password prompt.
+   The remote command is `exit 0` (no spaces) so it needs no shell quoting,
+   which would otherwise be mangled by cmd.exe's argument re-parsing. */
+static int vkdist_ssh_key_ok(const char *host, const char *user)
+{
+    /* Only safe characters allowed — host/user are interpolated into a shell
+       command, so reject anything that could break out (cmd/powershell or sh). */
+    for (const char *p = host; *p; p++) {
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z')
+              || (*p >= '0' && *p <= '9') || *p == '.' || *p == '-' || *p == '_'))
+            return 0;
+    }
+    for (const char *p = user; *p; p++) {
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z')
+              || (*p >= '0' && *p <= '9') || *p == '_' || *p == '-' || *p == '.'))
+            return 0;
+    }
+
+    char cmd[512];
+    int n = snprintf(cmd, sizeof(cmd),
+                     "ssh -o BatchMode=yes -o ConnectTimeout=5 "
+                     "-o StrictHostKeyChecking=accept-new %s@%s exit 0",
+                     user, host);
+    if (n < 0 || (size_t)n >= sizeof(cmd))
+        return 0;
+
+    FILE *p = _popen(cmd, "r");
+    if (p == NULL)
+        return 0;
+    int rc = _pclose(p);
+    return rc == 0;
+}
+
+struct VkDistMaster {
+    int          fds[VKDIST_MASTER_MAX_WORKERS];
+    VkDistCaps   caps[VKDIST_MASTER_MAX_WORKERS];
+    uint32_t     count;
+};
+
+VkResult vkdist_verify_ssh_key(const char *host, const char *user)
+{
+    if (host == NULL || host[0] == '\0' || user == NULL || user[0] == '\0')
+        return VK_ERROR_INITIALIZATION_FAILED;
+    return vkdist_ssh_key_ok(host, user) ? VK_SUCCESS : VK_ERROR_UNKNOWN;
+}
+
+VkResult vkdist_master_create(VkDistMaster **out)
+{
+    if (out == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    VkDistMaster *m = (VkDistMaster *)calloc(1, sizeof(VkDistMaster));
+    if (!m)
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    *out = m;
+    return VK_SUCCESS;
+}
+
+VkResult vkdist_master_add_worker(VkDistMaster *m, const char *ip,
+                                  const char *ssh_user, uint16_t port,
+                                  VkDistCaps *out_caps)
+{
+    if (m == NULL || ip == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m->count >= VKDIST_MASTER_MAX_WORKERS)
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+    /* Security gate: refuse any worker the controlling host has no SSH key to. */
+    if (vkdist_ssh_key_ok(ip, ssh_user) == 0)
+        return VK_ERROR_UNKNOWN;
+
+    int fd = vkdist_client_connect(ip, port);
+    if (fd < 0)
+        return VK_ERROR_UNKNOWN;
+
+    VkResult vr = vkdist_query_caps(fd, &m->caps[m->count]);
+    if (vr != VK_SUCCESS) {
+        vkdist_close(fd);
+        return vr;
+    }
+
+    m->fds[m->count] = fd;
+    if (out_caps != NULL)
+        *out_caps = m->caps[m->count];
+    m->count++;
+    return VK_SUCCESS;
+}
+
+uint32_t vkdist_master_worker_count(VkDistMaster *m)
+{
+    return m ? m->count : 0;
+}
+
+const VkDistCaps *vkdist_master_worker_caps(VkDistMaster *m, uint32_t i)
+{
+    if (m == NULL || i >= m->count)
+        return NULL;
+    return &m->caps[i];
+}
+
+VkResult vkdist_master_sgemm(VkDistMaster *m,
+                             int32_t m_, int32_t n_, int32_t k_,
+                             const float *alpha, const float *A, int32_t lda,
+                             const float *B, int32_t ldb,
+                             const float *beta, float *C, int32_t ldc)
+{
+    if (m == NULL || m->count == 0)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    return vkdist_sgemm_partitioned((int)m->count, m->fds,
+                                    m_, n_, k_, alpha, A, lda, B, ldb,
+                                    beta, C, ldc);
+}
+
+void vkdist_master_destroy(VkDistMaster *m)
+{
+    if (m == NULL)
+        return;
+    for (uint32_t i = 0; i < m->count; i++)
+        vkdist_close(m->fds[i]);
+    free(m);
 }

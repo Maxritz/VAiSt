@@ -70,7 +70,6 @@ VAiSt
 │   ├── vkquant/          Quantization + dequantization (ggml block formats)
 │   ├── vkmodel/          Model loaders (GGUF, safetensors, OpenVINO IR)
   │   ├── vkruntime/        Device/queue/memory/pool runtime (hipRuntime-equivalent)
-  │   ├── vkcompress/       LRU+LZ4 GPU buffer compression, tagged buffer registry
   │   ├── vkkv/             Cross-model KV-cache ridge transfer
 │   └── vkdist/           Distributed compute over TCP
 ├── src/                  C99 runtime + Vulkan dispatch
@@ -86,7 +85,7 @@ VAiSt
 ├── specs/                Design docs, ISA reference, architecture notes
 │   ├── Common_Issues.md        GPU hang / device-lost / fence issues (catalog)
 │   └── (per-subsystem specs)
-├── tests/                23+ test harnesses (build + run green on RX 9070 XT)
+├── tests/                23 test harnesses (build + run green on RX 9070 XT)
 └── docs/                 (empty placeholder — spec pointers live in specs/)
 ```
 
@@ -134,6 +133,17 @@ in y/z (f16 output storage).
 SPIR-V but dormant by default. Enable with `VAIT_COOPMATRIX=1` on a newer
 driver (RDNA4, RX 9070 XT). It bypasses shared-memory staging entirely and
 dramatically accelerates GEMM on RDNA.
+
+> **Why it's dormant**: the AMD LLPC driver (26.7.1, `driverVersion 2.0.395`)
+> hard-crashes in `vkCreateComputePipelines` (`0xE06D7363`) when compiling any
+> module containing `coopMatMulAddKHR`. This is a driver/LLPC bug, not a code
+> bug — and it will stay dormant **until AMD fixes it in Vulkan, or releases a
+> Vulkan ICD developer kit** that handles cooperative-matrix lowering cleanly.
+> A HIP bridge is NOT the workaround: routing GEMM to `hipblasSgemm` via
+> `VK_EXT_external_memory_host` measured **5× slower** (140 vs 696 GFLOPS on
+> RX 9070 XT, 1024³) because the bridge forces host-visible (GTT) buffers,
+> which swamps any MFMA/WMMA gain. The subgroup tier (already default) is the
+> GEMM path until the driver is fixed.
 
 > **Note**: the f16/bf16/f64 coopmatrix tiers are now built (`shaders/vkblas/coopmatrix/gemm_{f16,bf16,f64}.comp`). A `_f16` twin per format stores the f32 accumulator as `float16_t`. The cooperative-matrix tier is tested via `test_vkblas` (coopmatrix qgemm correctness, all 14 variants + _f16 twins).
 
@@ -294,33 +304,47 @@ swapping same-family models (design doc pending).
 
 RoPE stripping and top-k layer selection are the caller's responsibility.
 
-### VKCompress (implemented)
+### VKDist (implemented, Phase 1 + master/worker + caps)
 
-GPU-accelerated LZ4-style buffer compression with RLE for zero runs. Supports
-two compression tiers (fast/high) with separate shader variants:
+Distributed compute over TCP — run compute on another PC's Vulkan card. The
+transport is a synchronous, versioned (**`VKDIST_PROTOCOL_VERSION`**) request/
+reply TCP framed protocol: client and server handshake with HELLO, then
+exchange REGISTER_BUFFER / UPLOAD / DISPATCH_GEMM / READBACK / CAPS frames
+until BYE. Remote buffers are opaque `uint64_t` handles; the client never sees
+a Vulkan handle across the wire. Phase 1 adds multi-worker serving (one pthread
+per connection) and client-side column-partitioned GEMM.
 
-| Function | Description |
-|----------|-------------|
-| `vkcompress_create_context` / `vkcompress_destroy_context` | Create/destroy compression context (manages pipelines, descriptor pools, staging) |
-| `vkcompress_register_buffer` | Register a named buffer for compression (tag-based registry) |
-| `vkcompress_write` | Compress buffer data GPU-side (records compute dispatch) |
-| `vkcompress_read` | Decompress buffer data GPU-side (records compute dispatch) |
-| `vkcompress_load_catalog` / `vkcompress_save_catalog` | Catalog I/O for tagged buffer registry (stubbed — returns success) |
+A **capability handshake** (`vkdist_query_caps`) lets a coordinator discover
+each worker's GPU before routing work: GPU name, device-local VRAM, the stack's
+shader-tier arch index (0=baseline, 1=subgroup, 2=coopmatrix), subgroup size,
+and the server's frame limit. The **master/worker coordinator**
+(`vkdist_master_create`/`add_worker`/`worker_caps`/`sgemm`/`destroy`) connects
+N workers, records their capabilities, and runs `vkdist_sgemm_partitioned`
+across them. A mandatory **SSH key gate** (`vkdist_verify_ssh_key`, enforced in
+`vkdist_master_add_worker`) refuses any worker the controlling host has no
+established SSH key to — the system will not operate between hosts that do not
+trust each other. To encrypt the data path, run the client through an external
+SSH local port-forward (`ssh -N -L 7001:127.0.0.1:7000 user@worker`).
 
-### VKDist (implemented, Phase 0)
-
-Distributed compute over TCP — run compute on another PC's Vulkan card.
-Phase 0 is a loopback vertical slice (client ↔ server RPC: register buffers,
-upload, dispatch remote `vkblas_sgemm`, read back). Design + phased roadmap
+Verified cross-PC: this machine's RX 9070 XT (RDNA4, 10.0.0.10) driving a
+remote RX 6700 XT (RDNA2, 10.0.0.11) via `tests/test_vkdist_xpc.c`
+(`server` / `client` / `master` modes) — remote sgemm round-trip and
+master/worker partitioned sgemm both PASS. Design + phased roadmap
 (multi-PC, distributed GEMM partition, attention/KV sharding, TLS/discovery)
 in `specs/VKDIST-DESIGN.md`.
 
 | Function | Description |
 |----------|-------------|
-| `vkdist_server_start` / `vkdist_server_accept` / `vkdist_server_run` | TCP server hosting a Vulkan device |
-| `vkdist_client_connect` | TCP client to a remote GPU endpoint |
-| `vkdist_register_buffer` / `vkdist_upload` / `vkdist_readback` | Remote buffer lifecycle |
-| `vkdist_sgemm` | Remote `vkblas_sgemm` dispatch |
+| `vkdist_server_start` / `vkdist_server_accept` / `vkdist_server_run` | TCP server hosting a Vulkan device (per-connection RPC loop) |
+| `vkdist_server_accept_many` / `vkdist_server_serve_many` | Accept `n` connections / serve them concurrently, one pthread each (shared VkBLASContext serialized) |
+| `vkdist_client_connect` | TCP client connect + HELLO handshake |
+| `vkdist_query_caps` | Capability advertisement (GPU name, VRAM, arch tier, subgroup, max frame) |
+| `vkdist_verify_ssh_key` | SSH key-based auth check (BatchMode; security gate) |
+| `vkdist_register_buffer` / `vkdist_upload` / `vkdist_readback` | Remote buffer lifecycle (opaque handles, synchronous) |
+| `vkdist_sgemm` | Remote `vkblas_sgemm` dispatch (C = αAB + βC, in place) |
+| `vkdist_sgemm_partitioned` | Column-partitioned f32 GEMM across `n_workers` connections, merges strips |
+| `vkdist_master_create` / `vkdist_master_add_worker` / `vkdist_master_sgemm` / `vkdist_master_destroy` | Master/worker coordinator (SSH-gated worker discovery + partitioned GEMM) |
+| `vkdist_close` | Send best-effort BYE + close socket |
 
 ### Completed Deliverables
 
@@ -343,9 +367,13 @@ in `specs/VKDIST-DESIGN.md`.
 
 ### Remaining Gaps (architecturally feasible but not yet done)
 
-- No higher-level sparse ops beyond CSR SpMM (sparse LU, etc.).
+- No higher-level sparse ops beyond CSR SpMM + SpSV (sparse LU factorization, etc.).
 - No runtime JIT by default — `VAIT_JIT` CMake option (OFF) enables hipRTC + shaderc.
-- Coopmatrix (COOPMATRIX tier) dormant by default due to AMD driver 26.7.1 crash; activated via `VAIT_COOPMATRIX=1`.
+- Coopmatrix (COOPMATRIX tier) dormant by default — AMD LLPC driver 26.7.1 crashes on
+  `coopMatMulAddKHR` in `vkCreateComputePipelines`. Activated via `VAIT_COOPMATRIX=1`;
+  stays dormant until AMD fixes it in the Vulkan driver or releases a Vulkan ICD
+  developer kit (see the coopmatrix note above — a HIP-bridge GEMM is 5× slower and
+  not the workaround).
 
 ---
 
@@ -492,7 +520,8 @@ open-standard projects:
   `third_party/vk_mem_alloc.h`.
 
 - **ROCm / AMD** — for hipBLAS (API naming reference), rocSPARSE, rocsolver, and
-  MIOpen. VAiSt bridges to these libraries for sparse GEMM (`vkblas_sparse_gemm_f32`),
+  MIOpen. VAiSt bridges to these libraries for sparse GEMM (`vkblas_sparse_gemm_f32`)
+  and sparse triangular solve (`vkblas_sparse_spsv_f32`),
   LAPACK factorizations (`vkblas_lu_f32`/`_inverse_f32`/`_determinant_f32`/`_qr_f32`/
   `_cholesky_f32`/`_eigendecomp_f32`), and conv1d/2d/3d (`vkblas_conv{1d,2d,3d}_f32`)
   via zero-copy VkBuffer↔HIP-device-pointer interop. `specs/rocm-reference/`

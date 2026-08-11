@@ -1195,6 +1195,48 @@ VkResult vkblas_sparse_gemm_f32(
     VkCommandBuffer cmd);
 
 /**
+ * \brief VJITC-bridge sparse triangular solve: op(A) * y = alpha * x (f32).
+ *
+ * A is a square CSR-format sparse matrix; x is the dense right-hand side and
+ * y the dense solution (may alias x). This is the building block for direct
+ * sparse solvers (e.g. a lower then upper SpSV after a sparse LU/ILU
+ * factorization), useful for scientific workloads as well as ML.
+ *
+ * The matrix A and vectors x, y are HIP device pointers that must be
+ * allocated via hipMalloc and exported to Vulkan via VK_EXT_external_memory_host
+ * (see vkstream.h for the import path).
+ *
+ * This function bridges into rocSPARSE's hipsparseSpSV — no Vulkan shader
+ * dispatch occurs. The caller's VkCommandBuffer is unused (the HIP call
+ * executes on the default stream).
+ *
+ * \param ctx     Valid VkBLASContext (for capability detection).
+ * \param op_A    Operation for A (VKBLAS_OP_N or VKBLAS_OP_T; A is square).
+ * \param m       Matrix dimension (A is m x m; x/y length m).
+ * \param nnz     Number of non-zero elements in A.
+ * \param alpha   Host scalar multiplier (alpha * x).
+ * \param csr_row_ptr  CSR row pointers (length = m + 1).
+ * \param csr_col_ind  CSR column indices (length = nnz).
+ * \param csr_val      CSR values (length = nnz).
+ * \param x       Dense right-hand side (device pointer, length m).
+ * \param y       Dense solution (device pointer, length m, in/out; may == x).
+ * \param cmd     VkCommandBuffer (unused for bridge calls).
+ * \retval VK_SUCCESS on success.
+ */
+VkResult vkblas_sparse_spsv_f32(
+    VkBLASContext* ctx,
+    VkBLASOperation_t op_A,
+    uint32_t m,
+    uint32_t nnz,
+    const float* alpha,
+    const uint32_t* csr_row_ptr,
+    const uint32_t* csr_col_ind,
+    const float* csr_val,
+    const void* x,
+    void* y,
+    VkCommandBuffer cmd);
+
+/**
  * \brief VJITC-bridge LU decomposition: A = P * L * U
  *
  * A is overwritten with L (lower, unit diagonal) and U (upper).

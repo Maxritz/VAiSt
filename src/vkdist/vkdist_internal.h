@@ -37,7 +37,13 @@ typedef enum {
     VKDIST_OP_DISPATCH_GEMM   = 4,  /**< remote vkblas_sgemm.               */
     VKDIST_OP_READBACK        = 5,  /**< remote buffer -> host.             */
     VKDIST_OP_BYE             = 6,  /**< graceful close (no reply).         */
+    VKDIST_OP_CAPS            = 7,  /**< capability advertisement.          */
 } vkdist_opcode_t;
+
+/* Capability reply payload size (bytes), not counting the leading i32 result:
+   u32 protocol_version + u64 vram_total + u64 vram_free + u32 arch_index +
+   u32 subgroup_size + u32 max_frame + char gpu_name[128]. */
+#define VKDIST_CAPS_PAYLOAD_SIZE 164u
 
 /* ── Server-side remote buffer table ─────────────────────────────────────── */
 

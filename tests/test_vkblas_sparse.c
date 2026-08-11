@@ -211,6 +211,65 @@ int main(void) {
         }
     }
 
+    /* === Sparse triangular solve: A_L * y = x (lower unit triangular) ===
+       A_L =
+         [ 1  0  0  0 ]
+         [ 2  1  0  0 ]
+         [ 3  0  1  0 ]
+         [ 4  0  5  1 ]
+       CSR row_ptr: [0,1,3,5,8]
+       CSR col_ind: [0, 0,1, 0,2, 0,2,3]
+       CSR val:     [1, 2,1, 3,1, 4,5,1]
+       x = [1, 5, 6, 10]^T  -> forward substitution gives
+         y0 = 1
+         y1 = 5 - 2*1        = 3
+         y2 = 6 - 3*1        = 3
+         y3 = 10 - 4*1 - 5*3 = -9
+    */
+    {
+        uint32_t Lt_row_ptr[5] = {0, 1, 3, 5, 8};
+        uint32_t Lt_col_ind[8] = {0, 0, 1, 0, 2, 0, 2, 3};
+        float    Lt_val[8]     = {1.f, 2.f, 1.f, 3.f, 1.f, 4.f, 5.f, 1.f};
+        float    x_host[4]     = {1.f, 5.f, 6.f, 10.f};
+        float    y_expect[4]   = {1.f, 3.f, 3.f, -9.f};
+        float    y_host[4]     = {0.f, 0.f, 0.f, 0.f};
+
+        void* dL_row = NULL; void* dL_col = NULL; void* dL_val = NULL;
+        void* d_x = NULL;     void* d_y = NULL;
+        hipMalloc(&dL_row, 5 * sizeof(uint32_t));
+        hipMalloc(&dL_col, 8 * sizeof(uint32_t));
+        hipMalloc(&dL_val, 8 * sizeof(float));
+        hipMalloc(&d_x, 4 * sizeof(float));
+        hipMalloc(&d_y, 4 * sizeof(float));
+        hipMemcpy(dL_row, Lt_row_ptr, 5 * sizeof(uint32_t), hipMemcpyHostToDevice);
+        hipMemcpy(dL_col, Lt_col_ind, 8 * sizeof(uint32_t), hipMemcpyHostToDevice);
+        hipMemcpy(dL_val, Lt_val, 8 * sizeof(float), hipMemcpyHostToDevice);
+        hipMemcpy(d_x, x_host, 4 * sizeof(float), hipMemcpyHostToDevice);
+
+        float spsv_alpha = 1.0f;
+        VkResult sres = vkblas_sparse_spsv_f32(ctx, VKBLAS_OP_N, 4, 8,
+            &spsv_alpha, (uint32_t*)dL_row, (uint32_t*)dL_col, (float*)dL_val,
+            (void*)d_x, (void*)d_y, cmd);
+        if (sres != VK_SUCCESS) {
+            printf("FAIL: vkblas_sparse_spsv_f32 returned %d\n", sres);
+            pass = 0;
+        } else {
+            hipMemcpy(y_host, d_y, 4 * sizeof(float), hipMemcpyDeviceToHost);
+            for (int i = 0; i < 4; i++) {
+                if (fabsf(y_host[i] - y_expect[i]) > 0.01f) {
+                    printf("  MISMATCH spsv y[%d]: expected=%.4f, got=%.4f\n",
+                           i, y_expect[i], y_host[i]);
+                    pass = 0;
+                } else {
+                    printf("  spsv y[%d] = %.4f (expected %.4f)\n",
+                           i, y_host[i], y_expect[i]);
+                }
+            }
+        }
+        hipFree(dL_row); hipFree(dL_col); hipFree(dL_val);
+        hipFree(d_x);    hipFree(d_y);
+    }
+
     /* === Cleanup === */
     hipFree(d_val);
     hipFree(d_col_ind);
