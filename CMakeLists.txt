@@ -67,6 +67,7 @@ add_library(vkblas STATIC
     src/vkblas/vkblas_sparse.c
     src/vkblas/vkblas_lapack.c
     src/vkblas/vkblas_conv3d.c
+    src/vkblas/vkblas_conv12d.c
     src/vkblas/vkblas_jit.c
 )
 target_include_directories(vkblas PUBLIC
@@ -217,6 +218,22 @@ if(BUILD_TESTING)
         ENVIRONMENT "PATH=F:/ROCM-7.14.0-Windows/bin\\;C:/VulkanSDK/1.4.357.0/Bin"
     )
     set_tests_properties(test_vkblas_sparse PROPERTIES
+        ENVIRONMENT "PATH=F:/ROCM-7.14.0-Windows/bin\\;C:/VulkanSDK/1.4.357.0/Bin"
+    )
+
+    # Conv1d/2d VJITC bridge test (requires MIOpen via HIP runtime)
+    add_executable(test_vkblas_conv12d tests/test_vkblas_conv12d.c)
+    target_include_directories(test_vkblas_conv12d PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkblas
+        F:/ROCM-7.14.0-Windows/include
+    )
+    target_link_libraries(test_vkblas_conv12d PRIVATE
+        vkblas vkruntime Vulkan::Vulkan
+        F:/ROCM-7.14.0-Windows/lib/amdhip64.lib
+    )
+    add_test(NAME test_vkblas_conv12d COMMAND test_vkblas_conv12d)
+    set_tests_properties(test_vkblas_conv12d PROPERTIES
         ENVIRONMENT "PATH=F:/ROCM-7.14.0-Windows/bin\\;C:/VulkanSDK/1.4.357.0/Bin"
     )
 

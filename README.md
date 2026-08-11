@@ -311,17 +311,11 @@ in `specs/VKDIST-DESIGN.md`.
 - **All 8 ext BLAS ops** (trsv/trsm/symv/hemv/symm/hemm/syrk/herk) pass in both
   f32 and f16 — f16 variants convert alpha/beta via `vkblas_f16_to_f32` before dispatch.
 
-### Not Yet Implemented (VJITC bridge candidates)
+### Remaining Gaps (architecturally feasible but not yet done)
 
-These are architecturally feasible via HIP→Vulkan zero-copy bridge but deferred:
-
-- **NPP-equivalent**: conv3d — MIOpen (MIOpen.lib available) provides conv3d.
-- **Runtime JIT compilation**: hipRTC (hiprtc0714.dll available) enables dynamic
-  kernel generation for variable tensor shapes. Would require architectural
-  change to AGENTS.md ("offline compile only" → "offline compile by default,
-  hipRTC JIT behind feature flag").
-- **GPU-accelerated linear algebra**: Cholesky Decomposition,
-  Eigenvalue Decomposition — rocsolver available for bridge.
+- No higher-level sparse ops beyond CSR SpMM (sparse LU, etc.).
+- No runtime JIT by default — `VAIT_JIT` CMake option (OFF) enables hipRTC + shaderc.
+- Coopmatrix (COOPMATRIX tier) dormant by default due to AMD driver 26.7.1 crash; activated via `VAIT_COOPMATRIX=1`.
 
 ### Already Implemented (not deferred)
 
@@ -335,13 +329,19 @@ already present in the codebase:
 - **Normalization**: softmax, rms_norm, layernorm — f32 and f16.
 - **PRNG**: threefry (ThreeFry2x32-20), uniform, normal — see `shaders/vkrand/baseline/`.
 - **FFT**: radix-2 forward/inverse, f32 and f16, 1D and 2D.
-- **GPU conv1d/conv2d**: 1D and 2D convolution (f32), arbitrary kernel/stride/pad.
-  Conv1d is a thin wrapper over conv2d (kh=1).
+- **GPU conv1d/conv2d/conv3d** (VJITC bridge): `vkblas_conv1d_f32`,
+  `vkblas_conv2d_f32`, `vkblas_conv3d_f32` via MIOpen `miopenConvolutionForward`.
 - **GPU pool2d**: Max and average pooling (f32), arbitrary window/stride/pad.
 - **GPU batchnorm**: Per-channel batch normalization inference (f32).
 - **GPU transpose**: 2D tensor transpose (f32).
 - **Sparse GEMM** (VJITC bridge): `vkblas_sparse_gemm_f32()` via hipSPARSE
   `hipsparseSpMM` — CSR sparse-dense matmul with zero-copy VkBuffer↔HIP ptr.
+- **GPU-accelerated linear algebra** (VJITC bridge): `vkblas_lu_f32`,
+  `vkblas_inverse_f32`, `vkblas_determinant_f32`, `vkblas_qr_f32`,
+  `vkblas_cholesky_f32`, `vkblas_eigendecomp_f32` via rocSOLVER.
+- **Runtime JIT compilation**: `vkblas_jit_compile_hip` (hipRTC),
+  `vkblas_jit_compile_glsl_to_spirv` (shaderc), `vkblas_jit_load_hip_module`
+  — gated behind `VAIT_JIT=ON` CMake option.
 - **LU decomposition** (VJITC bridge): `vkblas_lu_f32()` via rocsolver `dgetrf`.
 - **Matrix inverse** (VJITC bridge): `vkblas_inverse_f32()` via rocsolver `dgetrf`+`dgetri`.
 - **Determinant** (VJITC bridge): `vkblas_determinant_f32()` computed from LU diagonal.

@@ -61,7 +61,7 @@ Last gate run status (authoritative, from `run_all.ps1` summary):
 
 | Sub-lib | Implemented | Missing / scope limit |
 |---------|-------------|------------------------|
-| VKBLAS  | `gemm_baseline_f32/f16/bf16/f64` (shared-mem tiled), `subgroup/gemm_{f32,f16,bf16,f64}` twins, `coopmatrix/gemm_{f32,f16,bf16,f64}`; qgemm with on-the-fly dequant for q4_0/q4k/q5k/q6k/q3k/q8_0/iq4xs; **subgroup-tier qgemm all 7 formats** (32x8 warp-tiled, subgroupShuffle x-broadcast, no shared memory) + **`_f16` fp16-output-storage twin per format** (f32 accumulate, `float16_t` y/z, private dtype codes 32..38); ext BLAS ops (trsv, trsm, symv, hemv, symm, hemm, syrk, herk) in f32 and f16 — f16 variants convert alpha/beta from f16 bit-patterns to f32 via `vkblas_f16_to_f32` before dispatch | No f16/bf16/f64 coopmatrix tier for qgemm (baseline+subgroup only); no sparse BLAS / NPP-equivalent / runtime JIT |
+| VKBLAS  | `gemm_baseline_f32/f16/bf16/f64` (shared-mem tiled), `subgroup/gemm_{f32,f16,bf16,f64}` twins, `coopmatrix/gemm_{f32,f16,bf16,f64}`; qgemm with on-the-fly dequant for q4_0/q4k/q5k/q6k/q3k/q8_0/iq4xs; **subgroup-tier qgemm all 7 formats** (32x8 warp-tiled, subgroupShuffle x-broadcast, no shared memory) + **`_f16` fp16-output-storage twin per format** (f32 accumulate, `float16_t` y/z, private dtype codes 32..38);    ext BLAS ops (trsv, trsm, symv, hemv, symm, hemm, syrk, herk) in f32 and f16 — f16 variants convert alpha/beta from f16 bit-patterns to f32 via `vkblas_f16_to_f32` before dispatch; **LAPACK VJITC bridge**: LU (`vkblas_lu_f32`), inverse (`vkblas_inverse_f32`), determinant (`vkblas_determinant_f32`), QR (`vkblas_qr_f32`), Cholesky (`vkblas_cholesky_f32`), eigenvalue decomposition (`vkblas_eigendecomp_f32`) via rocSOLVER; **sparse GEMM** (`vkblas_sparse_gemm_f32`) via rocSPARSE; **conv1d/conv2d/3d** (`vkblas_conv1d_f32`/`vkblas_conv2d_f32`/`vkblas_conv3d_f32`) via MIOpen | No f16/bf16/f64 coopmatrix tier for qgemm (baseline+subgroup only); no runtime JIT |
 | VKFFT   | radix-2 forward+inverse, `fft_f16` + `fft_f32` blobs (no TODO/stub markers) | No f64, no bf16, no non-radix-2 (non-power-of-2) plans |
 | VKRAND  | PRNG generators (threefry, uniform, normal) + distribution sampling (4 blobs, 0 stubs) | (none known) |
 | VKMath  | 46 blobs: elementwise (abs/add/mul/exp/log/sqrt/pow/sign/scale/clip) + activations (relu/gelu/silu/sigmoid/tanh) + reductions (sum/max/nrm2/dot/asum) + norm + softmax + cumsum + **bf16 casts** (`cast_f32_to_bf16`/`cast_bf16_to_f32`) + **bf16 elementwise** (`add/mul/add_mul/scale`) + **bf16 activations** (`relu/silu/gelu/sigmoid/tanh`) + **f16 elementwise** (`add/mul/add_mul/scale`) + **f16 activations** (`relu/silu/gelu/sigmoid/tanh`); baseline + subgroup tiers | `vkmath.c:273` TODO is a comment (cosmetic, not an executable stub); bf16 ops are integrated (uint16_t scalar-block SSBO, requires `storageBuffer16BitAccess` + `scalarBlockLayout`); no bf16 reductions |
@@ -273,11 +273,8 @@ GPU host target (verified by `vulkaninfo` on this machine): **AMD Radeon RX
 
 ### Remaining Gaps
 
-1. **Cholesky Decomposition** — not yet bridged via rocSOLVER (`rocsolver_spotrf`).
-2. **Eigenvalue Decomposition** — not yet bridged via rocSOLVER (`rocsolver_dsyev`).
-3. **No sparse BLAS** — baseline + subgroup + coopmatrix qgemm all exist; no rocSPARSE equivalent for sparse matrix formats.
-4. **No NPP-equivalent** — conv1d/conv2d/3d via MIOpen bridge exists; conv3d via MIOpen, JIT via hipRTC+shaderc. No runtime JIT by default.
-5. **No runtime JIT** — offline compile by default; `VAIT_JIT` feature flag (OFF) enables hipRTC + shaderc dynamic compilation. Coopmatrix (COOPMATRIX tier) dormant by default due to driver crash.
+1. **No sparse BLAS** — `vkblas_sparse_gemm_f32` bridges CSR SpMM via rocSPARSE (3-stage: bufferSize → preprocess → compute). PASS on RX 9070 XT. No higher-level sparse ops (sparse LU, etc.).
+2. **No runtime JIT** — offline compile by default; `VAIT_JIT` feature flag (OFF) enables hipRTC + shaderc dynamic compilation. Coopmatrix (COOPMATRIX tier) dormant by default due to driver crash.
 
 Note on vendor naming: this stack uses the Vulkan `VK_AMD_*` vendor-extension
 nomenclature for AMD GPU features (e.g. `VK_AMD_SHADER_CORE_PROPERTIES(2)`,

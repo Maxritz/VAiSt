@@ -1312,6 +1312,38 @@ VkResult vkblas_conv3d_f32(
     VkCommandBuffer cmd);
 
 /**
+ * \brief VJITC-bridge 1D convolution: y = conv1d(x, w, padding, stride, dilation)
+ *
+ * Spatial dim = 1, tensor format NCL (batch, channels, length).
+ * x: (n, c, li)  w: (k, c, kl)  y: (n, k, lo)
+ */
+VkResult vkblas_conv1d_f32(
+    VkBLASContext* ctx,
+    uint32_t n, uint32_t c, uint32_t li,
+    uint32_t k, uint32_t lo,
+    uint32_t kl,
+    uint32_t pad_l, uint32_t stride_l, uint32_t dil_l,
+    float alpha, void* x, void* w, float beta, void* y,
+    VkCommandBuffer cmd);
+
+/**
+ * \brief VJITC-bridge 2D convolution: y = conv2d(x, w, padding, stride, dilation)
+ *
+ * Spatial dim = 2, tensor format NCHW.
+ * x: (n, c, hi, wi)  w: (k, c, kh, kw)  y: (n, k, dh, dw)
+ */
+VkResult vkblas_conv2d_f32(
+    VkBLASContext* ctx,
+    uint32_t n, uint32_t c, uint32_t hi, uint32_t wi,
+    uint32_t k, uint32_t dh, uint32_t dw,
+    uint32_t kh, uint32_t kw,
+    uint32_t pad_h, uint32_t pad_w,
+    uint32_t stride_h, uint32_t stride_w,
+    uint32_t dil_h, uint32_t dil_w,
+    float alpha, void* x, void* w, float beta, void* y,
+    VkCommandBuffer cmd);
+
+/**
  * \brief JIT compile GLSL source to SPIR-V at runtime via shaderc.
  *
  * Only available when the library is compiled with -DVAIT_JIT=ON.
