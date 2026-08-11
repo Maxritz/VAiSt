@@ -35,10 +35,16 @@ int main(void) {
     const char* gguf_path = "E:/OLLAMA-Models/GGUF/gemma4-v2-Q6_K.gguf";
     FILE* gf = fopen(gguf_path, "rb");
     if (gf) {
-        printf("Loading GGUF data for compression test...\n");
+        printf("Loading GGUF data for streaming compression test...\n");
+        fseek(gf, 0, SEEK_END);
+        long gguf_size = ftell(gf);
+        printf("GGUF file size: %ld MB\n", gguf_size / 1024 / 1024);
+        fseek(gf, 0, SEEK_SET);
+
+        /* Read first 4KB for the small chunk test */
         size_t bytes_read = fread(test_data, 1, 1024 * sizeof(float), gf);
         fclose(gf);
-        printf("Read %zu bytes from GGUF\n", bytes_read);
+        printf("Read %zu bytes from GGUF for compression\n", bytes_read);
     } else {
         /* Fallback: synthetic data with zeros + patterns */
         for (int i = 0; i < 1024; i++) {
