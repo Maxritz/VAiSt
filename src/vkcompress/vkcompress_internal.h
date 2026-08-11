@@ -14,6 +14,7 @@
 #define VKCOMP_MAX_BUFFERS 64u
 #define VKCOMP_MAX_TAG_LEN 128u
 #define VKCOMP_WORKGROUP_SIZE 256u
+#define VKCOMP_DEFAULT_CHUNK_SIZE (256u * 1024u * 1024u)  /* 256 MB */
 
 typedef struct {
     vkcomp_buffer_id_t id;
@@ -33,6 +34,7 @@ typedef struct {
     VkShaderModule module_write;
     VkShaderModule module_read;
     VkDescriptorSet desc_set;         /* one per entry */
+    uint32_t chunk_count;             /* for streaming buffers */
     uint8_t valid;
 } vkcomp_buffer_entry_t;
 

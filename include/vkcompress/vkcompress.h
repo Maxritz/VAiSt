@@ -55,6 +55,46 @@ vkcomp_buffer_id_t vkcompress_register_buffer(VkCompressContext* ctx,
                                                int compression_level); /* 0-9, 0 = fast, 9 = highest ratio */
 
 /**
+ * \brief Register a large (>VRAM) buffer as multiple chunks (virtual VRAM).
+ * Each chunk is compressed/decompressed independently. Use
+ * vkcompress_stream_write/read to process one chunk at a time.
+ * \param ctx  valid context
+ * \param total_size  total uncompressed size in bytes
+ * \param chunk_size  per-chunk size (recommended: 256MB-1GB)
+ * \param tag  string tag prefix
+ * \param compression_level  GPU compression level (0-9)
+ * \return buffer id (chunk 0), or VKCOMP_INVALID_ID on error
+ */
+vkcomp_buffer_id_t vkcompress_register_buffer_streaming(VkCompressContext* ctx,
+                                                         VkDeviceSize total_size,
+                                                         VkDeviceSize chunk_size,
+                                                         const char* tag,
+                                                         int compression_level);
+
+/**
+ * \brief Stream-write a chunk to a buffer registered with streaming mode.
+ * Processes one chunk_index at a time, records compression dispatch into cmd.
+ * \param chunk_index  which chunk (0-based)
+ * \param chunk_size   actual bytes to write (may be less than registered chunk_size for last chunk)
+ */
+VkResult vkcompress_stream_write(VkCompressContext* ctx, VkCommandBuffer cmd,
+                                  vkcomp_buffer_id_t id, uint32_t chunk_index,
+                                  VkBuffer src, VkDeviceSize chunk_size, VkDeviceSize offset);
+
+/**
+ * \brief Stream-read a chunk from a buffer registered with streaming mode.
+ * Decompresses one chunk_index from GPU-compressed storage back to dst.
+ */
+VkResult vkcompress_stream_read(VkCompressContext* ctx, VkCommandBuffer cmd,
+                                 vkcomp_buffer_id_t id, uint32_t chunk_index,
+                                 VkBuffer dst, VkDeviceSize chunk_size, VkDeviceSize offset);
+
+/**
+ * \brief Get the number of chunks for a streaming-registered buffer.
+ */
+uint32_t vkcompress_get_chunk_count(VkCompressContext* ctx, vkcomp_buffer_id_t id);
+
+/**
  * \brief Write data to a compressed buffer (compresses on GPU).
  * Records a compression compute pass into cmd.
  */

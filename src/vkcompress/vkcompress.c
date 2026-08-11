@@ -6,6 +6,7 @@
 #include "shaders_spv.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 static const uint32_t VKCOMP_WORKGROUP_MASK = VKCOMP_WORKGROUP_SIZE - 1u;
 
@@ -243,6 +244,204 @@ vkcomp_buffer_id_t vkcompress_register_buffer(VkCompressContext* ctx,
     return id;
 }
 
+vkcomp_buffer_id_t vkcompress_register_buffer_streaming(VkCompressContext* ctx,
+                                                         VkDeviceSize total_size,
+                                                         VkDeviceSize chunk_size,
+                                                         const char* tag,
+                                                         int compression_level)
+{
+    if (!ctx || !tag || !total_size || !chunk_size)
+        return VKCOMP_INVALID_ID;
+
+    uint32_t n = (uint32_t)((total_size + chunk_size - 1) / chunk_size);
+    if (ctx->buffer_count + n > VKCOMP_MAX_BUFFERS)
+        return VKCOMP_INVALID_ID;
+
+    vkcomp_buffer_id_t base_id = ctx->next_id;
+
+    for (uint32_t i = 0; i < n; i++) {
+        VkDeviceSize chunk_bytes = chunk_size;
+        if (i == n - 1) {
+            chunk_bytes = total_size - (VkDeviceSize)(n - 1) * chunk_size;
+            if (chunk_bytes == 0) chunk_bytes = chunk_size;
+        }
+
+        char chunk_tag[VKCOMP_MAX_TAG_LEN];
+        snprintf(chunk_tag, sizeof(chunk_tag), "%s:chunk%d/%d", tag, i, n);
+
+        VkDeviceSize comp_cap = chunk_bytes;
+        VkDeviceSize meta_cap = 32; /* single chunk metadata */
+
+        VkBufferCreateInfo bci = {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = comp_cap,
+            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        };
+
+        vkcomp_buffer_entry_t* e = &ctx->buffers[ctx->buffer_count];
+        e->id = ctx->next_id++;
+        e->compression_level = compression_level;
+        strncpy(e->tag, chunk_tag, VKCOMP_MAX_TAG_LEN - 1);
+        e->uncompressed_size = chunk_bytes;
+        e->valid = 1;
+
+        if (vkCreateBuffer(ctx->device, &bci, NULL, &e->comp_buffer) != VK_SUCCESS)
+            return VKCOMP_INVALID_ID;
+
+        VkMemoryRequirements mr;
+        vkGetBufferMemoryRequirements(ctx->device, e->comp_buffer, &mr);
+        VkPhysicalDeviceMemoryProperties memProps;
+        vkGetPhysicalDeviceMemoryProperties(ctx->physical_device, &memProps);
+        uint32_t memType = 0;
+        for (uint32_t j = 0; j < memProps.memoryTypeCount; j++) {
+            if ((mr.memoryTypeBits & (1 << j)) &&
+                (memProps.memoryTypes[j].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+                memType = j; break;
+            }
+        }
+        VkMemoryAllocateInfo mai = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .allocationSize = mr.size,
+            .memoryTypeIndex = memType,
+        };
+        if (vkAllocateMemory(ctx->device, &mai, NULL, &e->comp_memory) != VK_SUCCESS) {
+            vkDestroyBuffer(ctx->device, e->comp_buffer, NULL);
+            return VKCOMP_INVALID_ID;
+        }
+        vkBindBufferMemory(ctx->device, e->comp_buffer, e->comp_memory, 0);
+
+        bci.size = meta_cap * sizeof(uint32_t);
+        if (vkCreateBuffer(ctx->device, &bci, NULL, &e->meta_buffer) != VK_SUCCESS) {
+            vkFreeMemory(ctx->device, e->comp_memory, NULL);
+            vkDestroyBuffer(ctx->device, e->comp_buffer, NULL);
+            return VKCOMP_INVALID_ID;
+        }
+        vkGetBufferMemoryRequirements(ctx->device, e->meta_buffer, &mr);
+        mai.allocationSize = mr.size;
+        if (vkAllocateMemory(ctx->device, &mai, NULL, &e->meta_memory) != VK_SUCCESS) {
+            vkDestroyBuffer(ctx->device, e->meta_buffer, NULL);
+            vkFreeMemory(ctx->device, e->comp_memory, NULL);
+            vkDestroyBuffer(ctx->device, e->comp_buffer, NULL);
+            return VKCOMP_INVALID_ID;
+        }
+        vkBindBufferMemory(ctx->device, e->meta_buffer, e->meta_memory, 0);
+
+        e->compressed_size = comp_cap;
+        e->chunk_count = 1; /* single chunk per entry */
+        ctx->buffer_count++;
+    }
+
+    /* First entry's id is the base id for the streaming buffer */
+    ctx->buffers[ctx->buffer_count - n].chunk_count = n;
+    return base_id;
+}
+
+uint32_t vkcompress_get_chunk_count(VkCompressContext* ctx, vkcomp_buffer_id_t id)
+{
+    if (!ctx || id == VKCOMP_INVALID_ID) return 0;
+    for (uint32_t i = 0; i < ctx->buffer_count; i++) {
+        if (ctx->buffers[i].id == id && ctx->buffers[i].valid) {
+            return ctx->buffers[i].chunk_count;
+        }
+    }
+    return 0;
+}
+
+VkResult vkcompress_stream_write(VkCompressContext* ctx, VkCommandBuffer cmd,
+                                 vkcomp_buffer_id_t id, uint32_t chunk_index,
+                                 VkBuffer src, VkDeviceSize chunk_size, VkDeviceSize offset)
+{
+    if (!ctx || id == VKCOMP_INVALID_ID || !src)
+        return VK_ERROR_INITIALIZATION_FAILED;
+
+    /* Each chunk is registered as a separate buffer entry */
+    vkcomp_buffer_id_t chunk_id = id + (vkcomp_buffer_id_t)chunk_index;
+
+    vkcomp_buffer_entry_t* e = NULL;
+    for (uint32_t i = 0; i < ctx->buffer_count; i++) {
+        if (ctx->buffers[i].id == chunk_id && ctx->buffers[i].valid) {
+            e = &ctx->buffers[i];
+            break;
+        }
+    }
+    if (!e) return VK_ERROR_INITIALIZATION_FAILED;
+
+    const uint32_t* comp_spv = (e->compression_level > 3)
+        ? vkcompress_spv_baseline_compress_high
+        : vkcompress_spv_baseline_compress_fast;
+    size_t spirv_size = (e->compression_level > 3)
+        ? vkcompress_spv_baseline_compress_high_size
+        : vkcompress_spv_baseline_compress_fast_size;
+
+    if (!e->module_write) {
+        VkShaderModuleCreateInfo smci = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .pNext = NULL,
+            .flags = 0,
+            .codeSize = spirv_size,
+            .pCode = comp_spv,
+        };
+        VkResult r = vkCreateShaderModule(ctx->device, &smci, NULL, &e->module_write);
+        if (r) return r;
+    }
+    if (!e->pipeline_write) {
+        VkComputePipelineCreateInfo pci = {
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage = {
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                .module = e->module_write,
+                .pName = "main",
+            },
+            .layout = ctx->pipeline_layout,
+        };
+        VkResult r = vkCreateComputePipelines(ctx->device, VK_NULL_HANDLE, 1, &pci, NULL, &e->pipeline_write);
+        if (r) return r;
+    }
+
+    if (!e->desc_set) {
+        VkDescriptorSetAllocateInfo dsai = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool = ctx->descriptor_pool,
+            .descriptorSetCount = 1,
+            .pSetLayouts = &ctx->set_layout,
+        };
+        VKCOMP_CHECK(vkAllocateDescriptorSets(ctx->device, &dsai, &e->desc_set));
+    }
+
+    VkDescriptorBufferInfo buf_infos[3] = {
+        { .buffer = src, .offset = offset, .range = chunk_size },
+        { .buffer = e->comp_buffer, .offset = 0, .range = chunk_size },
+        { .buffer = e->meta_buffer, .offset = 0, .range = 32 * sizeof(uint32_t) },
+    };
+    VkWriteDescriptorSet writes[3] = {
+        { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = e->desc_set,
+          .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo = &buf_infos[0] },
+        { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = e->desc_set,
+          .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo = &buf_infos[1] },
+        { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = e->desc_set,
+          .dstBinding = 2, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo = &buf_infos[2] },
+    };
+    vkUpdateDescriptorSets(ctx->device, 3, writes, 0, NULL);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, e->pipeline_write);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            ctx->pipeline_layout, 0, 1, &e->desc_set, 0, NULL);
+
+    uint32_t num_blocks = (uint32_t)((chunk_size + VKCOMP_WORKGROUP_SIZE * sizeof(uint32_t) - 1) /
+                                      (VKCOMP_WORKGROUP_SIZE * sizeof(uint32_t)));
+    vkcomp_push_constants_t pc = { .num_blocks = num_blocks };
+    vkCmdPushConstants(cmd, ctx->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, num_blocks, 1, 1);
+
+    return VK_SUCCESS;
+}
+
 VkResult vkcompress_write(VkCompressContext* ctx, VkCommandBuffer cmd,
                           vkcomp_buffer_id_t id,
                           VkBuffer src, VkDeviceSize size, VkDeviceSize offset)
@@ -384,6 +583,99 @@ VkResult vkcompress_read(VkCompressContext* ctx, VkCommandBuffer cmd,
                             ctx->pipeline_layout, 0, 1, &e->desc_set, 0, NULL);
 
     uint32_t num_blocks = vkcomp_div_ceil((uint32_t)size, VKCOMP_WORKGROUP_SIZE * sizeof(float));
+    vkcomp_push_constants_t pc = { .num_blocks = num_blocks };
+    vkCmdPushConstants(cmd, ctx->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, num_blocks, 1, 1);
+
+    return VK_SUCCESS;
+}
+
+VkResult vkcompress_stream_read(VkCompressContext* ctx, VkCommandBuffer cmd,
+                                 vkcomp_buffer_id_t id, uint32_t chunk_index,
+                                 VkBuffer dst, VkDeviceSize chunk_size, VkDeviceSize offset)
+{
+    if (!ctx || id == VKCOMP_INVALID_ID || !dst)
+        return VK_ERROR_INITIALIZATION_FAILED;
+
+    vkcomp_buffer_id_t chunk_id = id + (vkcomp_buffer_id_t)chunk_index;
+
+    vkcomp_buffer_entry_t* e = NULL;
+    for (uint32_t i = 0; i < ctx->buffer_count; i++) {
+        if (ctx->buffers[i].id == chunk_id && ctx->buffers[i].valid) {
+            e = &ctx->buffers[i];
+            break;
+        }
+    }
+    if (!e) return VK_ERROR_INITIALIZATION_FAILED;
+
+    const uint32_t* decomp_spv = (e->compression_level > 3)
+        ? vkcompress_spv_baseline_decompress_high
+        : vkcompress_spv_baseline_decompress_fast;
+    size_t decomp_size = (e->compression_level > 3)
+        ? vkcompress_spv_baseline_decompress_high_size
+        : vkcompress_spv_baseline_decompress_fast_size;
+
+    if (!e->module_read) {
+        VkShaderModuleCreateInfo smci = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .pNext = NULL, .flags = 0,
+            .codeSize = decomp_size,
+            .pCode = decomp_spv,
+        };
+        VkResult r = vkCreateShaderModule(ctx->device, &smci, NULL, &e->module_read);
+        if (r) return r;
+    }
+    if (!e->pipeline_read) {
+        VkComputePipelineCreateInfo pci = {
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage = {
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                .module = e->module_read,
+                .pName = "main",
+            },
+            .layout = ctx->pipeline_layout,
+        };
+        VkResult r = vkCreateComputePipelines(ctx->device, VK_NULL_HANDLE, 1, &pci, NULL, &e->pipeline_read);
+        if (r) return r;
+    }
+
+    if (!e->desc_set) {
+        VkDescriptorSetAllocateInfo dsai = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool = ctx->descriptor_pool,
+            .descriptorSetCount = 1,
+            .pSetLayouts = &ctx->set_layout,
+        };
+        VKCOMP_CHECK(vkAllocateDescriptorSets(ctx->device, &dsai, &e->desc_set));
+    }
+
+    /* binding 0 = comp_buffer (read), binding 1 = dst (write), binding 2 = meta */
+    VkDescriptorBufferInfo buf_infos[3] = {
+        { .buffer = e->comp_buffer, .offset = 0, .range = chunk_size },
+        { .buffer = dst, .offset = offset, .range = chunk_size },
+        { .buffer = e->meta_buffer, .offset = 0, .range = 32 * sizeof(uint32_t) },
+    };
+    VkWriteDescriptorSet writes[3] = {
+        { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = e->desc_set,
+          .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo = &buf_infos[0] },
+        { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = e->desc_set,
+          .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo = &buf_infos[1] },
+        { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = e->desc_set,
+          .dstBinding = 2, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo = &buf_infos[2] },
+    };
+    vkUpdateDescriptorSets(ctx->device, 3, writes, 0, NULL);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, e->pipeline_read);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            ctx->pipeline_layout, 0, 1, &e->desc_set, 0, NULL);
+
+    uint32_t num_blocks = (uint32_t)((chunk_size + VKCOMP_WORKGROUP_SIZE * sizeof(uint32_t) - 1) /
+                                      (VKCOMP_WORKGROUP_SIZE * sizeof(uint32_t)));
     vkcomp_push_constants_t pc = { .num_blocks = num_blocks };
     vkCmdPushConstants(cmd, ctx->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
                        0, sizeof(pc), &pc);
