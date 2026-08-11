@@ -220,17 +220,20 @@ GPU host target (verified by `vulkaninfo` on this machine): **AMD Radeon RX
 1. **DONE: subgroup-tier qgemm all 7 formats integrated** —
    `shaders/vkblas/subgroup/qgemm_<fmt>.comp` for q8_0/q4_0/q4k/q5k/q6k/q3k/
    iq4xs (32x8 tile, one 32-lane subgroup per block, `subgroupShuffle`
-   x-broadcast, no shared memory / barriers; tile spec constants use
-   constant_id 7/8 since the host fixates ids 0..6 at 16/16/16). Wired via
+   x-broadcast, no shared memory / barriers). Wired via
    `vkblas_select_spirv` (SUBGROUP + dtype -> `vkblas_spv_subgroup_qgemm_<fmt>`),
    tier-aware dispatch grid in `vkblas_qgemm_common`
    (`vkblas_qgemm_resolved_tier` cache scan + `vkblas_qgemm_tile_dims`; grid
    ceil(n/32) x ceil(m/8) for the subgroup kernels, baseline 16x16 unchanged).
-   New public `vkblas_qgemm_get_tier(ctx, format, &tier)` reports the resolved
-   tier per weight format; `test_vkblas` verifies all 7 formats resolve to
-   SUBGROUP on subgroup-capable devices. Plain GEMM gained subgroup twins for
-   f16/bf16/f64. All checks PASS on RX 9070 XT. Coopmatrix tiers for f16/bf16/f64
-   GEMM and qgemm remain as future perf work (qgemm is the decode hot path).
+   Plain GEMM gained subgroup twins for f16/bf16/f64.
+   **DONE: coopmatrix-tier qgemm all 7 formats + _f16 output variants integrated** —
+   `shaders/vkblas/coopmatrix/qgemm_<fmt>.comp` and `qgemm_<fmt>_f16.comp`
+   (7+7=14 new shaders) use `coopMatMulAddKHR` with dequant-in-staging (dequant
+   W into shared `As[]`, load into coopmat fragments, `coopMatMulAdd` per K-tile
+   of 16). Dormant-by-default on AMD 26.7.1 driver (crashes on
+   coopMatMulAddKHR); activated via `VAIT_COOPMATRIX=1`. `test_vkblas` verifies
+   all 7 formats resolve to SUBGROUP when coopmatrix is dormant, and validates
+   numeric correctness of all 14 qgemm variants + all 7 `_f16` variants.
 2. **DONE: qgemm fp16 output storage** — `vkblas_qgemm_*_f16` (7 public APIs,
    private dtype codes 32..38) store the f32 accumulator as `float16_t` in y/z;
    `test_vkblas` covers all 7 formats with beta + f16 init + tolerance 1e-2,
@@ -270,7 +273,7 @@ GPU host target (verified by `vulkaninfo` on this machine): **AMD Radeon RX
 
 ### Remaining Gaps
 
-1. **Coopmatrix tiers for f16/bf16/f64 GEMM and qgemm** — baseline + subgroup exist, coopmatrix tier is future perf work (qgemm is the decode hot path).
+1. **Coopmatrix tier for plain f32/f16/bf16/f64 GEMM exists** — baseline + subgroup twins exist, coopmatrix tier exists for all 14 qgemm variants (q8_0/q4_0/q4k/q5k/q6k/q3k/iq4xs × f32/f16 output) but is dormant-by-default on AMD 26.7.1 driver (crashes on coopMatMulAddKHR). Safe subgroup tier is the active path.
 2. **No sparse BLAS** — baseline + subgroup qgemm exist, no rocSPARSE equivalent.
 3. **No NPP-equivalent** — conv3d via MIOpen available as VJITC bridge (static link MIOpen.lib).
 4. **No runtime JIT** — offline compile by default, `VAIT_JIT` feature flag enables hipRTC dynamic

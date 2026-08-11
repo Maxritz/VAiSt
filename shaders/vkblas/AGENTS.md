@@ -126,3 +126,14 @@ binding 0 = Wq (bytes, read), 1 = x (read), 2 = y (read, beta term),
 Push constants reuse the plain-GEMM block; the host maps `pc.m` = weight rows,
 `pc.n` = activation cols, `pc.lda` = weight row byte stride (ldw),
 `pc.ldb` = ldx, `pc.ldd` = ldy. The grid is ceil(n/16) x ceil(m/16).
+
+### Coopmatrix qgemm tier (coopmatrix/)
+
+All seven qgemm formats ship `coopmatrix/qgemm_<fmt>.comp` (+ `_f16` twin) using
+`GL_KHR_cooperative_matrix` (`coopMatLoad`/`coopMatMulAdd`/`coopMatStore`). The
+dequant math is identical to the subgroup/baseline variants (dequant W into
+shared `As[]`, then load into coopmat fragments and accumulate per K-tile of 16).
+The `_f16` variants store the f32 accumulator as `float16_t` in y/z (requires
+`GL_EXT_shader_explicit_arithmetic_types`). Dormant by default (AMD 26.7.1
+driver crashes on `OpCooperativeMatrixMulAddKHR`); activated via
+`VAIT_COOPMATRIX=1`.

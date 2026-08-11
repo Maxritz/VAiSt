@@ -145,10 +145,52 @@ static const uint32_t* vkblas_select_spirv(VkBLASContext* ctx,
         case VKBLAS_DTYPE_BF16:
             *out_size = vkblas_spv_coopmatrix_gemm_bf16_size;
             return vkblas_spv_coopmatrix_gemm_bf16;
-        case VKBLAS_DTYPE_F64:
+         case VKBLAS_DTYPE_F64:
             *out_size = vkblas_spv_coopmatrix_gemm_f64_size;
             return vkblas_spv_coopmatrix_gemm_f64;
-        default:
+         case VKBLAS_DTYPE_QGEMM_Q8_0:
+            *out_size = vkblas_spv_coopmatrix_qgemm_q8_0_size;
+            return vkblas_spv_coopmatrix_qgemm_q8_0;
+         case VKBLAS_DTYPE_QGEMM_Q4_0:
+            *out_size = vkblas_spv_coopmatrix_qgemm_q4_0_size;
+            return vkblas_spv_coopmatrix_qgemm_q4_0;
+         case VKBLAS_DTYPE_QGEMM_Q4K:
+            *out_size = vkblas_spv_coopmatrix_qgemm_q4k_size;
+            return vkblas_spv_coopmatrix_qgemm_q4k;
+         case VKBLAS_DTYPE_QGEMM_Q5K:
+            *out_size = vkblas_spv_coopmatrix_qgemm_q5k_size;
+            return vkblas_spv_coopmatrix_qgemm_q5k;
+         case VKBLAS_DTYPE_QGEMM_Q6K:
+            *out_size = vkblas_spv_coopmatrix_qgemm_q6k_size;
+            return vkblas_spv_coopmatrix_qgemm_q6k;
+         case VKBLAS_DTYPE_QGEMM_Q3K:
+            *out_size = vkblas_spv_coopmatrix_qgemm_q3k_size;
+            return vkblas_spv_coopmatrix_qgemm_q3k;
+         case VKBLAS_DTYPE_QGEMM_IQ4XS:
+            *out_size = vkblas_spv_coopmatrix_qgemm_iq4xs_size;
+            return vkblas_spv_coopmatrix_qgemm_iq4xs;
+         case VKBLAS_DTYPE_QGEMM_F16_Q8_0:
+            *out_size = vkblas_spv_coopmatrix_qgemm_q8_0_f16_size;
+            return vkblas_spv_coopmatrix_qgemm_q8_0_f16;
+         case VKBLAS_DTYPE_QGEMM_F16_Q4_0:
+            *out_size = vkblas_spv_coopmatrix_qgemm_q4_0_f16_size;
+            return vkblas_spv_coopmatrix_qgemm_q4_0_f16;
+         case VKBLAS_DTYPE_QGEMM_F16_Q4K:
+            *out_size = vkblas_spv_coopmatrix_qgemm_q4k_f16_size;
+            return vkblas_spv_coopmatrix_qgemm_q4k_f16;
+         case VKBLAS_DTYPE_QGEMM_F16_Q5K:
+            *out_size = vkblas_spv_coopmatrix_qgemm_q5k_f16_size;
+            return vkblas_spv_coopmatrix_qgemm_q5k_f16;
+         case VKBLAS_DTYPE_QGEMM_F16_Q6K:
+            *out_size = vkblas_spv_coopmatrix_qgemm_q6k_f16_size;
+            return vkblas_spv_coopmatrix_qgemm_q6k_f16;
+         case VKBLAS_DTYPE_QGEMM_F16_Q3K:
+            *out_size = vkblas_spv_coopmatrix_qgemm_q3k_f16_size;
+            return vkblas_spv_coopmatrix_qgemm_q3k_f16;
+         case VKBLAS_DTYPE_QGEMM_F16_IQ4XS:
+            *out_size = vkblas_spv_coopmatrix_qgemm_iq4xs_f16_size;
+            return vkblas_spv_coopmatrix_qgemm_iq4xs_f16;
+         default:
             return NULL;
         }
     case VKBLAS_TIER_SUBGROUP:
