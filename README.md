@@ -10,6 +10,7 @@ yet covered by Vulkan shaders (sparse SpMM, LAPACK factorizations, conv1d/2d/3d)
 a VJITC bridge dispatches into ROCm libraries (hipSPARSE, rocsolver, MIOpen)
 over zero-copy VkBuffer↔HIP-device-pointer interop. No CUDA, no ROCm runtime
 dependency for the core compute paths.
+
 ---
 
 ## Why This Exists
