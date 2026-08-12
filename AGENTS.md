@@ -61,7 +61,7 @@ Last gate run status (authoritative, from `ctest -C Release` summary):
 
 | Sub-lib | Implemented | Missing / scope limit |
 |---------|-------------|------------------------|
-| VKBLAS  | `gemm_baseline_f32/f16/bf16/f64` (shared-mem tiled), `subgroup/gemm_{f32,f16,bf16,f64}` twins, `coopmatrix/gemm_{f32,f16,bf16,f64}`; qgemm with on-the-fly dequant for q4_0/q4k/q5k/q6k/q3k/q8_0/iq4xs; **subgroup-tier qgemm all 7 formats** (32x8 warp-tiled, subgroupShuffle x-broadcast, no shared memory) + **`_f16` fp16-output-storage twin per format** (f32 accumulate, `float16_t` y/z, private dtype codes 32..38);    ext BLAS ops (trsv, trsm, symv, hemv, symm, hemm, syrk, herk) in f32 and f16 — f16 variants convert alpha/beta from f16 bit-patterns to f32 via `vkblas_f16_to_f32` before dispatch; **LAPACK VJITC bridge**: LU (`vkblas_lu_f32`), inverse (`vkblas_inverse_f32`), determinant (`vkblas_determinant_f32`), QR (`vkblas_qr_f32`), Cholesky (`vkblas_cholesky_f32`), eigenvalue decomposition (`vkblas_eigendecomp_f32`) via rocSOLVER; **sparse GEMM** (`vkblas_sparse_gemm_f32`) + **sparse triangular solve** (`vkblas_sparse_spsv_f32`) via rocSPARSE; **conv1d/conv2d/3d** (`vkblas_conv1d_f32`/`vkblas_conv2d_f32`/`vkblas_conv3d_f32`) via MIOpen | No f16/bf16/f64 coopmatrix tier for qgemm (baseline+subgroup only); no runtime JIT |
+| VKBLAS  | `gemm_baseline_f32/f16/bf16/f64` (shared-mem tiled), `subgroup/gemm_{f32,f16,bf16,f64}` twins, `coopmatrix/gemm_{f32,f16,bf16,f64}`; qgemm with on-the-fly dequant for q4_0/q4k/q5k/q6k/q3k/q8_0/iq4xs; **subgroup-tier qgemm all 7 formats** (32x8 warp-tiled, subgroupShuffle x-broadcast, no shared memory) + **`_f16` fp16-output-storage twin per format** (f32 accumulate, `float16_t` y/z, private dtype codes 32..38);    ext BLAS ops (trsv, trsm, symv, hemv, symm, hemm, syrk, herk) in f32 and f16 — f16 variants convert alpha/beta from f16 bit-patterns to f32 via `vkblas_f16_to_f32` before dispatch; **LAPACK VJITC bridge**: LU (`vkblas_lu_f32`), inverse (`vkblas_inverse_f32`), determinant (`vkblas_determinant_f32`), QR (`vkblas_qr_f32`), Cholesky (`vkblas_cholesky_f32`), eigenvalue decomposition (`vkblas_eigendecomp_f32`) via rocSOLVER; **sparse GEMM** (`vkblas_sparse_gemm_f32`) + **sparse triangular solve** (`vkblas_sparse_spsv_f32`) via rocSPARSE; **conv1d/conv2d/3d** (`vkblas_conv1d_f32`/`vkblas_conv2d_f32`/`vkblas_conv3d_f32`) via MIOpen | No f16/bf16/f64 coopmatrix tier for qgemm (baseline+subgroup only); HIP WMMA device-local bypass (`VAIT_HIP_WMMA=1`) available for coopmatrix-tier GEMM on RDNA4 (verifies zero-copy VRAM interop); no runtime JIT |
 | VKFFT   | radix-2 forward+inverse, `fft_f16` + `fft_f32` blobs (no TODO/stub markers) | No f64, no bf16, no non-radix-2 (non-power-of-2) plans |
 | VKRAND  | PRNG generators (threefry, uniform, normal) + distribution sampling (4 blobs, 0 stubs) | (none known) |
 | VKMath  | 46 blobs: elementwise (abs/add/mul/exp/log/sqrt/pow/sign/scale/clip) + activations (relu/gelu/silu/sigmoid/tanh) + reductions (sum/max/nrm2/dot/asum) + norm + softmax + cumsum + **bf16 casts** (`cast_f32_to_bf16`/`cast_bf16_to_f32`) + **bf16 elementwise** (`add/mul/add_mul/scale`) + **bf16 activations** (`relu/silu/gelu/sigmoid/tanh`) + **f16 elementwise** (`add/mul/add_mul/scale`) + **f16 activations** (`relu/silu/gelu/sigmoid/tanh`); baseline + subgroup tiers | `vkmath.c:273` TODO is a comment (cosmetic, not an executable stub); bf16 ops are integrated (uint16_t scalar-block SSBO, requires `storageBuffer16BitAccess` + `scalarBlockLayout`); no bf16 reductions |
@@ -93,16 +93,25 @@ Last gate run status (authoritative, from `ctest -C Release` summary):
   block-quant format; it is converted inline inside `gemm_bf16.comp`
   (`bf16_to_f32`/`f32_to_bf16`). It does not belong in VKQuant. The genuine bf16
   gap was the absence of reusable bf16 cast/elementwise ops in VKMath.
-- **Decision: no hipBLAS GEMM bridge, coopmatrix stays dormant.** A benchmark
-  (Vulkan subgroup `vkblas_sgemm` vs `hipblasSgemm`, both on
+- **Decision: hipBLAS GEMM bridge is slow; HIP WMMA device-local bridge verified.**
+  A benchmark (Vulkan subgroup `vkblas_sgemm` vs `hipblasSgemm`, both on
   `hipHostMalloc`'d/imported buffers, 1024³, 20 iters, RX 9070 XT) measured
   Vulkan at **696 GFLOPS vs hipBLAS at 140 GFLOPS** (5× slower). Routing GEMM
-  through the HIP bridge is a net loss: the `VK_EXT_external_memory_host`
-  bridge requires host-visible (GTT) buffers, whose bandwidth tax swamps any
-  MFMA/WMMA gain, plus it adds a hipBLAS runtime dependency and breaks the
-  single-command-buffer sync model. The subgroup tier (already default) is the
-  GEMM path; the coopmatrix tier stays dormant behind `VAIT_COOPMATRIX` until
-  the AMD LLPC driver handles `coopMatMulAddKHR` without crashing (26.7.1
+  through the HIP bridge via `VK_EXT_external_memory_host` is a net loss: it
+  forces host-visible (GTT) buffers, whose bandwidth tax swamps any MFMA/WMMA
+  gain. The subgroup tier (already default) is the baseline GEMM path.
+  HOWEVER, the **device-local VRAM HIP WMMA bypass** (`VAIT_HIP_WMMA=1`) is
+  verified working: a Vulkan allocation created with
+  `VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT` +
+  `VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT` is exported via
+  `vkGetMemoryWin32HandleKHR`, imported by HIP via
+  `hipImportExternalMemory` + `hipExternalMemoryGetMappedBuffer`, and a raw
+  HIP kernel calls the RDNA4 intrinsic
+  `__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12` directly on VRAM — zero
+  host/GTT transfer (16 MiB readback probe: 0 mismatches). This bypasses the
+  LLPC coopmatrix crash. The coopmatrix tier stays dormant behind
+  `VAIT_COOPMATRIX` until
+ the AMD LLPC driver handles `coopMatMulAddKHR` without crashing (26.7.1
   hard-crashes in `vkCreateComputePipelines`, `0xE06D7363`). The HIP bridge
   remains only for ops with no Vulkan shader (sparse SpMM, conv1d/2d/3d,
   LAPACK LU/inverse/det/QR/Cholesky/eigendecomp, and now SpSV).
@@ -142,8 +151,9 @@ Last gate run status (authoritative, from `ctest -C Release` summary):
    validation readbacks, linear staging, and missing barriers that serialize
    ML workloads (single command buffer per pass, push descriptors everywhere).
 4. Support **FP16, Q4_K, Q6_K, Q8_0, IQ4_XS** weight quantization with shared
-   shader sources via compile-time defines (28 source shaders to 52 SPIR-V
-   binaries across Wave32/Wave64 variants).
+shader sources via compile-time specialization (191 `.comp` source shaders
+compiling to 218 SPIR-V blobs across Wave32/Wave64 variants; per-lib counts:
+vkblas 63, vkmath 62, vkquant 44, vkrand 4, vkfft 2, vkblas_l1l2 15, vkkv 1).
 5. Keep all runtime allocation **stack/static** — no heap allocation in hot
    paths; contexts own pools for buffers, descriptors, and command lists.
 
@@ -192,12 +202,12 @@ contract.
 - **Real cooperative-matrix GEMM** — `shaders/vkblas/coopmatrix/gemm_{f32,f16,bf16,f64}.comp`
   all built and testable via `test_vkblas` (test_vkblas_lapack covers Cholesky/Eigenvalue). `VAIT_COOPMATRIX=1` enables on
   RDNA4 (RX 9070 XT) and newer. Coopmatrix path dormant by default (driver 26.7.1
-  crashes on init, per GAP_ANALYSIS.md).
+   crashes on init, per `specs/HIP-VULKAN-BRIDGE-AUDIT.md`).
 - **`vkr_create_device` deliverable** — canonical full-feature device creation
   (`src/vkruntime/vkruntime.c`) queries the full Vulkan 1.1-1.4 feature chain,
   enables only what the device reports, gates cooperative matrix on
   `VAIT_COOPMATRIX`. Tests in `tests/test_vkruntime.c` section 12 → PASS.
-- **All 23 tests PASS on RX 9070 XT** (verified by `ctest -C Release`).
+- **All 22 tests PASS on RX 9070 XT** (verified by `ctest -C Release`).
 
 Full module inventory (from `CMakeLists.txt` `add_library` + public headers):
 `VKRuntime` (runtime), `VKBLAS`+(`VKBLAS-L1L2`) (`vkblas_*`, L1/L2 BLAS ops),

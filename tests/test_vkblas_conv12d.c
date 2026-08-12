@@ -44,7 +44,7 @@ static int test_conv1d(void)
     VkPhysicalDevice pd; vkEnumeratePhysicalDevices(instance, &pdcount, &pd);
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qInfo = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = 0, .queueCount = 1, .pQueuePriorities = &prio };
-    VkDevice device; vkCreateDevice(pd, &(VkDeviceCreateInfo){ .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qInfo }, NULL, &device);
+    VkDevice device; VkDeviceCreateInfo devInfo12d = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qInfo }; vkCreateDevice(pd, &devInfo12d, NULL, &device);
     vkblas_create_context(instance, pd, device, &ctx);
 
     VkResult r = vkblas_conv1d_f32(ctx, n, c, li, k, lo, kl,
@@ -113,7 +113,7 @@ static int test_conv2d(void)
     VkPhysicalDevice pd; vkEnumeratePhysicalDevices(instance, &pdcount, &pd);
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qInfo = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = 0, .queueCount = 1, .pQueuePriorities = &prio };
-    VkDevice device; vkCreateDevice(pd, &(VkDeviceCreateInfo){ .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qInfo }, NULL, &device);
+    VkDevice device; VkDeviceCreateInfo devInfo12d = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qInfo }; vkCreateDevice(pd, &devInfo12d, NULL, &device);
     vkblas_create_context(instance, pd, device, &ctx);
 
     VkResult r = vkblas_conv2d_f32(ctx, n, c, hi, wi, k, dh, dw, kh, kw,

@@ -54,7 +54,7 @@ int main(void) {
         vkDestroyInstance(instance, NULL);
         return 1;
     }
-    VkPhysicalDevice* pdvs = malloc(pdcount * sizeof(VkPhysicalDevice));
+    VkPhysicalDevice* pdvs = (VkPhysicalDevice*)malloc(pdcount * sizeof(VkPhysicalDevice));
     vkEnumeratePhysicalDevices(instance, &pdcount, pdvs);
     VkPhysicalDevice pdevice = pdvs[0];
     free(pdvs);
@@ -66,7 +66,7 @@ int main(void) {
     /* Check queue family 0 supports compute */
     uint32_t qFamilyCount = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(pdevice, &qFamilyCount, NULL);
-    VkQueueFamilyProperties* qProps = calloc(qFamilyCount, sizeof(VkQueueFamilyProperties));
+    VkQueueFamilyProperties* qProps = (VkQueueFamilyProperties*)calloc(qFamilyCount, sizeof(VkQueueFamilyProperties));
     vkGetPhysicalDeviceQueueFamilyProperties(pdevice, &qFamilyCount, qProps);
     if (qProps[0].queueFlags & VK_QUEUE_COMPUTE_BIT) {
         printf("PASS: Queue family 0 supports compute\n");
@@ -81,7 +81,7 @@ int main(void) {
     /* Check for external_memory_host extension */
     uint32_t extCount = 0;
     vkEnumerateDeviceExtensionProperties(pdevice, NULL, &extCount, NULL);
-    VkExtensionProperties* exts = calloc(extCount, sizeof(VkExtensionProperties));
+    VkExtensionProperties* exts = (VkExtensionProperties*)calloc(extCount, sizeof(VkExtensionProperties));
     vkEnumerateDeviceExtensionProperties(pdevice, NULL, &extCount, exts);
     int has_ext = 0;
     for (uint32_t i = 0; i < extCount; i++) {
@@ -131,8 +131,8 @@ PFN_vkGetMemoryHostPointerPropertiesEXT fpGetProps =
     /* === PHASE 2: HIP tensor allocation === */
     printf("PHASE 2: HIP allocation\n");
     void* hip_tensor = NULL;
-    r = hipHostMalloc(&hip_tensor, TENSOR_SIZE * sizeof(float), hipHostMallocMapped);
-    if (r != hipSuccess) {
+    hipError_t hr = hipHostMalloc(&hip_tensor, TENSOR_SIZE * sizeof(float), hipHostMallocMapped);
+    if (hr != hipSuccess) {
         printf("FAIL: hipHostMalloc failed (err=%d)\n", r);
         vkDestroyDevice(device, NULL);
         vkDestroyInstance(instance, NULL);

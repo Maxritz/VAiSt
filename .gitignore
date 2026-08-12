@@ -53,3 +53,7 @@ Thumbs.db
 # Git
 .DS_Store?
 .env
+# Runtime capture outputs
+VP_VULKANINFO_*.json
+temp_vulkan.json
+toolchain-*.cmake

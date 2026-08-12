@@ -50,11 +50,9 @@ VAiSt fixes this by starting from first principles:
   supports and falls back gracefully.
 
 - **Shared shader sources.** ~191 GLSL compute shader sources compile into
-  SPIR-V binaries via compile-time specialization (vkblas ~63 source shaders,
-  vkmath 60, vkquant 44, vkrand 4, vkfft 2, vkblas_l1l2 18) — one source,
-  multiple tile sizes, multiple wave sizes, multiple quantization types.
-  Actual SPIR-V blob count varies (Wave32/Wave64 variants) and is
-  auto-discovered by `shaders/compile_shaders.ps1`.
+  SPIR-V binaries via compile-time specialization (~63 sources per lib across vkblas/vkmath/vkquant/vkrand/vkfft/vkblas_l1l2/vkkv; per-lib counts vary), compiling to
+  218 SPIR-V blobs. Specialization varies tile/wave at
+  pipeline-creation time, not by pre-compiled variants.
 
 ---
 
@@ -85,7 +83,7 @@ VAiSt
 ├── specs/                Design docs, ISA reference, architecture notes
 │   ├── Common_Issues.md        GPU hang / device-lost / fence issues (catalog)
 │   └── (per-subsystem specs)
-├── tests/                23 test harnesses (build + run green on RX 9070 XT)
+├── tests/                22 test harnesses (build + run green on RX 9070 XT)
 └── docs/                 (empty placeholder — spec pointers live in specs/)
 ```
 
@@ -137,13 +135,26 @@ dramatically accelerates GEMM on RDNA.
 > **Why it's dormant**: the AMD LLPC driver (26.7.1, `driverVersion 2.0.395`)
 > hard-crashes in `vkCreateComputePipelines` (`0xE06D7363`) when compiling any
 > module containing `coopMatMulAddKHR`. This is a driver/LLPC bug, not a code
-> bug — and it will stay dormant **until AMD fixes it in Vulkan, or releases a
-> Vulkan ICD developer kit** that handles cooperative-matrix lowering cleanly.
-> A HIP bridge is NOT the workaround: routing GEMM to `hipblasSgemm` via
-> `VK_EXT_external_memory_host` measured **5× slower** (140 vs 696 GFLOPS on
-> RX 9070 XT, 1024³) because the bridge forces host-visible (GTT) buffers,
-> which swamps any MFMA/WMMA gain. The subgroup tier (already default) is the
-> GEMM path until the driver is fixed.
+> bug. The Vulkan cooperative-matrix path stays dormant until AMD fixes it in
+> the Vulkan driver.
+>
+> **HIP WMMA bypass (device-local VRAM, `VAIT_HIP_WMMA=1`)**: verified working
+> on RX 9070 XT — a Vulkan allocation created with
+> `VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT` +
+> `VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT` is exported via
+> `vkGetMemoryWin32HandleKHR` and imported by HIP via
+> `hipImportExternalMemory` + `hipExternalMemoryGetMappedBuffer`, then a raw
+> HIP kernel calls the RDNA4 hardware intrinsic
+> `__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12` directly. The data never
+> leaves VRAM (no PCIe/host transfer), so there is **zero-copy** between the
+> Vulkan heap and the HIP device pointer. A zero-copy readback probe confirmed
+> 0 mismatches across 16 MiB written by HIP and read back by Vulkan. Enable
+> with `VAIT_HIP_WMMA=1` on RDNA4 (gfx1201); the runtime falls back to the
+> Vulkan subgroup tier when the flag is off.
+>
+> Note the distinction: the host-GTT bridge (`VK_EXT_external_memory_host`)
+> measured 5× slower (140 vs 696 GFLOPS) because host-visible buffers incur a
+> bandwidth tax — that path is NOT the HIP WMMA bypass, and is not used.
 
 > **Note**: the f16/bf16/f64 coopmatrix tiers are now built (`shaders/vkblas/coopmatrix/gemm_{f16,bf16,f64}.comp`). A `_f16` twin per format stores the f32 accumulator as `float16_t`. The cooperative-matrix tier is tested via `test_vkblas` (coopmatrix qgemm correctness, all 14 variants + _f16 twins).
 
@@ -352,16 +363,19 @@ in `specs/VKDIST-DESIGN.md`.
   and `qgemm_{<fmt>,_f16}.comp` all built and tested via `test_vkblas` (all 14
   qgemm variants + _f16 twins). `VAIT_COOPMATRIX=1` enables on RDNA4 (RX 9070 XT)
   and newer. Coopmatrix path dormant by default (driver 26.7.1 crashes on
-  coopMatMulAddKHR, per `specs/GAP_ANALYSIS.md`).
+  coopMatMulAddKHR, per `specs/HIP-VULKAN-BRIDGE-AUDIT.md`).
 - **`vkr_create_device` deliverable** — canonical full-feature device creation
   (`src/vkruntime/vkruntime.c`); all Vulkan 1.1-1.4 features enabled, cooperative
   matrix gated on `VAIT_COOPMATRIX`.
-- **All 23+ tests PASS on RX 9070 XT** (verified by running `ctest -C Release`).
+- **All 22 tests PASS on RX 9070 XT** (`ctest -C Release`).
 
-> Note: test count grew from 10 (original per-library harnesses) to 23+ as VJITC
-> bridge tests (conv3d, conv12d, sparse, lapack, jit, model, runtime, math,
-> quant, fft, rand, dist) were added. Run `ctest -C Release` for the authoritative
-> count.
+> Test count grew from 10 (original per-library harnesses) to 22 as VJITC
+> bridge tests (conv3d, conv12d, sparse, lapack, jit, hip_bar, hip_bridge)
+> were added. Run `ctest -C Release` for the authoritative count.
+
+> Note: test count grew from 10 (original per-library harnesses) to 22 as VJITC
+> bridge tests (conv3d, conv12d, sparse, lapack, jit, hip_bar, hip_bridge)
+> were added. Run `ctest -C Release` for the authoritative count.
 - **All 8 ext BLAS ops** (trsv/trsm/symv/hemv/symm/hemm/syrk/herk) pass in both
   f32 and f16 — f16 variants convert alpha/beta via `vkblas_f16_to_f32` before dispatch.
 
@@ -372,8 +386,8 @@ in `specs/VKDIST-DESIGN.md`.
 - Coopmatrix (COOPMATRIX tier) dormant by default — AMD LLPC driver 26.7.1 crashes on
   `coopMatMulAddKHR` in `vkCreateComputePipelines`. Activated via `VAIT_COOPMATRIX=1`;
   stays dormant until AMD fixes it in the Vulkan driver or releases a Vulkan ICD
-  developer kit (see the coopmatrix note above — a HIP-bridge GEMM is 5× slower and
-  not the workaround).
+   developer kit (see the coopmatrix note above — the host-GTT HIP bridge is 5×
+   slower, but the device-local VRAM HIP WMMA bypass works; see `VAIT_HIP_WMMA`).
 
 ---
 
@@ -383,9 +397,44 @@ in `specs/VKDIST-DESIGN.md`.
 
 - **Vulkan SDK 1.4.357.0** or newer (https://vulkan.lunarg.com)
 - **CMake 3.20+** or Visual Studio 2022 with C++ build tools
-- **AMD GPU** with Vulkan 1.1+ support (RDNA2 = Vulkan 1.1 baseline for
+- **ROCm 7.14.0+** (https://www.amd.com/en/support/graphics/linux-amd-radeon).
+  Required for VJITC bridge tests and HIP interop. Install path:
+  `F:\ROCM-7.14.0-Windows` (override with `-DROCM_ROOT=/path`).
+- **AMD GPU** with Vulkan 1.1+ support (RDNA2 = Vulkan 1.0 baseline for
   shaders; Vulkan 1.4 + `VK_KHR_cooperative_matrix` required for the dormant
   coopmatrix tier)
+
+### Windows Toolchain
+
+On Windows, HIP headers (`hip/hip_runtime.h`, `hipsparse`, `hiprtc`) use C++
+templates and cannot be parsed by MSVC's `cl.exe` in C mode. The VJITC bridge
+tests compile their `.c` test files as C++20 via clang-cl (the ROCm-bundled
+`clang-cl.exe`). You must build from a **Visual Studio 2022 Developer Command
+Prompt** (x64) so MSVC CRT libs are on the search path:
+
+```powershell
+# From VS2022 x64 Native Tools Command Prompt
+cd F:\VAiT
+cmake -B build-msvc -DCMAKE_BUILD_TYPE=Release ^
+  -DCMAKE_C_COMPILER=F:/ROCM-7.14.0-Windows/bin/clang-cl.exe ^
+  -DCMAKE_CXX_COMPILER=F:/ROCM-7.14.0-Windows/bin/clang-cl.exe ^
+  -DROCM_ROOT=F:/ROCM-7.14.0-Windows -G Ninja
+cmake --build build-msvc --config Release
+ctest --test-dir build-msvc -C Release
+```
+
+All 22 tests pass on RX 9070 XT (ROCm 7.14.0, Vulkan SDK 1.4.357.0,
+clang-cl 23.0.0). Tests 8-12 and 21-22 require the HIP runtime; they
+auto-skip if `ROCM_ROOT` is not found.
+
+### Linux Toolchain
+
+```bash
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release -DROCM_ROOT=/opt/rocm -G Ninja
+cmake --build . --config Release
+ctest -C Release
+```
 
 ### Compile Shaders
 
@@ -400,23 +449,9 @@ vkrand, vkfft), compiles each to SPIR-V, and regenerates the corresponding
 `src/<lib>/shaders_spv.h` with embedded bytecode arrays. Adding a kernel = drop
 a `.comp` + regenerate — no manual build-list edits.
 
-### Build
-
-```powershell
-mkdir build && cd build
-cmake .. -G "Visual Studio 17 2022" -A x64
-cmake --build . --config Release
-```
-
-### Run Tests
-
-```powershell
-ctest -C Release
-```
-
-All 24 tests pass on RX 9070 XT (ROCm 7.14.0, Vulkan SDK 1.4.357.0).
-
 ---
+
+## Architecture Decisions
 
 ## Architecture Decisions
 
@@ -456,7 +491,7 @@ Types follow the same scheme: `s` = f32, `d` = f64, `h` = f16, `bf` = bf16,
 Tile dimensions, unroll factors, and wave widths are SPIR-V specialization
 constants (`constant_id`), not pre-compiled `#define` variants. One SPIR-V
 binary per shader source can be reconfigured at pipeline creation time without
-recompilation. The 191 `.comp` files compile to 191 SPIR-V blobs in the
+recompilation. The ~191 `.comp` files compile to 218 SPIR-V blobs in the
 checked-in `shaders_spv.h` headers — specialization varies tile/wave at
 pipeline-creation time, not by pre-compiled variants.
 
