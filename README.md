@@ -138,23 +138,19 @@ dramatically accelerates GEMM on RDNA.
 > bug. The Vulkan cooperative-matrix path stays dormant until AMD fixes it in
 > the Vulkan driver.
 >
-> **HIP WMMA bypass (device-local VRAM, `VAIT_HIP_WMMA=1`)**: verified working
-> on RX 9070 XT — a Vulkan allocation created with
-> `VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT` +
-> `VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT` is exported via
-> `vkGetMemoryWin32HandleKHR` and imported by HIP via
-> `hipImportExternalMemory` + `hipExternalMemoryGetMappedBuffer`, then a raw
-> HIP kernel calls the RDNA4 hardware intrinsic
-> `__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12` directly. The data never
-> leaves VRAM (no PCIe/host transfer), so there is **zero-copy** between the
-> Vulkan heap and the HIP device pointer. A zero-copy readback probe confirmed
-> 0 mismatches across 16 MiB written by HIP and read back by Vulkan. Enable
-> with `VAIT_HIP_WMMA=1` on RDNA4 (gfx1201); the runtime falls back to the
-> Vulkan subgroup tier when the flag is off.
->
-> Note the distinction: the host-GTT bridge (`VK_EXT_external_memory_host`)
-> measured 5× slower (140 vs 696 GFLOPS) because host-visible buffers incur a
-> bandwidth tax — that path is NOT the HIP WMMA bypass, and is not used.
+- **HIP WMMA bypass (`VAIT_HIP_WMMA=1`)** — verified working on RX 9070 XT:
+  a Vulkan allocation created with `VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT` +
+  `VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT` is exported via
+  `vkGetMemoryWin32HandleKHR`, imported by HIP via `hipImportExternalMemory` +
+  `hipExternalMemoryGetMappedBuffer`, and a raw HIP kernel calls the RDNA4
+  hardware intrinsic `__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12`
+  directly. The data never touches host memory (16 MiB readback probe: 0
+  mismatches). Use this when the Vulkan coopmatrix SPIR-V path crashes on
+  older AMD drivers. Requires the HIP SDK + `vk_khr_external_memory_win32` +
+  `vk_amd_external_memory`. **Caveat**: this bypasses `vkCreateComputePipelines`
+  entirely — if the Vulkan driver crashes on pipeline creation with
+  `coopMatMulAddKHR`, set `VAIT_HIP_WMMA=1` to skip the Vulkan coopmatrix path
+  and run the HIP WMMA kernel directly instead.
 
 > **Note**: the f16/bf16/f64 coopmatrix tiers are now built (`shaders/vkblas/coopmatrix/gemm_{f16,bf16,f64}.comp`). A `_f16` twin per format stores the f32 accumulator as `float16_t`. The cooperative-matrix tier is tested via `test_vkblas` (coopmatrix qgemm correctness, all 14 variants + _f16 twins).
 
