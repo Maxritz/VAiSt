@@ -529,7 +529,7 @@ We welcome contributions. Here is how to get started:
 - No stubs, placeholders, or TODOs in production code.
 
 ---
-## POC 1
+## POC 1 (SGLANG)
 
 ---
 
@@ -569,7 +569,8 @@ We welcome contributions. Here is how to get started:
 
 ---
 
-## POC 2
+## POC 2 AMD ATOM
+
 ## ATOM Ponytail-Audit: Port-to-C++/Vulkan/Windows Edition
 
 ---
