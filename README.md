@@ -529,7 +529,105 @@ We welcome contributions. Here is how to get started:
 - No stubs, placeholders, or TODOs in production code.
 
 ---
+## POC 1
 
+---
+
+## VAiT Component Inventory & Reuse Mapping
+
+| VAiT Module | What it Replaces in the Port | Core Capabilities Reused |
+| --- | --- | --- |
+| **`vkmodel`** | Torch model loading + NumPy weight parsing | GGUF + Safetensors parser, direct GPU tensor upload (`vkmodel_load`, `vkmodel_load_safetensors`). **Kills the Python/Torch weight pipeline entirely.** |
+| **`vkblas` + `vkquant**` | `torch.matmul` + llama.cpp GGML | Quantized decode hot-path: 23 dequant / 22 quant formats, `vkblas_qgemm_*_f32/_f16` (INT8 sdot4/sudot4 subgroup tier). |
+| **`vkblas_l1l2`** | Torch lower-level primitives | GEMV, dot, axpy, scal, nrm2, asum, amax (the foundational decode loop primitives). |
+| **`vkmath`** | Torch elementwise ops + JIT kernels | Silu, gelu, softmax, rms_norm, layernorm, argmax, cumsum, reductions, transpose (`f32`/`f16`/`bf16`). |
+| **`vkruntime`** | Homegrown `assm_vk` bootstrap | Device creation, pooled allocator, staging buffers (`vkr_create_device`, `vkr_upload`/`download`). |
+| **`vkkv`** | External KV tools | KV-cache ridge-fit compression (`vkkv_fit_cpu`/`apply`). |
+| **`vkrand`** | Python `random` / `torch.multinomial` | Threefry, uniform, normal PRNG pipelines for sampling. |
+| **`vkdist`** | Distributed infrastructure | TCP distributed primitives for future PD/EP scaling. |
+| **`vkfft`** | External FFT libraries | Radix-2 FFT (`f16`/`f32`). |
+
+---
+
+## ⚖️ Functional Division of Labor
+
+* **VAiT (Dense Substrate):** Handles runtime, memory pools, model loading, quantized GEMM hot-paths, math activations/norms, RNG, and KV compression.
+* **Assemble-SGLang (Attention / Speculative Layer):** Retains custom kernels (`shaders/*.comp` compiled via `glslc`) for:
+* RoPE
+* MoE Router / Top-K
+* Fused MLA Decode
+* Tree Verifier
+* GDN Recurrent / Replay
+
+---
+
+## ⚙️ Technical Guardrails & Constraints Accepted
+
+1. **ROCm Bridge:** Retained exclusively for the 6 isolated ops (`vkblas_*_lapack`, `sparse`, `conv` $\rightarrow$ `rocSOLVER`/`rocSPARSE`/`MIOpen`). Not on the dense hot path.
+2. **Subgroup Tiering:** Subgroup tier remains the default (coopmatrix fallback disabled due to driver crashes).
+3. **C-to-C++ Interop:** VAiT exposes C99 headers (`#include <vkmodel/vkmodel.h>`), cleanly linked into C++ via standard CMake static targets (`target_link_libraries`).
+
+---
+
+## POC 2
+## ATOM Ponytail-Audit: Port-to-C++/Vulkan/Windows Edition
+
+---
+
+### 🔥 The Elimination Ledger (Ranked by Cut Size)
+
+| # | Target / Path | Size | Reason for Elimination / Action |
+| --- | --- | --- | --- |
+| **1** | `atom/mesh/`, `entrypoints/atomesh/`, `github/scripts/atomesh/` | ~70.3K | **Rust implementation.** Fails the C++ / Vulkan port target entirely. Reimplementation of vLLM router + scheduler + PD-disaggregation. |
+| **2** | `atom/kv_transfer/` | 8.4K | ROCm/RDMA/Linux-only (Mooncake, Moriio, offload). Target runs purely on Windows local Vulkan. |
+| **3** | `atom/model_ops/fla_ops/` | 5.65K | Hand-written Triton FLA gated-delta-rule kernels. Triton is incompatible with Vulkan; must be rewritten as a native Vulkan compute shader. |
+| **4** | `atom/entrypoints/openai/` | 4.2K | HTTP/OpenAI server surface (api_server, serving_chat, protocols). Inherit HTTP/streaming directly from the host framework; keep only `atom_standalone_service.py` as a reference. |
+| **5** | `atom/model_ops/mamba_ops/causal_conv1d.py` | 1.4K | Redundant; leverage native `llama.cpp`-style equivalent conv1d compute pipelines instead. |
+| **6** | `atom/model_ops/eplb.py` | 2.6K | YAGNI MoE load-balancing (`eplb_enable` defaults off). |
+| **7** | `atom/plugin/vllm/` & `sglang/deepseek_v4_bridge.py` | 4.2K | Duplicated DSV4/MLA indexing logic. Consolidate into a single native C++ boundary struct. |
+| **8** | `atom/rollout/`, `engine_utility.py` | ~2.0K | RLHF scaffolding with zero in-repo importers. |
+| **9** | Unreferenced plugins (`minimax_m3_sparse.py`, etc.) | 1.66K | Orphaned wrappers with zero code references. |
+| **10** | `atom/model_config/` | 0.85K | Redundant HF config dataclasses duplicating native transformers schemas. |
+| **11** | Torch Dynamo / `torch.compile` machinery | ~0.5K | Entirely eliminated alongside the Python/Torch execution stack. |
+| **12** | MTP Spec-Decode Family (6 files) | ~1.8K | Collapse duplicated SharedHead/norm/proj skeletons into a single parameterized MTP wrapper. |
+| **13** | Llama-Family GQA Cluster (7 architectures) | ~3.7K | Consolidate duplicate attention/MLP decoders into a single unified architecture template (like `mistral3.py`). |
+| **14** | DeepSeek V2 vs V4 Duplication | ~0.5K | Drop duplicated PCP/dual-stream MoE scaffolding; retain V4 HC/Compressor core logic. |
+| **15** | KV-Events Pub/Sub (`atom/distributed/kv_events.py`) | 0.4K | YAGNI ZMQ notification scaffolding. |
+| **16** | `atom/utils/envs.py` & `atom/config.py` | ~0.35K | Collapse 160 scattered environment variables into clean, hardcoded configuration constants. |
+| **17** | `atom/model_engine/arg_utils.py` | ~0.5K | Trim down to the ~20 essential flags required by the standalone runtime. |
+| **18** | `atom/plugin/register.py` | N/A | Delete `set_attn_cls()` no-ops and redundant NSA backend passthroughs. |
+| **19** | `atom/entrypoints/openai/tool_parser/` | ~0.25K | Strip generic scaffolding; retain only the 6 model-specific wire format parsers. |
+| **20** | `ParallelConfig` dead surface (`atom/config.py`) | ~0.1K | Drop `world_size_across_dp`, `asyncio_mode`, and unreferenced DP knobs. |
+
+---
+
+### 📦 VAiT Dependency & Reuse Matrix
+
+| Module | Status | Integration Scope |
+| --- | --- | --- |
+| **`vkruntime`** | **Use as Backbone** | Vulkan 1.3/1.4 device creation, pooled allocators, staging upload pipelines, and push descriptors. |
+| **`vkmath`** | **Use as Backbone** | RMSNorm / LayerNorm, Silu / GELU / Softmax activations. |
+| **`vkblas` / `vkquant**` | **Use as Backbone** | Q4_0, Q4_K, Q8_0, Q5_K, Q6_K, Q3_K, IQ4_XS formats; HGEMM/BGEMM; 22 quantization/dequantization schemas. |
+| **`vkrand`** | **Use as Backbone** | Threefry uniform / normal PRNG pipelines for zero-Python token sampling. |
+| **`vkmodel`** | **Use as Backbone** | Native GGUF v2/v3, safetensors, and OpenVINO weight loading directly to GPU memory. |
+| **`vkkv` / `vkfft` / `vkstream**` | **Skip / Exclude** | Ridge-statistical KV-transfer (`vkkv`) and FFT/stream primitives are unnecessary for core LLM execution paths. |
+| **`vkdist`** | **Skip / Exclude** | TCP GEMM offloader; incompatible with the target MSVC local-execution model. |
+
+---
+
+### 🛠️ Remaining Engineering Gaps (New Native Vulkan Kernels Required)
+
+To complete the pure C++/Vulkan engine, the following missing features must be implemented as native VAiT-style libraries:
+
+1. **Attention Families:** MHA, MLA, GDN, Sparse, and Paged attention variants.
+2. **KV-Cache:** Paged block-table management.
+3. **MoE:** Fused routing, grouped expert GEMM, and expert-parallel communication.
+4. **Positional Embeddings:** RoPE and mRoPE kernels.
+5. **Sampling:** Top-K, Top-P, nucleus, and rejection-sampling wrappers.
+6. **Quantization Extensions:** FP8 and MXFP4 compute paths.
+7. **Distributed Collectives:** TP, EP, and PP primitives.
+8. **Advanced Speculative Decoding:** EAGLE-3 / dspark scaffolding.
+9. **Mamba:** Native Conv1D integration.
 
 ---
 
@@ -572,7 +670,6 @@ API should look like. VAiSt does not seek to replace them on Linux — rather,
 it brings the same capabilities to platforms where ROCm does not run.
 
 ---
-
 ## License
 
 This project is licensed under the Apache License, Version 2.0.
