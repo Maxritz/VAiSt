@@ -383,8 +383,7 @@ in `specs/VKDIST-DESIGN.md`.
 - No LAPACK — the LU/inverse/det/QR/Cholesky/eigendecomp HIP bridge was
   removed in the HIP purge; native Vulkan factorizations are future work.
 - No f16/bf16/f64 convolution variants — only `vkblas_conv*_f32` is wired
-  (dtype codes 61/62/63 reserved in `vkblas_internal.h`; rb2 shaders for
-  f16/bf16/f64 exist in `shaders/vkblas/conv/direct/` but are not yet embedded).
+  (dtype codes 61/62/63 reserved in `vkblas_internal.h`).
 - Coopmatrix (COOPMATRIX tier) dormant by default — AMD LLPC driver 26.7.1 crashes on
   `coopMatMulAddKHR` in `vkCreateComputePipelines`. Activated via `VAIT_COOPMATRIX=1`;
   stays dormant until AMD fixes it in the Vulkan driver.
