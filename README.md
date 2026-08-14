@@ -5,11 +5,10 @@ math primitives for AMD RDNA2 (gfx103x) and RDNA4 (gfx1201) GPUs, and really
 any GPU that speaks Vulkan 1.4.
 
 No CUDA. Just Vulkan compute shaders, C99 headers, and Vulkan-native handles.
-Convolution (conv1d/2d/3d), GEMM, FFT, and the math/quant/rand primitives are
-all native Vulkan compute dispatches. A small VJITC bridge still dispatches
-into ROCm libraries (hipSPARSE, rocsolver) for sparse SpMM/SpSV and LAPACK
-factorizations, over zero-copy VkBuffer↔HIP-device-pointer interop. No CUDA,
-no ROCm runtime dependency for the core compute paths.
+Everything — BLAS, FFT, RNG, math, quant, model I/O, and convolution — is a
+native Vulkan compute dispatch. No ROCm / HIP / CUDA runtime dependency,
+anywhere. Public API names mirror the ROCm surface for mechanical porting,
+but every handle is a Vulkan object.
 
 ---
 
@@ -137,20 +136,6 @@ dramatically accelerates GEMM on RDNA.
 > module containing `coopMatMulAddKHR`. This is a driver/LLPC bug, not a code
 > bug. The Vulkan cooperative-matrix path stays dormant until AMD fixes it in
 > the Vulkan driver.
->
-- **HIP WMMA bypass (`VAIT_HIP_WMMA=1`)** — verified working on RX 9070 XT:
-  a Vulkan allocation created with `VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT` +
-  `VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT` is exported via
-  `vkGetMemoryWin32HandleKHR`, imported by HIP via `hipImportExternalMemory` +
-  `hipExternalMemoryGetMappedBuffer`, and a raw HIP kernel calls the RDNA4
-  hardware intrinsic `__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12`
-  directly. The data never touches host memory (16 MiB readback probe: 0
-  mismatches). Use this when the Vulkan coopmatrix SPIR-V path crashes on
-  older AMD drivers. Requires the HIP SDK + `vk_khr_external_memory_win32` +
-  `vk_amd_external_memory`. **Caveat**: this bypasses `vkCreateComputePipelines`
-  entirely — if the Vulkan driver crashes on pipeline creation with
-  `coopMatMulAddKHR`, set `VAIT_HIP_WMMA=1` to skip the Vulkan coopmatrix path
-  and run the HIP WMMA kernel directly instead.
 
 > **Note**: the f16/bf16/f64 coopmatrix tiers are now built (`shaders/vkblas/coopmatrix/gemm_{f16,bf16,f64}.comp`). A `_f16` twin per format stores the f32 accumulator as `float16_t`. The cooperative-matrix tier is tested via `test_vkblas` (coopmatrix qgemm correctness, all 14 variants + _f16 twins).
 
@@ -387,24 +372,22 @@ in `specs/VKDIST-DESIGN.md`.
 
 > Test count: 17 always-built harnesses (conv3d, conv12d, vkblas, vkmath,
 > vkquant, vkrand, vkfft, vkruntime, vkblas_l1l2, vkmodel, vkkv, vkstream,
-> vkdist, ...). The HIP-gated bridge harnesses (sparse, lapack, jit, hip_bar,
-> hip_bridge_libraries) are only built when `VAIT_HIP=ON`. Run
-> `ctest -C Release` for the authoritative count.
+> vkdist, ...). Run `ctest -C Release` for the authoritative count.
 - **All 8 ext BLAS ops** (trsv/trsm/symv/hemv/symm/hemm/syrk/herk) pass in both
   f32 and f16 — f16 variants convert alpha/beta via `vkblas_f16_to_f32` before dispatch.
 
 ### Remaining Gaps (architecturally feasible but not yet done)
 
-- No higher-level sparse ops beyond CSR SpMM + SpSV (sparse LU factorization, etc.).
-- No runtime JIT by default — `VAIT_JIT` CMake option (OFF) enables hipRTC + shaderc.
+- No sparse BLAS — the CSR SpMM/SpSV HIP bridge was removed in the HIP purge;
+  a native Vulkan sparse GEMM is future work.
+- No LAPACK — the LU/inverse/det/QR/Cholesky/eigendecomp HIP bridge was
+  removed in the HIP purge; native Vulkan factorizations are future work.
 - No f16/bf16/f64 convolution variants — only `vkblas_conv*_f32` is wired
   (dtype codes 61/62/63 reserved in `vkblas_internal.h`; rb2 shaders for
   f16/bf16/f64 exist in `shaders/vkblas/conv/direct/` but are not yet embedded).
 - Coopmatrix (COOPMATRIX tier) dormant by default — AMD LLPC driver 26.7.1 crashes on
   `coopMatMulAddKHR` in `vkCreateComputePipelines`. Activated via `VAIT_COOPMATRIX=1`;
-  stays dormant until AMD fixes it in the Vulkan driver or releases a Vulkan ICD
-   developer kit (see the coopmatrix note above — the host-GTT HIP bridge is 5×
-   slower, but the device-local VRAM HIP WMMA bypass works; see `VAIT_HIP_WMMA`).
+  stays dormant until AMD fixes it in the Vulkan driver.
 
 ---
 
@@ -414,44 +397,32 @@ in `specs/VKDIST-DESIGN.md`.
 
 - **Vulkan SDK 1.4.357.0** or newer (https://vulkan.lunarg.com)
 - **CMake 3.20+** or Visual Studio 2022 with C++ build tools
-- **ROCm 7.14.0+** (https://www.amd.com/en/support/graphics/linux-amd-radeon).
-  Only required for the optional HIP-gated VJITC bridge tests (sparse, LAPACK,
-  JIT) — the core stack builds and passes without it. Install path:
-  `F:\ROCM-7.14.0-Windows` (override with `-DROCM_ROOT=/path`).
 - **AMD GPU** with Vulkan 1.1+ support (RDNA2 = Vulkan 1.0 baseline for
   shaders; Vulkan 1.4 + `VK_KHR_cooperative_matrix` required for the dormant
   coopmatrix tier)
 
+No ROCm / HIP / CUDA toolchain or runtime is required — the stack is pure
+Vulkan compute. Build with the default MSVC (`cl.exe`) toolchain.
+
 ### Windows Toolchain
 
-The core stack is pure C99 and builds with the default MSVC toolchain
-(`cl.exe`). Only the optional HIP-gated bridge tests need a C++ toolchain:
-on Windows, HIP headers (`hip/hip_runtime.h`, `hipsparse`, `hiprtc`) use C++
-templates and cannot be parsed by MSVC's `cl.exe` in C mode, so those `.c`
-test files compile as C++20 via clang-cl (the ROCm-bundled `clang-cl.exe`).
-You must build from a **Visual Studio 2022 Developer Command Prompt** (x64)
-so MSVC CRT libs are on the search path:
+Build from a **Visual Studio 2022 Developer Command Prompt** (x64):
 
 ```powershell
 # From VS2022 x64 Native Tools Command Prompt
 cd F:\VAiT
-cmake -B build-msvc -DCMAKE_BUILD_TYPE=Release ^
-  -DCMAKE_C_COMPILER=F:/ROCM-7.14.0-Windows/bin/clang-cl.exe ^
-  -DCMAKE_CXX_COMPILER=F:/ROCM-7.14.0-Windows/bin/clang-cl.exe ^
-  -DROCM_ROOT=F:/ROCM-7.14.0-Windows -G Ninja
+cmake -B build-msvc -DCMAKE_BUILD_TYPE=Release -G Ninja
 cmake --build build-msvc --config Release
 ctest --test-dir build-msvc -C Release
 ```
 
-All 17 always-built tests pass on RX 9070 XT (Vulkan SDK 1.4.357.0). The
-HIP-gated bridge tests (sparse, lapack, jit, hip_bar, hip_bridge_libraries)
-are only built with `-DVAIT_HIP=ON` and auto-skip if `ROCM_ROOT` is not found.
+All 17 tests pass on RX 9070 XT (Vulkan SDK 1.4.357.0).
 
 ### Linux Toolchain
 
 ```bash
 mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release -DROCM_ROOT=/opt/rocm -G Ninja
+cmake .. -DCMAKE_BUILD_TYPE=Release -G Ninja
 cmake --build . --config Release
 ctest -C Release
 ```
@@ -675,11 +646,7 @@ open-standard projects:
   `third_party/vk_mem_alloc.h`.
 
 - **ROCm / AMD** — for hipBLAS (API naming reference), rocSPARSE, and rocsolver.
-  VAiSt bridges to these libraries for sparse GEMM (`vkblas_sparse_gemm_f32`)
-  and sparse triangular solve (`vkblas_sparse_spsv_f32`), and LAPACK
-  factorizations (`vkblas_lu_f32`/`_inverse_f32`/`_determinant_f32`/`_qr_f32`/
-  `_cholesky_f32`/`_eigendecomp_f32`) via zero-copy VkBuffer↔HIP-device-pointer
-  interop. `specs/rocm-reference/` mirrors reference headers with attribution.
+  `specs/rocm-reference/` mirrors reference headers with attribution.
   (https://rocmd.docs.amd.com/)
 
 - **LunarG** — for the Vulkan SDK (1.4.357.0), glslangValidator, spirv-val,

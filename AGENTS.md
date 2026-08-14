@@ -63,7 +63,7 @@ Last gate run status (authoritative, from `ctest -C Release` summary):
 
 | Sub-lib | Implemented | Missing / scope limit |
 |---------|-------------|------------------------|
-| VKBLAS  | `gemm_baseline_f32/f16/bf16/f64` (shared-mem tiled), `subgroup/gemm_{f32,f16,bf16,f64}` twins, `coopmatrix/gemm_{f32,f16,bf16,f64}`; qgemm with on-the-fly dequant for q4_0/q4k/q5k/q6k/q3k/q8_0/iq4xs; **subgroup-tier qgemm all 7 formats** (32x8 warp-tiled, subgroupShuffle x-broadcast, no shared memory) + **`_f16` fp16-output-storage twin per format** (f32 accumulate, `float16_t` y/z, private dtype codes 32..38);    ext BLAS ops (trsv, trsm, symv, hemv, symm, hemm, syrk, herk) in f32 and f16 — f16 variants convert alpha/beta from f16 bit-patterns to f32 via `vkblas_f16_to_f32` before dispatch; **LAPACK VJITC bridge**: LU (`vkblas_lu_f32`), inverse (`vkblas_inverse_f32`), determinant (`vkblas_determinant_f32`), QR (`vkblas_qr_f32`), Cholesky (`vkblas_cholesky_f32`), eigenvalue decomposition (`vkblas_eigendecomp_f32`) via rocSOLVER; **sparse GEMM** (`vkblas_sparse_gemm_f32`) + **sparse triangular solve** (`vkblas_sparse_spsv_f32`) via rocSPARSE; **conv1d/conv2d/3d** (`vkblas_conv1d_f32`/`vkblas_conv2d_f32`/`vkblas_conv3d_f32`) via MIOpen | No f16/bf16/f64 coopmatrix tier for qgemm (baseline+subgroup only); HIP WMMA device-local bypass (`VAIT_HIP_WMMA=1`) available for coopmatrix-tier GEMM on RDNA4 (verifies zero-copy VRAM interop); no runtime JIT |
+| VKBLAS  | `gemm_baseline_f32/f16/bf16/f64` (shared-mem tiled), `subgroup/gemm_{f32,f16,bf16,f64}` twins, `coopmatrix/gemm_{f32,f16,bf16,f64}`; qgemm with on-the-fly dequant for q4_0/q4k/q5k/q6k/q3k/q8_0/iq4xs; **subgroup-tier qgemm all 7 formats** (32x8 warp-tiled, subgroupShuffle x-broadcast, no shared memory) + **`_f16` fp16-output-storage twin per format** (f32 accumulate, `float16_t` y/z, private dtype codes 32..38); ext BLAS ops (trsv, trsm, symv, hemv, symm, hemm, syrk, herk) in f32 and f16 — f16 variants convert alpha/beta from f16 bit-patterns to f32 via `vkblas_f16_to_f32` before dispatch; **native Vulkan conv1d/2d/3d** (`vkblas_conv1d_f32`/`vkblas_conv2d_f32`/`vkblas_conv3d_f32`) via register-blocked direct (rb2) kernel (`baseline/conv_rb2_f32.comp`, one 512-thread workgroup per (n,k), RB=2 outputs/thread) | No f16/bf16/f64 conv variants (dtype codes 61..63 reserved, shaders not embedded); no sparse GEMM or LAPACK — the HIP/rocSOLVER/rocSPARSE bridges were removed in the HIP purge (native Vulkan equivalents are future work); no f16/bf16/f64 coopmatrix tier for qgemm (baseline+subgroup only); no runtime JIT |
 | VKFFT   | radix-2 forward+inverse, `fft_f16` + `fft_f32` blobs (no TODO/stub markers) | No f64, no bf16, no non-radix-2 (non-power-of-2) plans |
 | VKRAND  | PRNG generators (threefry, uniform, normal) + distribution sampling (4 blobs, 0 stubs) | (none known) |
 | VKMath  | 46 blobs: elementwise (abs/add/mul/exp/log/sqrt/pow/sign/scale/clip) + activations (relu/gelu/silu/sigmoid/tanh) + reductions (sum/max/nrm2/dot/asum) + norm + softmax + cumsum + **bf16 casts** (`cast_f32_to_bf16`/`cast_bf16_to_f32`) + **bf16 elementwise** (`add/mul/add_mul/scale`) + **bf16 activations** (`relu/silu/gelu/sigmoid/tanh`) + **f16 elementwise** (`add/mul/add_mul/scale`) + **f16 activations** (`relu/silu/gelu/sigmoid/tanh`); baseline + subgroup tiers | `vkmath.c:273` TODO is a comment (cosmetic, not an executable stub); bf16 ops are integrated (uint16_t scalar-block SSBO, requires `storageBuffer16BitAccess` + `scalarBlockLayout`); no bf16 reductions |
@@ -102,21 +102,12 @@ Last gate run status (authoritative, from `ctest -C Release` summary):
   through the HIP bridge via `VK_EXT_external_memory_host` is a net loss: it
   forces host-visible (GTT) buffers, whose bandwidth tax swamps any MFMA/WMMA
   gain. The subgroup tier (already default) is the baseline GEMM path.
-  HOWEVER, the **device-local VRAM HIP WMMA bypass** (`VAIT_HIP_WMMA=1`) is
-  verified working: a Vulkan allocation created with
-  `VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT` +
-  `VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT` is exported via
-  `vkGetMemoryWin32HandleKHR`, imported by HIP via
-  `hipImportExternalMemory` + `hipExternalMemoryGetMappedBuffer`, and a raw
-  HIP kernel calls the RDNA4 intrinsic
-  `__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12` directly on VRAM — zero
-  host/GTT transfer (16 MiB readback probe: 0 mismatches). This bypasses the
-  LLPC coopmatrix crash. The coopmatrix tier stays dormant behind
-  `VAIT_COOPMATRIX` until
- the AMD LLPC driver handles `coopMatMulAddKHR` without crashing (26.7.1
-  hard-crashes in `vkCreateComputePipelines`, `0xE06D7363`). The HIP bridge
-  remains only for ops with no Vulkan shader (sparse SpMM, conv1d/2d/3d,
-  LAPACK LU/inverse/det/QR/Cholesky/eigendecomp, and now SpSV).
+  (Historical: the device-local VRAM HIP WMMA bypass was verified working, but
+  the entire HIP bridge was subsequently removed in the HIP purge — every op
+  is now a native Vulkan shader. The coopmatrix tier stays dormant behind
+  `VAIT_COOPMATRIX` until the AMD LLPC driver handles `coopMatMulAddKHR`
+  without crashing (26.7.1 hard-crashes in `vkCreateComputePipelines`,
+  `0xE06D7363`).)
 - **Gap "no bf16 cast op in VKMath" closed.** `vkmath_cast_f32_to_bf16` +
   `vkmath_cast_bf16_to_f32` now dispatch `baseline/cast_*_bf16.comp` (truncation
   `floatBitsToUint(f)>>16` / `uintBitsToFloat(uint(b)<<16)`, matching
@@ -299,8 +290,9 @@ GPU host target (verified by `vulkaninfo` on this machine): **AMD Radeon RX
 
 ### Remaining Gaps
 
-1. **No sparse BLAS beyond SpMM/SpSV** — `vkblas_sparse_gemm_f32` bridges CSR SpMM via rocSPARSE (3-stage: bufferSize → preprocess → compute); `vkblas_sparse_spsv_f32` bridges sparse triangular solve via hipsparseSpSV. Both PASS on RX 9070 XT. No higher-level sparse ops (sparse LU factorization, etc.).
-2. **No runtime JIT** — offline compile by default; `VAIT_JIT` feature flag (OFF) enables hipRTC + shaderc dynamic compilation. Coopmatrix (COOPMATRIX tier) dormant by default due to driver crash.
+1. **No sparse BLAS** — the CSR SpMM (`vkblas_sparse_gemm_f32`) / SpSV (`vkblas_sparse_spsv_f32`) HIP/rocSPARSE bridges were removed in the HIP purge. Native Vulkan sparse GEMM is future work.
+2. **No LAPACK** — the LU/inverse/det/QR/Cholesky/eigendecomp HIP/rocSOLVER bridges were removed in the HIP purge. Native Vulkan factorizations are future work.
+3. **No runtime JIT** — offline compile by default; the hipRTC/shaderc JIT bridge was removed in the HIP purge. Coopmatrix (COOPMATRIX tier) dormant by default due to driver crash.
 
 Note on vendor naming: this stack uses the Vulkan `VK_AMD_*` vendor-extension
 nomenclature for AMD GPU features (e.g. `VK_AMD_SHADER_CORE_PROPERTIES(2)`,
