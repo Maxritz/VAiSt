@@ -5,11 +5,11 @@ math primitives for AMD RDNA2 (gfx103x) and RDNA4 (gfx1201) GPUs, and really
 any GPU that speaks Vulkan 1.4.
 
 No CUDA. Just Vulkan compute shaders, C99 headers, and Vulkan-native handles.
-Vulkan compute paths run on GPU directly for linear-algebra primitives not
-yet covered by Vulkan shaders (sparse SpMM, LAPACK factorizations, conv1d/2d/3d),
-a VJITC bridge dispatches into ROCm libraries (hipSPARSE, rocsolver, MIOpen)
-over zero-copy VkBuffer↔HIP-device-pointer interop. No CUDA, no ROCm runtime
-dependency for the core compute paths.
+Convolution (conv1d/2d/3d), GEMM, FFT, and the math/quant/rand primitives are
+all native Vulkan compute dispatches. A small VJITC bridge still dispatches
+into ROCm libraries (hipSPARSE, rocsolver) for sparse SpMM/SpSV and LAPACK
+factorizations, over zero-copy VkBuffer↔HIP-device-pointer interop. No CUDA,
+no ROCm runtime dependency for the core compute paths.
 
 ---
 
@@ -72,7 +72,7 @@ VAiSt
 │   └── vkdist/           Distributed compute over TCP
 ├── src/                  C99 runtime + Vulkan dispatch
 ├── shaders/
-│   ├── vkblas/           GEMM, qgemm, L1/L2 BLAS (baseline + subgroup tiers)
+│   ├── vkblas/           GEMM, qgemm, conv (rb2), L1/L2 BLAS (baseline + subgroup tiers)
 │   ├── vkmath/           Elementwise, reductions, activations, casts
 │   ├── vkquant/          Dequant + forward-quantize shaders
 │   ├── vkrand/           PRNG + distribution sampling
@@ -83,7 +83,7 @@ VAiSt
 ├── specs/                Design docs, ISA reference, architecture notes
 │   ├── Common_Issues.md        GPU hang / device-lost / fence issues (catalog)
 │   └── (per-subsystem specs)
-├── tests/                22 test harnesses (build + run green on RX 9070 XT)
+├── tests/                17 test harnesses (build + run green on RX 9070 XT)
 └── docs/                 (empty placeholder — spec pointers live in specs/)
 ```
 
@@ -173,6 +173,26 @@ All GEMM paths now return `VK_SUCCESS` on RDNA4. This also enables the new
 > creation function (`src/vkruntime/vkruntime.c`) queries the full Vulkan 1.1-1.4
 > feature chain, enables only what the device reports, and gates cooperative
 > matrix on `VAIT_COOPMATRIX`. Updated `tests/test_vkruntime.c` section 12.
+
+### VKBLAS Convolution (implemented, native Vulkan)
+
+conv1d/2d/3d are native Vulkan compute dispatches using the **register-blocked
+direct (rb2)** kernel — the benchmark winner on RDNA2/RDNA4: 512-thread
+workgroups, one workgroup per (n, k), each thread computes 2 spatial outputs
+sharing input taps (~1.87 TFLOPS f32 on RX 9070 XT for a 256×64×64 conv; the
+honest memory-bound ceiling). All take `VkBuffer` handles (NCDHW/KCDHW/NKDHW
+f32 layouts) and record into the caller's command buffer.
+
+| Function | Description |
+|----------|-------------|
+| `vkblas_conv1d_f32` | 1D conv: y = α·conv1d(x, w) + β·y (NCL) |
+| `vkblas_conv2d_f32` | 2D conv: y = α·conv2d(x, w) + β·y (NCHW) |
+| `vkblas_conv3d_f32` | 3D conv: y = α·conv3d(x, w) + β·y (NCDHW) |
+
+Shaders live in `shaders/vkblas/baseline/conv_rb2_f32.comp` (embedded as
+`vkblas_spv_baseline_conv_rb2_f32`); verified by `test_vkblas_conv3d` and
+`test_vkblas_conv12d`. f16/bf16/f64 variants can be added by embedding their
+rb2 shaders and exposing new dtype codes.
 
 ### VKBLAS L1/L2 (implemented)
 
@@ -363,15 +383,13 @@ in `specs/VKDIST-DESIGN.md`.
 - **`vkr_create_device` deliverable** — canonical full-feature device creation
   (`src/vkruntime/vkruntime.c`); all Vulkan 1.1-1.4 features enabled, cooperative
   matrix gated on `VAIT_COOPMATRIX`.
-- **All 22 tests PASS on RX 9070 XT** (`ctest -C Release`).
+- **All 17 tests PASS on RX 9070 XT** (`ctest -C Release`).
 
-> Test count grew from 10 (original per-library harnesses) to 22 as VJITC
-> bridge tests (conv3d, conv12d, sparse, lapack, jit, hip_bar, hip_bridge)
-> were added. Run `ctest -C Release` for the authoritative count.
-
-> Note: test count grew from 10 (original per-library harnesses) to 22 as VJITC
-> bridge tests (conv3d, conv12d, sparse, lapack, jit, hip_bar, hip_bridge)
-> were added. Run `ctest -C Release` for the authoritative count.
+> Test count: 17 always-built harnesses (conv3d, conv12d, vkblas, vkmath,
+> vkquant, vkrand, vkfft, vkruntime, vkblas_l1l2, vkmodel, vkkv, vkstream,
+> vkdist, ...). The HIP-gated bridge harnesses (sparse, lapack, jit, hip_bar,
+> hip_bridge_libraries) are only built when `VAIT_HIP=ON`. Run
+> `ctest -C Release` for the authoritative count.
 - **All 8 ext BLAS ops** (trsv/trsm/symv/hemv/symm/hemm/syrk/herk) pass in both
   f32 and f16 — f16 variants convert alpha/beta via `vkblas_f16_to_f32` before dispatch.
 
@@ -379,6 +397,9 @@ in `specs/VKDIST-DESIGN.md`.
 
 - No higher-level sparse ops beyond CSR SpMM + SpSV (sparse LU factorization, etc.).
 - No runtime JIT by default — `VAIT_JIT` CMake option (OFF) enables hipRTC + shaderc.
+- No f16/bf16/f64 convolution variants — only `vkblas_conv*_f32` is wired
+  (dtype codes 61/62/63 reserved in `vkblas_internal.h`; rb2 shaders for
+  f16/bf16/f64 exist in `shaders/vkblas/conv/direct/` but are not yet embedded).
 - Coopmatrix (COOPMATRIX tier) dormant by default — AMD LLPC driver 26.7.1 crashes on
   `coopMatMulAddKHR` in `vkCreateComputePipelines`. Activated via `VAIT_COOPMATRIX=1`;
   stays dormant until AMD fixes it in the Vulkan driver or releases a Vulkan ICD
@@ -394,7 +415,8 @@ in `specs/VKDIST-DESIGN.md`.
 - **Vulkan SDK 1.4.357.0** or newer (https://vulkan.lunarg.com)
 - **CMake 3.20+** or Visual Studio 2022 with C++ build tools
 - **ROCm 7.14.0+** (https://www.amd.com/en/support/graphics/linux-amd-radeon).
-  Required for VJITC bridge tests and HIP interop. Install path:
+  Only required for the optional HIP-gated VJITC bridge tests (sparse, LAPACK,
+  JIT) — the core stack builds and passes without it. Install path:
   `F:\ROCM-7.14.0-Windows` (override with `-DROCM_ROOT=/path`).
 - **AMD GPU** with Vulkan 1.1+ support (RDNA2 = Vulkan 1.0 baseline for
   shaders; Vulkan 1.4 + `VK_KHR_cooperative_matrix` required for the dormant
@@ -402,11 +424,13 @@ in `specs/VKDIST-DESIGN.md`.
 
 ### Windows Toolchain
 
-On Windows, HIP headers (`hip/hip_runtime.h`, `hipsparse`, `hiprtc`) use C++
-templates and cannot be parsed by MSVC's `cl.exe` in C mode. The VJITC bridge
-tests compile their `.c` test files as C++20 via clang-cl (the ROCm-bundled
-`clang-cl.exe`). You must build from a **Visual Studio 2022 Developer Command
-Prompt** (x64) so MSVC CRT libs are on the search path:
+The core stack is pure C99 and builds with the default MSVC toolchain
+(`cl.exe`). Only the optional HIP-gated bridge tests need a C++ toolchain:
+on Windows, HIP headers (`hip/hip_runtime.h`, `hipsparse`, `hiprtc`) use C++
+templates and cannot be parsed by MSVC's `cl.exe` in C mode, so those `.c`
+test files compile as C++20 via clang-cl (the ROCm-bundled `clang-cl.exe`).
+You must build from a **Visual Studio 2022 Developer Command Prompt** (x64)
+so MSVC CRT libs are on the search path:
 
 ```powershell
 # From VS2022 x64 Native Tools Command Prompt
@@ -419,9 +443,9 @@ cmake --build build-msvc --config Release
 ctest --test-dir build-msvc -C Release
 ```
 
-All 22 tests pass on RX 9070 XT (ROCm 7.14.0, Vulkan SDK 1.4.357.0,
-clang-cl 23.0.0). Tests 8-12 and 21-22 require the HIP runtime; they
-auto-skip if `ROCM_ROOT` is not found.
+All 17 always-built tests pass on RX 9070 XT (Vulkan SDK 1.4.357.0). The
+HIP-gated bridge tests (sparse, lapack, jit, hip_bar, hip_bridge_libraries)
+are only built with `-DVAIT_HIP=ON` and auto-skip if `ROCM_ROOT` is not found.
 
 ### Linux Toolchain
 
@@ -446,8 +470,6 @@ vkrand, vkfft), compiles each to SPIR-V, and regenerates the corresponding
 a `.comp` + regenerate — no manual build-list edits.
 
 ---
-
-## Architecture Decisions
 
 ## Architecture Decisions
 
@@ -652,13 +674,12 @@ open-standard projects:
   handles VkDeviceMemory allocation and is bundled under
   `third_party/vk_mem_alloc.h`.
 
-- **ROCm / AMD** — for hipBLAS (API naming reference), rocSPARSE, rocsolver, and
-  MIOpen. VAiSt bridges to these libraries for sparse GEMM (`vkblas_sparse_gemm_f32`)
-  and sparse triangular solve (`vkblas_sparse_spsv_f32`),
-  LAPACK factorizations (`vkblas_lu_f32`/`_inverse_f32`/`_determinant_f32`/`_qr_f32`/
-  `_cholesky_f32`/`_eigendecomp_f32`), and conv1d/2d/3d (`vkblas_conv{1d,2d,3d}_f32`)
-  via zero-copy VkBuffer↔HIP-device-pointer interop. `specs/rocm-reference/`
-  mirrors reference headers with attribution.
+- **ROCm / AMD** — for hipBLAS (API naming reference), rocSPARSE, and rocsolver.
+  VAiSt bridges to these libraries for sparse GEMM (`vkblas_sparse_gemm_f32`)
+  and sparse triangular solve (`vkblas_sparse_spsv_f32`), and LAPACK
+  factorizations (`vkblas_lu_f32`/`_inverse_f32`/`_determinant_f32`/`_qr_f32`/
+  `_cholesky_f32`/`_eigendecomp_f32`) via zero-copy VkBuffer↔HIP-device-pointer
+  interop. `specs/rocm-reference/` mirrors reference headers with attribution.
   (https://rocmd.docs.amd.com/)
 
 - **LunarG** — for the Vulkan SDK (1.4.357.0), glslangValidator, spirv-val,

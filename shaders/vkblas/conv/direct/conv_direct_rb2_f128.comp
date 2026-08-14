@@ -1,0 +1,125 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : enable
+#extension GL_EXT_shader_float64 : enable
+#extension GL_EXT_scalar_block_layout : enable
+
+layout(scalar, binding = 0) restrict readonly buffer BufX { float64_t x_data[]; };
+layout(scalar, binding = 1) restrict readonly buffer BufW { float64_t w_data[]; };
+layout(scalar, binding = 2) restrict writeonly buffer BufY { float64_t y_out[]; };
+
+layout(push_constant) uniform PC {
+    uint n, c, di, hi, wi;
+    uint k, dd, dh, dw;
+    uint kd, kh, kw;
+    uint pad_d, pad_h, pad_w;
+    uint stride_d, stride_h, stride_w;
+    uint dil_d, dil_h, dil_w;
+    float alpha, beta;
+} pc;
+
+/* Quad-precision (double-double) register-blocked direct conv.
+ * x/w are stored as f64; each product x*w is captured EXACTLY as a
+ * double-double pair (hi + lo) via fma splitting, and the running sum is
+ * accumulated with two-sum (Kahan-style compensated summation) extended to
+ * the lo limb. Result written as 2 consecutive f64 (hi, lo) per output.
+ *
+ * y_out layout: [hi(2*idx), lo(2*idx+1)].
+ * Workgroup 8x8x8 = 512 threads; RB=2 outputs per thread.
+ * (gx = ceil(spatial/RB / 512), gy = k/8, gz = n). */
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+#define RB 2
+
+/* Exact product a*b as double-double (hi, lo): hi = fl(a*b), lo = error. */
+void dd_mul(double a, double b, out double hi, out double lo) {
+    hi = a * b;
+    lo = fma(a, b, -hi);
+}
+
+/* TwoSum (Knuth): s = fl(a+b), e = rounding error of a+b. */
+void two_sum(double a, double b, out double s, out double e) {
+    s = a + b;
+    double bv = s - a;
+    e = (a - (s - bv)) + (b - bv);
+}
+
+/* Double-double add: (ah+al) + (bh+bl) = (rh+rl), compensated (Kahan-style). */
+void dd_add(double ah, double al, double bh, double bl, out double rh, out double rl) {
+    double s, e;
+    two_sum(ah, bh, s, e);
+    e += al + bl;
+    rh = s + e;
+    rl = e - (rh - s);
+}
+
+double fetch_input(uint n_, uint c, int d, int h, int w) {
+    if (d < 0 || d >= int(pc.di) || h < 0 || h >= int(pc.hi) || w < 0 || w >= int(pc.wi)) return 0.0;
+    return x_data[((n_ * pc.c + c) * pc.di + uint(d)) * pc.hi * pc.wi + uint(h) * pc.wi + uint(w)];
+}
+double fetch_weight(uint k_, uint c, uint d, uint h, uint w_) {
+    return w_data[((k_ * pc.c + c) * pc.kd + d) * pc.kh * pc.kw + h * pc.kw + w_];
+}
+void write_output(uint n_, uint ok, uint d, uint h, uint w_, double hi, double lo) {
+    uint o = ((n_ * pc.k + ok) * pc.dd + d) * pc.dh * pc.dw + h * pc.dw + w_;
+    y_out[2u * o] = hi;
+    y_out[2u * o + 1u] = lo;
+}
+
+void main() {
+    uint out_n = gl_WorkGroupID.z;
+    uint out_k = gl_WorkGroupID.y;
+    if (out_n >= pc.n || out_k >= pc.k) return;
+
+    uint spatial = pc.dd * pc.dh * pc.dw;
+    uint pairs = (spatial + RB - 1u) / RB;
+    uint pair_flat = gl_WorkGroupID.x * 512u + gl_LocalInvocationIndex;
+    if (pair_flat >= pairs) return;
+
+    uint base = pair_flat * RB;
+    uint p0 = base;
+    uint p1 = base + 1u;
+
+    uint od0 = p0 / (pc.dh * pc.dw);
+    uint oh0 = (p0 / pc.dw) % pc.dh;
+    uint ow0 = p0 % pc.dw;
+
+    uint od1, oh1, ow1;
+    if (p1 < spatial) {
+        od1 = p1 / (pc.dh * pc.dw);
+        oh1 = (p1 / pc.dw) % pc.dh;
+        ow1 = p1 % pc.dw;
+    }
+
+    /* quad accumulators (hi, lo) + Kahan compensation */
+    double sh0 = 0.0, sl0 = 0.0;
+    double sh1 = 0.0, sl1 = 0.0;
+
+    for (uint ic = 0; ic < pc.c; ic++) {
+        for (uint fd = 0; fd < pc.kd; fd++) {
+            int in_d0 = int(od0 * pc.stride_d + fd * pc.dil_d - pc.pad_d);
+            int in_d1 = int(od1 * pc.stride_d + fd * pc.dil_d - pc.pad_d);
+            for (uint fh = 0; fh < pc.kh; fh++) {
+                int in_h0 = int(oh0 * pc.stride_h + fh * pc.dil_h - pc.pad_h);
+                int in_h1 = int(oh1 * pc.stride_h + fh * pc.dil_h - pc.pad_h);
+                for (uint fw = 0; fw < pc.kw; fw++) {
+                    double wv = fetch_weight(out_k, ic, fd, fh, fw);
+                    int in_w0 = int(ow0 * pc.stride_w + fw * pc.dil_w - pc.pad_w);
+                    double xv0 = fetch_input(out_n, ic, in_d0, in_h0, in_w0);
+                    double ph, pl;
+                    dd_mul(xv0, wv, ph, pl);
+                    dd_add(sh0, sl0, ph, pl, sh0, sl0);
+                    if (p1 < spatial) {
+                        int in_w1 = int(ow1 * pc.stride_w + fw * pc.dil_w - pc.pad_w);
+                        double xv1 = fetch_input(out_n, ic, in_d1, in_h1, in_w1);
+                        dd_mul(xv1, wv, ph, pl);
+                        dd_add(sh1, sl1, ph, pl, sh1, sl1);
+                    }
+                }
+            }
+        }
+    }
+    double a = double(pc.alpha);
+    write_output(out_n, out_k, od0, oh0, ow0, a * sh0, a * sl0);
+    if (p1 < spatial)
+        write_output(out_n, out_k, od1, oh1, ow1, a * sh1, a * sl1);
+}

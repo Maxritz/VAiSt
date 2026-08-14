@@ -54,6 +54,30 @@
 #define VKBLAS_DTYPE_HERK_F32 53
 #define VKBLAS_DTYPE_HERK_F16 54
 
+/* ── Convolution kernel codes ────────────────────────────────────────── *
+ * Distinct from every GEMM/ext-op code. The conv shaders use a dedicated
+ * push-constant block (vkblas_conv_push_constants_t) and a 3-binding
+ * descriptor set (x, w, y). rb2 = register-blocked direct, RB=2 outputs
+ * per thread (the benchmark winner on RDNA2/RDNA4). */
+#define VKBLAS_DTYPE_CONV_RB2_F32 60
+#define VKBLAS_DTYPE_CONV_RB2_F16 61
+#define VKBLAS_DTYPE_CONV_RB2_BF16 62
+#define VKBLAS_DTYPE_CONV_RB2_F64 63
+
+/* ── Conv push constant block (must match conv shaders' PC struct, std140) ── */
+typedef struct {
+    uint32_t n, c, di, hi, wi;
+    uint32_t k, dd, dh, dw;
+    uint32_t kd, kh, kw;
+    uint32_t pad_d, pad_h, pad_w;
+    uint32_t stride_d, stride_h, stride_w;
+    uint32_t dil_d, dil_h, dil_w;
+    float    alpha, beta;
+} vkblas_conv_push_constants_t;
+
+/* Static assert: conv PC fits in 128 bytes (Vulkan min maxPushConstantsSize) */
+typedef char vkblas_conv_pc_static_assert[sizeof(vkblas_conv_push_constants_t) <= 128 ? 1 : -1];
+
 /* ── Push constant block (must match GLSL push_constant layout, std140) ── */
 
 typedef struct {
@@ -138,6 +162,9 @@ struct VkBLASContext {
     /* pipeline cache storage */
     vkblas_pipeline_entry_t pipelines[VKBLAS_MAX_PIPELINES];
     uint32_t pipeline_count;
+
+    /* convolution pipeline layout (conv push constants = 92 B > GEMM 84 B) */
+    VkPipelineLayout conv_pipeline_layout;
 };
 
 /* ── Internal functions ──────────────────────────────────────────── */
@@ -164,5 +191,18 @@ void vkblas_push_pc(VkCommandBuffer cmd, VkPipelineLayout layout,
 
 uint64_t vkblas_hash_key(uint32_t dt, uint32_t tA, uint32_t tB,
                          uint32_t strided, uint32_t tier);
+
+VkResult vkblas_conv_common(VkBLASContext* ctx,
+                            VkCommandBuffer cmd,
+                            uint32_t dtype,
+                            uint32_t n, uint32_t c,
+                            uint32_t di, uint32_t hi, uint32_t wi,
+                            uint32_t k, uint32_t dd, uint32_t dh, uint32_t dw,
+                            uint32_t kd, uint32_t kh, uint32_t kw,
+                            uint32_t pad_d, uint32_t pad_h, uint32_t pad_w,
+                            uint32_t stride_d, uint32_t stride_h, uint32_t stride_w,
+                            uint32_t dil_d, uint32_t dil_h, uint32_t dil_w,
+                            float alpha, VkBuffer x, VkBuffer w,
+                            float beta, VkBuffer y);
 
 #endif /* VKBLAS_INTERNAL_H */

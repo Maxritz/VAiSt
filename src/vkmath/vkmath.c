@@ -315,7 +315,7 @@ static VkResult vkmath_cmd_dispatch(VkMathContext *ctx, VkCommandBuffer cmd,
     if (ctx->push_desc_fn) {
         ctx->push_desc_fn(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                           ctx->pipeline_layout, 0,
-                          num_inputs >= 2 ? 3 : 2, writes);
+                          3, writes);
     } else {
         VkDescriptorSet ds;
         r = vkmath_alloc_descriptor_set(ctx, &ds);

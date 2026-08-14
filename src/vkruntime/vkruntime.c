@@ -152,7 +152,12 @@ static void vkr_query_features(VkPhysicalDevice pd, VkRuntimeCaps *caps)
 
     caps->has_shader_expect_assume = vk14.shaderExpectAssume;
 
-    caps->has_coop_matrix = coop.cooperativeMatrix;
+    /* Co-op matrix / WMMA path is stubbed: no cooperatice-matrix-tier SPIR-V
+       kernels are registered, and RDNA4's WMMA is broken (crashes drivers).
+       Force the subgroup/baseline fallback on all devices so the tier ladder
+       never advertises VKMATH_TIER_COOPMATRIX. Remove this line once a real
+       coopmatrix kernel + RDNA4 WMMA driver fix exist. */
+    caps->has_coop_matrix = VK_FALSE;
     caps->has_pipeline_binary = pbin.pipelineBinaries;
     caps->has_atomic_float =
         (af.shaderBufferFloat32Atomics && af.shaderBufferFloat32AtomicAdd) ? VK_TRUE : VK_FALSE;
@@ -815,8 +820,6 @@ VkResult vkr_create_device(VkPhysicalDevice pd, uint32_t queue_family,
     VkPhysicalDeviceVulkan12Features vk12_en;
     VkPhysicalDeviceVulkan13Features vk13_en;
     VkPhysicalDeviceVulkan14Features vk14_en;
-    VkPhysicalDeviceShaderFloat16Int8Features f16i8_en;
-    VkPhysicalDeviceShaderIntegerDotProductFeatures dot_en;
     VkPhysicalDevicePipelineBinaryFeaturesKHR pbin_en;
     VkPhysicalDeviceShaderAtomicFloatFeaturesEXT af_en;
     VkPhysicalDeviceShaderBfloat16FeaturesKHR bf16_en;
@@ -831,10 +834,7 @@ VkResult vkr_create_device(VkPhysicalDevice pd, uint32_t queue_family,
     vk13_en.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     memset(&vk14_en, 0, sizeof(vk14_en));
     vk14_en.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES;
-    memset(&f16i8_en, 0, sizeof(f16i8_en));
-    f16i8_en.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
-    memset(&dot_en, 0, sizeof(dot_en));
-    dot_en.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES;
+    vk14_en.pushDescriptor = (vkr_device_extension_supported(pd, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)) ? VK_TRUE : VK_FALSE;
     memset(&pbin_en, 0, sizeof(pbin_en));
     pbin_en.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_BINARY_FEATURES_KHR;
     memset(&af_en, 0, sizeof(af_en));
@@ -864,6 +864,7 @@ VkResult vkr_create_device(VkPhysicalDevice pd, uint32_t queue_family,
     vk12_en.shaderSubgroupExtendedTypes = vk12.shaderSubgroupExtendedTypes;
     vk12_en.timelineSemaphore = vk12.timelineSemaphore;
     vk12_en.vulkanMemoryModel = vk12.vulkanMemoryModel;
+    vk12_en.descriptorBindingPartiallyBound = VK_TRUE;
 
     vk13_en.subgroupSizeControl = vk13.subgroupSizeControl;
     vk13_en.computeFullSubgroups = vk13.computeFullSubgroups;
@@ -874,9 +875,6 @@ VkResult vkr_create_device(VkPhysicalDevice pd, uint32_t queue_family,
 
     vk14_en.shaderExpectAssume = vk14.shaderExpectAssume;
 
-    f16i8_en.shaderFloat16 = vk12.shaderFloat16;
-    f16i8_en.shaderInt8 = vk12.shaderInt8;
-    dot_en.shaderIntegerDotProduct = vk13.shaderIntegerDotProduct;
     pbin_en.pipelineBinaries = pbin.pipelineBinaries;
     af_en.shaderBufferFloat32Atomics = af.shaderBufferFloat32Atomics;
     af_en.shaderBufferFloat32AtomicAdd = af.shaderBufferFloat32AtomicAdd;
@@ -889,9 +887,7 @@ VkResult vkr_create_device(VkPhysicalDevice pd, uint32_t queue_family,
     vk11_en.pNext = &vk12_en;
     vk12_en.pNext = &vk13_en;
     vk13_en.pNext = &vk14_en;
-    vk14_en.pNext = &f16i8_en;
-    f16i8_en.pNext = &dot_en;
-    dot_en.pNext = &pbin_en;
+    vk14_en.pNext = &pbin_en;
     pbin_en.pNext = &af_en;
     af_en.pNext = &bf16_en;
     bf16_en.pNext = &coop_en;

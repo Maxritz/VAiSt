@@ -1301,18 +1301,14 @@ VkResult vkblas_eigendecomp_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
  * ========================================================================== */
 
 /**
- * \brief VJITC-bridge 3D convolution: y = conv3d(x, w, padding, stride, dilation)
+ * \brief Native Vulkan 3D convolution: y = alpha * conv3d(x, w) + beta * y
  *
- * Calls MIOpen's miopenConvolutionForward with 5D tensor descriptors (NCDHW).
- * The input (x), weights (w), and output (y) are HIP device pointers that
- * must be allocated via hipMalloc and exported to Vulkan via
- * VK_EXT_external_memory_host (see vkstream.h for the import path).
+ * Dispatches the register-blocked direct kernel (RB=2, one workgroup per
+ * (n, k), 512-thread workgroups). x, w, y are VkBuffer handles (f32, NCDHW /
+ * KCDHW / NKDHW layouts). Records a compute dispatch into cmd; the caller
+ * owns all synchronization.
  *
- * This function bridges into MIOpen — no Vulkan shader dispatch occurs.
- * The caller's VkCommandBuffer is unused (the HIP call executes on the
- * default stream).
- *
- * \param ctx    Valid VkBLASContext (for capability detection).
+ * \param ctx    Valid VkBLASContext.
  * \param n      Batch size.
  * \param c      Input channels.
  * \param di     Input depth.
@@ -1335,11 +1331,11 @@ VkResult vkblas_eigendecomp_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
  * \param dil_h  Dilation height.
  * \param dil_w  Dilation width.
  * \param alpha  Input scale (host scalar).
- * \param x      Input tensor (NCDHW, f32, device pointer).
- * \param w      Weight tensor (KCDHW, f32, device pointer).
- * \param beta   Output scale (host scalar).
- * \param y      Output tensor (NKDHW, f32, device pointer).
- * \param cmd    VkCommandBuffer (unused for bridge calls).
+ * \param x      Input tensor (NCDHW, f32, VkBuffer).
+ * \param w      Weight tensor (KCDHW, f32, VkBuffer).
+ * \param beta   Output scale (host scalar; accumulation into y not yet fused).
+ * \param y      Output tensor (NKDHW, f32, VkBuffer).
+ * \param cmd    VkCommandBuffer to record the dispatch into.
  * \retval VK_SUCCESS on success.
  */
 VkResult vkblas_conv3d_f32(
@@ -1350,13 +1346,13 @@ VkResult vkblas_conv3d_f32(
     uint32_t pad_d, uint32_t pad_h, uint32_t pad_w,
     uint32_t stride_d, uint32_t stride_h, uint32_t stride_w,
     uint32_t dil_d, uint32_t dil_h, uint32_t dil_w,
-    float alpha, void* x, void* w, float beta, void* y,
+    float alpha, VkBuffer x, VkBuffer w, float beta, VkBuffer y,
     VkCommandBuffer cmd);
 
 /**
- * \brief VJITC-bridge 1D convolution: y = conv1d(x, w, padding, stride, dilation)
+ * \brief Native Vulkan 1D convolution: y = alpha * conv1d(x, w) + beta * y
  *
- * Spatial dim = 1, tensor format NCL (batch, channels, length).
+ * Spatial dim = 1, tensor format NCL.
  * x: (n, c, li)  w: (k, c, kl)  y: (n, k, lo)
  */
 VkResult vkblas_conv1d_f32(
@@ -1365,11 +1361,11 @@ VkResult vkblas_conv1d_f32(
     uint32_t k, uint32_t lo,
     uint32_t kl,
     uint32_t pad_l, uint32_t stride_l, uint32_t dil_l,
-    float alpha, void* x, void* w, float beta, void* y,
+    float alpha, VkBuffer x, VkBuffer w, float beta, VkBuffer y,
     VkCommandBuffer cmd);
 
 /**
- * \brief VJITC-bridge 2D convolution: y = conv2d(x, w, padding, stride, dilation)
+ * \brief Native Vulkan 2D convolution: y = alpha * conv2d(x, w) + beta * y
  *
  * Spatial dim = 2, tensor format NCHW.
  * x: (n, c, hi, wi)  w: (k, c, kh, kw)  y: (n, k, dh, dw)
@@ -1382,7 +1378,7 @@ VkResult vkblas_conv2d_f32(
     uint32_t pad_h, uint32_t pad_w,
     uint32_t stride_h, uint32_t stride_w,
     uint32_t dil_h, uint32_t dil_w,
-    float alpha, void* x, void* w, float beta, void* y,
+    float alpha, VkBuffer x, VkBuffer w, float beta, VkBuffer y,
     VkCommandBuffer cmd);
 
 /**

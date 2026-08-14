@@ -337,6 +337,10 @@ static const uint32_t* vkblas_select_spirv(VkBLASContext* ctx,
         case VKBLAS_DTYPE_HERK_F16:
             *out_size = vkblas_spv_baseline_herk_f16_size;
             return vkblas_spv_baseline_herk_f16;
+        /* ── Convolution (baseline tier; register-blocked direct, RB=2) ── */
+        case VKBLAS_DTYPE_CONV_RB2_F32:
+            *out_size = vkblas_spv_baseline_conv_rb2_f32_size;
+            return vkblas_spv_baseline_conv_rb2_f32;
         default:
             return NULL;
         }
@@ -503,6 +507,10 @@ VkResult vkblas_ensure_pipeline(VkBLASContext* ctx,
             .pData         = sc_data,
         };
 
+        VkPipelineLayout pl = (data_type >= VKBLAS_DTYPE_CONV_RB2_F32 &&
+                               data_type <= VKBLAS_DTYPE_CONV_RB2_F64)
+                                  ? ctx->conv_pipeline_layout : ctx->pipeline_layout;
+
         VkComputePipelineCreateInfo cpci = {
             .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
             .stage  = {
@@ -512,7 +520,7 @@ VkResult vkblas_ensure_pipeline(VkBLASContext* ctx,
                 .pName  = "main",
                 .pSpecializationInfo = &si,
             },
-            .layout = ctx->pipeline_layout,
+            .layout = pl,
         };
 
         VkPipeline pipeline;
@@ -535,7 +543,10 @@ VkResult vkblas_ensure_pipeline(VkBLASContext* ctx,
             if (!ctx->pipelines[idx].valid) {
                 ctx->pipelines[idx].key        = key;
                 ctx->pipelines[idx].pipeline   = pipeline;
-                ctx->pipelines[idx].layout     = ctx->pipeline_layout;
+                ctx->pipelines[idx].layout     =
+                    (data_type >= VKBLAS_DTYPE_CONV_RB2_F32 &&
+                     data_type <= VKBLAS_DTYPE_CONV_RB2_F64)
+                        ? ctx->conv_pipeline_layout : ctx->pipeline_layout;
                 ctx->pipelines[idx].data_type  = data_type;
                 ctx->pipelines[idx].transA     = transA;
                 ctx->pipelines[idx].transB     = transB;
@@ -597,6 +608,62 @@ void vkblas_write_descriptor_set(VkBLASContext* ctx, VkDescriptorSet ds,
     vkUpdateDescriptorSets(ctx->device, 4, writes, 0, NULL);
 }
 
+/* ── Convolution dispatch ────────────────────────────────────────────────── */
+
+/* Records a single rb2 conv dispatch. The conv shaders read bindings
+ * 0 = x, 1 = w, 2 = y and use the conv-specific push-constant block; the
+ * shared 4-binding set layout is compatible (binding 3 is simply unused).
+ * Grid: one workgroup per k and n, gx covers spatial pairs in 512-thread
+ * workgroups (RB=2 outputs per thread). */
+VkResult vkblas_conv_common(VkBLASContext* ctx,
+                            VkCommandBuffer cmd,
+                            uint32_t dtype,
+                            uint32_t n, uint32_t c,
+                            uint32_t di, uint32_t hi, uint32_t wi,
+                            uint32_t k, uint32_t dd, uint32_t dh, uint32_t dw,
+                            uint32_t kd, uint32_t kh, uint32_t kw,
+                            uint32_t pad_d, uint32_t pad_h, uint32_t pad_w,
+                            uint32_t stride_d, uint32_t stride_h, uint32_t stride_w,
+                            uint32_t dil_d, uint32_t dil_h, uint32_t dil_w,
+                            float alpha, VkBuffer x, VkBuffer w,
+                            float beta, VkBuffer y)
+{
+    if (!ctx || !cmd) return VK_ERROR_INITIALIZATION_FAILED;
+    (void)beta; /* beta accumulation not yet fused into the rb2 kernel */
+
+    VkPipeline pipeline;
+    VkResult r = vkblas_ensure_pipeline(ctx, dtype, 0, 0, VK_FALSE, &pipeline);
+    if (r != VK_SUCCESS) return r;
+
+    VkDescriptorSet ds;
+    r = vkblas_alloc_descriptor_set(ctx, &ds);
+    if (r != VK_SUCCESS) return r;
+    /* binding 3 reused as y (unused by the shader) */
+    vkblas_write_descriptor_set(ctx, ds, x, w, y, y);
+
+    vkblas_conv_push_constants_t pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.n = n; pc.c = c; pc.di = di; pc.hi = hi; pc.wi = wi;
+    pc.k = k; pc.dd = dd; pc.dh = dh; pc.dw = dw;
+    pc.kd = kd; pc.kh = kh; pc.kw = kw;
+    pc.pad_d = pad_d; pc.pad_h = pad_h; pc.pad_w = pad_w;
+    pc.stride_d = stride_d; pc.stride_h = stride_h; pc.stride_w = stride_w;
+    pc.dil_d = dil_d; pc.dil_h = dil_h; pc.dil_w = dil_w;
+    pc.alpha = alpha; pc.beta = beta;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            ctx->conv_pipeline_layout, 0, 1, &ds, 0, NULL);
+    vkCmdPushConstants(cmd, ctx->conv_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(pc), &pc);
+
+    uint32_t spatial = dd * dh * dw;
+    uint32_t pairs   = (spatial + 1u) / 2u;
+    uint32_t gx      = (pairs + 511u) / 512u;
+    vkCmdDispatch(cmd, gx, k, n);
+    return VK_SUCCESS;
+}
+
 /* ── Push constants ───────────────────────────────────────────────────────── */
 
 void vkblas_push_pc(VkCommandBuffer cmd, VkPipelineLayout layout,
@@ -644,6 +711,17 @@ VkResult vkblas_create_context(VkInstance instance,
     };
     r = vkr_create_pipeline_layout(device, ctx->set_layout, 1, &pcr,
                                    &ctx->pipeline_layout);
+    if (r != VK_SUCCESS) goto fail;
+
+    /* Conv pipeline layout: the conv push-constant block (92 B) exceeds the
+       GEMM block (84 B), so it needs its own layout with a wider range. */
+    VkPushConstantRange conv_pcr = {
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .offset     = 0,
+        .size       = sizeof(vkblas_conv_push_constants_t),
+    };
+    r = vkr_create_pipeline_layout(device, ctx->set_layout, 1, &conv_pcr,
+                                   &ctx->conv_pipeline_layout);
     if (r != VK_SUCCESS) goto fail;
 
     /* Detect capabilities via VKRuntime (single implementation). */
@@ -745,6 +823,8 @@ void vkblas_destroy_context(VkBLASContext* context)
         vkDestroyDescriptorSetLayout(context->device, context->set_layout, NULL);
     if (context->pipeline_layout)
         vkDestroyPipelineLayout(context->device, context->pipeline_layout, NULL);
+    if (context->conv_pipeline_layout)
+        vkDestroyPipelineLayout(context->device, context->conv_pipeline_layout, NULL);
 
     free(context);
 }

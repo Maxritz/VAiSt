@@ -33,10 +33,13 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     set(VAIT_WARN_FLAGS -Wall -Wextra)
 endif()
 
-# ── HIP C++ compiler override ────────────────────────────────────────────────
-# HIP-touching TU's (vkblas_sparse/lapack/jit/conv*) include C++ HIP headers and
-# must be compiled with C++ mode. On Windows, MSVC cl.exe in C mode cannot parse
-# them; use ROCm's clang++ (set CMAKE_CXX_COMPILER to the ROCm clang++ path).
+# ── HIP / VJITC bridge ────────────────────────────────────────────────────────
+# HIP-touching TU's (vkblas_sparse/lapack/jit/conv*) include HIP headers and
+# require a C++ compiler + ROCm libraries. When VAIT_HIP=OFF, those TU's are
+# replaced by stubs (src/vkblas/vkblas_stub.c) that return
+# VK_ERROR_FEATURE_NOT_PRESENT, and no ROCm toolchain is required.
+option(VAIT_HIP "Enable HIP/VJITC bridge (sparse, LAPACK, conv, JIT)" OFF)
+# HIP-touching TU's compile as C++ when VAIT_HIP is ON.
 option(VAIT_FORCE_CLANGCXX "Force all CXX sources through clang++ (HIP workaround)" OFF)
 if(VAIT_FORCE_CLANGCXX AND CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
     message(FATAL_ERROR "VAIT_FORCE_CLANGCXX requires CMAKE_CXX_COMPILER to be clang++ (ROCm toolchain)")
@@ -85,42 +88,53 @@ target_compile_options(vkmath PRIVATE ${VAIT_WARN_FLAGS})
 # ROCm clang++ driver (see -DCMAKE_CXX_COMPILER=... in README). vkblas.c itself
 # stays pure C / MSVC. The resulting COFF objects link together under the MSVC
 # linker because ROCm clang++ on Windows targets the MSVC ABI.
+if(VAIT_HIP)
+    set(VKBLAS_HIP_SOURCES
+        src/vkblas/vkblas_sparse.c
+        src/vkblas/vkblas_lapack.c
+        src/vkblas/vkblas_conv3d.c
+        src/vkblas/vkblas_conv12d.c
+        src/vkblas/vkblas_jit.c
+    )
+    set_source_files_properties(${VKBLAS_HIP_SOURCES}
+        PROPERTIES LANGUAGE CXX)
+    set(VKBLAS_ROCM_INC ${ROCM_INC_DIR})
+    set(VKBLAS_ROCM_LIBS
+        ${ROCM_LIB_DIR}/amdhip64.lib
+        ${ROCM_LIB_DIR}/hipsparse.lib
+        ${ROCM_LIB_DIR}/rocblas.lib
+        ${ROCM_LIB_DIR}/rocsolver.lib
+        ${ROCM_LIB_DIR}/MIOpen.lib)
+else()
+    set(VKBLAS_HIP_SOURCES "")
+    set(VKBLAS_ROCM_INC "")
+    set(VKBLAS_ROCM_LIBS "")
+endif()
+
 add_library(vkblas STATIC
     src/vkblas/vkblas.c
-    src/vkblas/vkblas_sparse.c
-    src/vkblas/vkblas_lapack.c
     src/vkblas/vkblas_conv3d.c
     src/vkblas/vkblas_conv12d.c
-    src/vkblas/vkblas_jit.c
+    ${VKBLAS_HIP_SOURCES}
 )
-set_source_files_properties(
-    src/vkblas/vkblas_sparse.c
-    src/vkblas/vkblas_lapack.c
-    src/vkblas/vkblas_conv3d.c
-    src/vkblas/vkblas_conv12d.c
-    src/vkblas/vkblas_jit.c
-    PROPERTIES LANGUAGE CXX)
 target_include_directories(vkblas PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/include/vkblas
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vkblas
     ${CMAKE_CURRENT_SOURCE_DIR}/include/vkruntime
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vkruntime
-    ${ROCM_INC_DIR}
+    ${VKBLAS_ROCM_INC}
 )
 # VAIT_JIT: enable hipRTC + shaderc runtime compilation (off by default)
 option(VAIT_JIT "Enable JIT compilation via hipRTC and shaderc" OFF)
 if(VAIT_JIT)
+    if(NOT VAIT_HIP)
+        message(FATAL_ERROR "VAIT_JIT requires VAIT_HIP=ON")
+    endif()
     target_compile_definitions(vkblas PUBLIC VAIT_JIT)
-    target_link_libraries(vkblas PUBLIC
-        ${ROCM_LIB_DIR}/hiprtc.lib)
+    list(APPEND VKBLAS_ROCM_LIBS ${ROCM_LIB_DIR}/hiprtc.lib)
 endif()
-target_link_libraries(vkblas PUBLIC Vulkan::Vulkan vkruntime
-    ${ROCM_LIB_DIR}/amdhip64.lib
-    ${ROCM_LIB_DIR}/hipsparse.lib
-    ${ROCM_LIB_DIR}/rocblas.lib
-    ${ROCM_LIB_DIR}/rocsolver.lib
-    ${ROCM_LIB_DIR}/MIOpen.lib)
+target_link_libraries(vkblas PUBLIC Vulkan::Vulkan vkruntime ${VKBLAS_ROCM_LIBS})
 target_compile_options(vkblas PRIVATE ${VAIT_WARN_FLAGS})
 
 # ── Test harnesses ──────────────────────────────────────────────────────────
@@ -185,6 +199,7 @@ if(BUILD_TESTING)
     add_test(NAME test_vkblas COMMAND test_vkblas)
 
 # Sparse GEMM VJITC bridge test (requires HIP runtime — C++ compile for HIP headers)
+    if(VAIT_HIP)
     add_executable(test_vkblas_sparse tests/test_vkblas_sparse.c)
     set_source_files_properties(tests/test_vkblas_sparse.c PROPERTIES LANGUAGE CXX)
     set_target_properties(test_vkblas_sparse PROPERTIES CXX_STANDARD 20)
@@ -198,24 +213,6 @@ if(BUILD_TESTING)
         ${ROCM_LIB_DIR}/amdhip64.lib
     )
     add_test(NAME test_vkblas_sparse COMMAND test_vkblas_sparse)
-
-    # Conv3d VJITC bridge test (requires MIOpen — C++ compile for HIP headers)
-    add_executable(test_vkblas_conv3d tests/test_vkblas_conv3d.c)
-    set_source_files_properties(tests/test_vkblas_conv3d.c PROPERTIES LANGUAGE CXX)
-    set_target_properties(test_vkblas_conv3d PROPERTIES CXX_STANDARD 20)
-    target_include_directories(test_vkblas_conv3d PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkblas
-        ${ROCM_INC_DIR}
-    )
-    target_link_libraries(test_vkblas_conv3d PRIVATE
-        vkblas vkruntime Vulkan::Vulkan
-        ${ROCM_LIB_DIR}/amdhip64.lib
-    )
-    add_test(NAME test_vkblas_conv3d COMMAND test_vkblas_conv3d)
-    set_tests_properties(test_vkblas_conv3d PROPERTIES
-        ENVIRONMENT "PATH=${ROCM_BIN_DIR}\\;C:/VulkanSDK/1.4.357.0/Bin"
-    )
 
     # JIT compilation test (requires hipRTC + shaderc — C++ compile for HIP headers)
     add_executable(test_vkblas_jit tests/test_vkblas_jit.c)
@@ -276,6 +273,24 @@ if(BUILD_TESTING)
     set_tests_properties(test_vkblas_conv12d PROPERTIES
         ENVIRONMENT "PATH=${ROCM_BIN_DIR}\\;C:/VulkanSDK/1.4.357.0/Bin"
     )
+    endif() # VAIT_HIP tests
+
+    # ── Native Vulkan convolution tests (always built, no HIP) ─────────────
+    add_executable(test_vkblas_conv3d tests/test_vkblas_conv3d.c)
+    target_include_directories(test_vkblas_conv3d PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkblas
+    )
+    target_link_libraries(test_vkblas_conv3d PRIVATE vkblas vkruntime Vulkan::Vulkan)
+    add_test(NAME test_vkblas_conv3d COMMAND test_vkblas_conv3d)
+
+    add_executable(test_vkblas_conv12d tests/test_vkblas_conv12d.c)
+    target_include_directories(test_vkblas_conv12d PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/vkblas
+    )
+    target_link_libraries(test_vkblas_conv12d PRIVATE vkblas vkruntime Vulkan::Vulkan)
+    add_test(NAME test_vkblas_conv12d COMMAND test_vkblas_conv12d)
 
 # ── VKQuant library ──────────────────────────────────────────────────
     add_library(vkquant STATIC src/vkquant/vkquant.c)
@@ -429,7 +444,7 @@ if(BUILD_TESTING)
     add_test(NAME test_vkstream COMMAND test_vkstream)
 
     # HIP-Vulkan bridge test (requires HIP runtime)
-    if(EXISTS "${ROCM_INC_DIR}/hip/hip_runtime.h")
+    if(VAIT_HIP AND EXISTS "${ROCM_INC_DIR}/hip/hip_runtime.h")
         add_executable(test_hip_bar tests/test_hip_bar.c)
         set_source_files_properties(tests/test_hip_bar.c PROPERTIES LANGUAGE CXX)
         target_include_directories(test_hip_bar PRIVATE

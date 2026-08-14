@@ -1,0 +1,61 @@
+#version 450
+#extension GL_EXT_scalar_block_layout : enable
+
+layout(scalar, binding = 0) restrict readonly buffer BufX { float x_data[]; };
+layout(scalar, binding = 1) restrict readonly buffer BufW { float w_data[]; };
+layout(scalar, binding = 2) restrict writeonly buffer BufY { float y_out[]; };
+
+layout(push_constant) uniform PC {
+    uint n, c, di, hi, wi;
+    uint k, dd, dh, dw;
+    uint kd, kh, kw;
+    uint pad_d, pad_h, pad_w;
+    uint stride_d, stride_h, stride_w;
+    uint dil_d, dil_h, dil_w;
+    float alpha, beta;
+} pc;
+
+/* Conv direct tier (f32): one thread per output element, full coverage.
+ * Workgroup 8x8x8 = 512 threads = one spatial tile; workgroup
+ * (gx = spatial tile, gy = k tile, gz = n).  flat_idx = gx*512 + thread. */
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+float fetch_input(uint n_, uint c, int d, int h, int w) {
+    if (d < 0 || d >= int(pc.di) || h < 0 || h >= int(pc.hi) || w < 0 || w >= int(pc.wi)) return 0.0;
+    return x_data[((n_ * pc.c + c) * pc.di + uint(d)) * pc.hi * pc.wi + uint(h) * pc.wi + uint(w)];
+}
+float fetch_weight(uint k_, uint c, uint d, uint h, uint w_) {
+    return w_data[((k_ * pc.c + c) * pc.kd + d) * pc.kh * pc.kw + h * pc.kw + w_];
+}
+void write_output(uint n_, uint ok, uint d, uint h, uint w_, float val) {
+    y_out[((n_ * pc.k + ok) * pc.dd + d) * pc.dh * pc.dw + h * pc.dw + w_] = val;
+}
+
+void main() {
+    uint out_n = gl_WorkGroupID.z;
+    uint out_k = gl_WorkGroupID.y;
+    if (out_n >= pc.n || out_k >= pc.k) return;
+
+    uint spatial = pc.dd * pc.dh * pc.dw;
+    uint flat_idx = gl_WorkGroupID.x * 512u + gl_LocalInvocationIndex;
+    if (flat_idx >= spatial) return;
+    uint od = flat_idx / (pc.dh * pc.dw);
+    uint oh = (flat_idx / pc.dw) % pc.dh;
+    uint ow = flat_idx % pc.dw;
+
+    float sum = 0.0;
+    for (uint ic = 0; ic < pc.c; ic++) {
+        for (uint fd = 0; fd < pc.kd; fd++) {
+            int in_d = int(od * pc.stride_d + fd * pc.dil_d - pc.pad_d);
+            for (uint fh = 0; fh < pc.kh; fh++) {
+                int in_h = int(oh * pc.stride_h + fh * pc.dil_h - pc.pad_h);
+                for (uint fw = 0; fw < pc.kw; fw++) {
+                    int in_w = int(ow * pc.stride_w + fw * pc.dil_w - pc.pad_w);
+                    sum += fetch_input(out_n, ic, in_d, in_h, in_w) *
+                           fetch_weight(out_k, ic, fd, fh, fw);
+                }
+            }
+        }
+    }
+    write_output(out_n, out_k, od, oh, ow, pc.alpha * sum);
+}

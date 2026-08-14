@@ -56,6 +56,8 @@ Last gate run status (authoritative, from `ctest -C Release` summary):
 | `test_vkmodel`     | PASS   | GGUF, safetensors, OpenVINO IR load + upload round-trip |
 | `test_vkruntime`   | PASS   | device creation, pooled allocator, upload/download, `vkr_create_device` |
 | `test_vkblas_l1l2` | PASS   | dot/nrm2/asum/amax/gemv/axpy/scal f32/f16 |
+| `test_vkblas_conv3d` | PASS | native Vulkan 3D conv (rb2 register-blocked), no HIP |
+| `test_vkblas_conv12d` | PASS | native Vulkan conv1d/conv2d (rb2), no HIP |
 
 #### Kernel / format coverage (source-of-truth from headers + `shaders_spv.h` blob count)
 
