@@ -1,11 +1,11 @@
 <img width="1255" height="539" alt="VAiSt1" src="https://github.com/user-attachments/assets/d4ac1269-0679-409f-b6c1-7aad39aa5959" />
 
-A Vulkan compute AI stack, built from scratch, implementing BLAS, FFT, RNG and 
-math primitives for AMD RDNA2 (gfx103x) and RDNA4 (gfx1201) GPUs, and really 
-any GPU that speaks Vulkan 1.4.
+A Vulkan compute AI stack, built from scratch, implementing BLAS, FFT, RNG, math
+primitives, quantization, and attention for AMD RDNA2 (gfx103x) and RDNA4
+(gfx1201) GPUs, and really any GPU that speaks Vulkan 1.4.
 
 No CUDA. Just Vulkan compute shaders, C99 headers, and Vulkan-native handles.
-Everything — BLAS, FFT, RNG, math, quant, model I/O, and convolution — is a
+Everything — BLAS, FFT, RNG, math, quant, model I/O, and attention — is a
 native Vulkan compute dispatch. No ROCm / HIP / CUDA runtime dependency,
 anywhere. Public API names mirror the ROCm surface for mechanical porting,
 but every handle is a Vulkan object.
@@ -15,16 +15,16 @@ but every handle is a Vulkan object.
 ## Why This Exists
 
 For years, doing serious GPU-accelerated AI on AMD hardware meant going through
-ROCm, and that meant Linux. That's shifted a bit: AMD shipped ROCm 7.2 in 
-January 2026 with, for the first time, a genuinely unified Windows and Linux 
-release, and the RX 9070 XT (gfx1201) is now officially on AMD's supported 
+ROCm, and that meant Linux. That's shifted a bit: AMD shipped ROCm 7.2 in
+January 2026 with, for the first time, a genuinely unified Windows and Linux
+release, and the RX 9070 XT (gfx1201) is now officially on AMD's supported
 Windows list, with native PyTorch and llama.cpp builds to go with it.
 
 Still, the HIP SDK for Windows itself, the actual toolchain you'd build a project
-like this against, ships without MIOpen, MIGraphX, communication libraries, or 
-CMake HIP language support, and lists "AI Frameworks: Not available" against itself 
+like this against, ships without MIOpen, MIGraphX, communication libraries, or
+CMake HIP language support, and lists "AI Frameworks: Not available" against itself
 in AMD's own docs as of this writing. The PyTorch path AMD showed off runs through
-a separate consumer distribution, not through the general HIP SDK. So Windows ROCm 
+a separate consumer distribution, not through the general HIP SDK. So Windows ROCm
 development is real now, in a way it wasn't a year ago, but it's still a narrower
 stack than what Linux gets, and HIP-on-Windows still has its own rough edges once
 you're outside AMD's specific supported paths.
@@ -44,15 +44,16 @@ VAiSt fixes this by starting from first principles:
   one shader. FFN gate+up is fused. This cuts memory traffic by 40-60% per layer.
 
 - **Three shader tiers.** A portable baseline (Vulkan 1.0 core), a subgroup
-  tier (VK_KHR_shader_subgroup), and a cooperative-matrix tier
-  (VK_KHR_cooperative_matrix). The runtime picks the best tier your GPU
+  tier (`VK_KHR_shader_subgroup`), and a cooperative-matrix tier
+  (`VK_KHR_cooperative_matrix`). The runtime picks the best tier your GPU
   supports and falls back gracefully.
 
-- **Shared shader sources.** ~191 GLSL compute shader sources compile into
-  SPIR-V binaries via compile-time specialization (sources distributed across
-  vkblas/vkmath/vkquant/vkrand/vkfft/vkblas_l1l2; per-lib counts vary),
-  compiling to 191 SPIR-V blobs. Specialization varies tile/wave at
-  pipeline-creation time, not by pre-compiled variants.
+- **Shared shader sources.** 14 of the shader sources in `shaders/` compile to
+  SPIR-V at build time via `glslangValidator` (when the Vulkan SDK is present),
+  producing 16 SPIR-V blobs total (13 compiled sources + 3 pre-existing blobs
+  with no `.comp` source). These are folded into a generated C header
+  (`vaist_blas_spv.h`) consumed by `vaist_blas.c` and `vaist_attn.c` under the
+  `VAIST_HAVE_VK_HDR` flag, keeping the libraries self-contained.
 
 ---
 
@@ -61,7 +62,9 @@ VAiSt fixes this by starting from first principles:
 ```
 VAiSt
 ├── include/
-│   ├── vaist/              VAiSt public headers (runtime, blas, linalg, ...)
+│   ├── vaist/              VAiSt public headers (17 files: umbrella vaist.h
+│   │   │                  + 12 component headers + vaist_attn.h, vaist_blas.h,
+│   │   │                  vaist_linalg.h, vaist_quant_tables.h)
 │   ├── vkblas/           BLAS API (hipBLAS-compatible naming)
 │   ├── vkfft/            FFT API (rocFFT-compatible naming)
 │   ├── vkrand/           RNG + sampling API (rocrand-compatible naming)
@@ -73,14 +76,17 @@ VAiSt
 │   └── vkdist/           Distributed compute over TCP
 ├── src/                  C99 runtime + Vulkan dispatch
 ├── vulkan/{linux,windows}/{c99,c++,python}/
-│   └── {ai,blas,compute,core,distributed,engine,graph,linalg,llm,
-│       model,nn,quant,runtime,tensor}/   VAiSt c99/c++/python layer
+│   └── {ai,attn,blas,compute,core,distributed,engine,graph,linalg,llm,
+│       model,nn,quant,runtime,tensor}/   15-component VAiSt c99/c++/python layer
 ├── shaders/
-│   ├── vkblas/           GEMM, qgemm, conv (rb2), L1/L2 BLAS (baseline + subgroup tiers)
+│   ├── vkattn/           Attention (flash-decode, future MHA/MLA variants)
+│   ├── vkblas/           GEMM, qgemm, moe_route, conv (rb2) baseline tier
+│   ├── vkblas_l1l2/      L1/L2 BLAS vector/matrix ops
 │   ├── vkmath/           Elementwise, reductions, activations, casts
 │   ├── vkquant/          Dequant + forward-quantize shaders
 │   ├── vkrand/           PRNG + distribution sampling
 │   ├── vkfft/            Radix-2 FFT
+│   ├── vkkv/             KV cache ridge transfer
 │   ├── compile_shaders.ps1   Compiles .comp → SPIR-V → C header arrays
 │   └── (per-lib tiers)   baseline/ (Vulkan 1.0 core), subgroup/ (VK_KHR_shader_subgroup),
 │                         coopmatrix/ (VK_KHR_cooperative_matrix)
@@ -88,318 +94,15 @@ VAiSt
 ├── specs/                Design docs, ISA reference, architecture notes
 │   ├── Common_Issues.md        GPU hang / device-lost / fence issues (catalog)
 │   └── (per-subsystem specs)
-├── tests/                19 test harnesses (12 vk-library tests + 7 runtime/CTest) (build + run green on RX 9070 XT)
+├── tests/                22 CTest targets (15 vaist_cpp_*_test + 7 standalone/Python)
+│                         17 pass on this machine; 3 SEGFAULT + 2 Python-load
+│                         failures are pre-existing environment issues (no GPU)
 ├── docs/                 Vulkan ↔ Torch migration guide
 ├── build/                Default build (no Vulkan SDK)
 └── build-vk-on/          VAIST_ENABLE_VULKAN=ON (sandbox SDK 1.4.357)
 ```
 
-### VKBLAS (implemented)
-
-Mirrors the hipBLAS/rocBLAS GEMM family. Pipeline selection happens
-automatically based on GPU capabilities:
-
-| Function | Precision | Description |
-|----------|-----------|-------------|
-| `vkblas_sgemm` | f32 | Single GEMM |
-| `vkblas_hgemm` | f16 (f32 accumulate) | Single GEMM |
-| `vkblas_dgemm` | f64 | Single GEMM |
-| `vkblas_bgemm` | bf16 (f32 accumulate) | Single GEMM |
-| `vkblas_s/h/d/bgemm_strided_batched` | f32/f16/f64/bf16 | Strided batched GEMM |
-| `vkblas_gemm_ex` | f16/f32/bf16 | Mixed-precision with compute-type control |
-| `vkblas_sgemm_batched` | f32 | Per-buffer batched GEMM |
-
-All plain GEMM precisions dispatch a shared-memory tiled baseline plus a
-**subgroup twin** (32×8 warp tile, `subgroupShuffle` x-broadcast, no shared
-memory) where `VK_KHR_shader_subgroup` is available. A cooperative-matrix tier
-exists for f32/f16/bf16/f64 but is dormant by default (see note below).
-
-**Fused quantized GEMM (qgemm)** — dequant + MAC fused in one shader, the
-decode hot path. All seven ggml weight formats dispatch a 16×16 baseline and a
-**32×8 subgroup tier** (one 32-lane subgroup per block, `subgroupShuffle`
-x-broadcast, no shared memory / barriers); the subgroup tier is the default on
-subgroup-capable devices. `vkblas_qgemm_get_tier` reports which tier resolved
-per format. A `_f16` twin per format stores the f32 accumulator as `float16_t`
-in y/z (f16 output storage).
-
-| Function | Description |
-|----------|-------------|
-| `vkblas_qgemm_q8_0_f32` / `_f16` | Fused GEMM with Q8_0 weights |
-| `vkblas_qgemm_q4_0_f32` / `_f16` | Fused GEMM with Q4_0 weights |
-| `vkblas_qgemm_q4k_f32` / `_f16` | Fused GEMM with Q4_K weights |
-| `vkblas_qgemm_q5k_f32` / `_f16` | Fused GEMM with Q5_K weights |
-| `vkblas_qgemm_q6k_f32` / `_f16` | Fused GEMM with Q6_K weights |
-| `vkblas_qgemm_q3k_f32` / `_f16` | Fused GEMM with Q3_K weights |
-| `vkblas_qgemm_iq4xs_f32` / `_f16` | Fused GEMM with IQ4_XS weights |
-| `vkblas_qgemm_get_tier` | Query resolved tier (BASELINE/SUBGROUP/COOPMATRIX) per format |
-
-**Cooperative Matrix GEMM** — the `GL_KHR_cooperative_matrix` 
-`coopMatLoad`/`coopMatMulAdd`/`coopMatStore` path is compiled into valid
-SPIR-V but dormant by default. Enable with `VAIT_COOPMATRIX=1` on a newer
-driver (RDNA4, RX 9070 XT). It bypasses shared-memory staging entirely and
-dramatically accelerates GEMM on RDNA.
-
-> **Why it's dormant**: the AMD LLPC driver (26.7.1, `driverVersion 2.0.395`)
-> hard-crashes in `vkCreateComputePipelines` (`0xE06D7363`) when compiling any
-> module containing `coopMatMulAddKHR`. This is a driver/LLPC bug, not a code
-> bug. The Vulkan cooperative-matrix path stays dormant until AMD fixes it in
-> the Vulkan driver.
-
-> **Note**: the f16/bf16/f64 coopmatrix tiers are now built (`shaders/vkblas/coopmatrix/gemm_{f16,bf16,f64}.comp`). A `_f16` twin per format stores the f32 accumulator as `float16_t`. The cooperative-matrix tier is tested via `test_vkblas` (coopmatrix qgemm correctness, all 14 variants + _f16 twins).
-
-API mirrors `hipblasSgemm` parameter order exactly — porting from HIP is a
-mechanical find-and-replace:
-
-```c
-VkBLASContext* ctx;
-vkblas_create_context(instance, physicalDevice, device, &ctx);
-// First call: detects extensions, lazily creates pipelines
-vkblas_sgemm(ctx, cmd, VKBLAS_OP_N, VKBLAS_OP_N,
-             m, n, k, &alpha, bufA, lda, bufB, ldb,
-             &beta, bufC, ldc, bufD, ldd);
-```
-
-All GEMM paths now return `VK_SUCCESS` on RDNA4. This also enables the new
-`vkblas_qgemm_get_tier` query.
-
-> **New: `vkr_create_device` deliverable** — the canonical full-feature device
-> creation function (`src/vkruntime/vkruntime.c`) queries the full Vulkan 1.1-1.4
-> feature chain, enables only what the device reports, and gates cooperative
-> matrix on `VAIT_COOPMATRIX`. Updated `tests/test_vkruntime.c` section 12.
-
-### VKBLAS Convolution (implemented, native Vulkan)
-
-conv1d/2d/3d are native Vulkan compute dispatches using the **register-blocked
-direct (rb2)** kernel — the benchmark winner on RDNA2/RDNA4: 512-thread
-workgroups, one workgroup per (n, k), each thread computes 2 spatial outputs
-sharing input taps (~1.87 TFLOPS f32 on RX 9070 XT for a 256×64×64 conv; the
-honest memory-bound ceiling). All take `VkBuffer` handles (NCDHW/KCDHW/NKDHW
-f32 layouts) and record into the caller's command buffer.
-
-| Function | Description |
-|----------|-------------|
-| `vkblas_conv1d_f32` | 1D conv: y = α·conv1d(x, w) + β·y (NCL) |
-| `vkblas_conv2d_f32` | 2D conv: y = α·conv2d(x, w) + β·y (NCHW) |
-| `vkblas_conv3d_f32` | 3D conv: y = α·conv3d(x, w) + β·y (NCDHW) |
-
-Shaders live in `shaders/vkblas/baseline/conv_rb2_f32.comp` (embedded as
-`vkblas_spv_baseline_conv_rb2_f32`); verified by `test_vkblas_conv3d` and
-`test_vkblas_conv12d`. f16/bf16/f64 variants can be added by embedding their
-rb2 shaders and exposing new dtype codes.
-
-### VKBLAS L1/L2 (implemented)
-
-rocBLAS-style Level-1/Level-2 vector/matrix ops (companion library that
-reuses `VkBLASContext`):
-
-| Function | Precision | Description |
-|----------|-----------|-------------|
-| `vkblas_l1_axpy` | f32/f16 | `y = alpha*x + y` |
-| `vkblas_l1_scal` | f32/f16 | `x = alpha*x` |
-| `vkblas_l1_dot` | f32/f16 | dot product → result[0] |
-| `vkblas_l1_nrm2` | f32 | Euclidean norm |
-| `vkblas_l1_asum` | f32 | Sum of absolute values |
-| `vkblas_l1_amax` | f32 | Index of max |x| (0-based) |
-| `vkblas_l1_max_reduce_f32` | f32 | Max reduction |
-| `vkblas_l1_min_reduce_f32` | f32 | Min reduction |
-| `vkblas_l2_gemv` | f32/f16 | `y = alpha*op(A)*x + beta*y` (N and T) |
-
-### VKMath (implemented)
-
-Elementwise activations, binary ops, and dimension-wise reductions as Vulkan
-compute dispatches. Mirrors the VKBLAS context/pipeline-caching pattern.
-
-| Function | Description |
-|----------|-------------|
-| `vkmath_relu_f32/f16/bf16` | ReLU activation |
-| `vkmath_silu_f32/f16/bf16` | SiLU (Swish) activation |
-| `vkmath_gelu_f32/f16/bf16` | GELU (tanh approx) activation |
-| `vkmath_tanh_f32/f16/bf16` | Hyperbolic tangent |
-| `vkmath_sigmoid_f32/f16/bf16` | Sigmoid |
-| `vkmath_add_f32/f16/bf16`, `vkmath_mul_f32/f16/bf16` | Elementwise binary ops |
-| `vkmath_add_mul_f32/f16/bf16` | Fused `(a+b)*alpha` |
-| `vkmath_scale_f32/f16/bf16` | `alpha * in` |
-| `vkmath_max_reduce_dim_f32`, `vkmath_sum_reduce_dim_f32` | Row reductions |
-| `vkmath_softmax_f32`, `vkmath_rms_norm_f32`, `vkmath_layernorm_f32` | Normalization ops |
-| `vkmath_argmax_f32`, `vkmath_argmin_f32`, `vkmath_cumsum_f32` | Index / scan ops |
-| `vkmath_clip/abs/sign/exp/log/sqrt/rsqrt/pow_f32` | Scalar unary ops |
-| `vkmath_cast_f32_to_bf16`, `vkmath_cast_bf16_to_f32` | bf16 ↔ f32 casts (bit-exact, `floatBitsToUint(f)>>16`) |
-| `vkmath_add/mul/add_mul/scale_bf16` | bf16 elementwise (uint16_t SSBO, f32 compute) |
-
-All work records into a caller-supplied `VkCommandBuffer`; pipelines are
-created lazily and cached. Descriptor binding uses push descriptors when
-available, otherwise a context-owned descriptor pool.
-
-### VKQuant (implemented)
-
-Block dequantization **and forward quantization** of quantized weights, using
-the same context/pipeline-cache pattern as VKMath. All ggml block formats
-round-trip: every `vkquant_quantize_<fmt>_f32` dispatches a real shader and is
-validated against its matching dequant in `test_vkquant`.
-
-| Dequant (f32 output) | Forward quantize (f32 → block) |
-|----------|-------------|
-| Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q8_1, IQ4_NL (32-elem legacy blocks) | Same 7 formats |
-| Q2_K, Q3_K, Q4_K, Q5_K, Q6_K (256-elem K-quants) | Same 5 formats |
-| IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS (256-elem IQ) | Same 8 formats |
-| TQ1_0, TQ2_0 (256-elem TQ) | Same 2 formats |
-
-That is **22 dequant + 22 forward-quantize** kernels (44 SPIR-V blobs). K-quant
-scale-selection and the IQ/TQ grid search are transliterations of the ggml
-`quantize_row_*_ref` math; the grid formats replace ggml's runtime kmap/
-neighbours tables with a direct exhaustive search over the same dequant grid
-tables (embedded as GLSL `const` arrays), so stored grid indices round-trip
-exactly through the dequant shaders. Layouts are ported bit-exact from
-ggml-common.h (validated GPU vs CPU).
-
-### VKRAND (implemented)
-
-Stateless counter-based PRNGs verified against the Random123 known-answer
-vectors.
-
-| Function | Description |
-|----------|-------------|
-| `vkrand_uniform_f32` | `count` uniform floats in [0,1) (Philox4x32-10) |
-| `vkrand_threefry_uniform_f32` | `count` uniform floats in [0,1) (ThreeFry2x32-20) |
-| `vkrand_normal_f32` | `count` N(0,1) samples (Philox + Box-Muller) |
-| `vkrand_uniform_uint32` | `count` raw uint32 (Philox counter words) |
-
-### VKFFT (implemented)
-
-1D radix-2 complex FFT, plan-based API, interleaved Re/Im buffers.
-n = power of two ≤ 1024.
-
-| Function | Description |
-|----------|-------------|
-| `vkfft_create_plan` / `vkfft_destroy_plan` | Create/destroy an FFT plan for size n |
-| `vkfft_execute_f32` / `vkfft_execute_inverse_f32` | Forward / inverse FFT (f32) |
-| `vkfft_execute_f16` / `vkfft_execute_inverse_f16` | Forward / inverse FFT (f16 I/O, f32 compute) |
-| `vkfft_create_plan_2d` | N×N plan (n = power of two ≤ 1024) |
-| `vkfft_execute_2d_f32` / `vkfft_execute_2d_inverse_f32` | Separable 2D forward / inverse FFT |
-
-### VKRuntime (implemented)
-
-The hipRuntime-equivalent base layer every library sits on. Vulkan-native.
-
-| Function | Description |
-|----------|-------------|
-| `vkr_create_device` / `vkr_destroy_device` | Device/queue wrapper + capability detection |
-| `vkr_detect_capabilities` | Shared feature/property detection + arch ladder |
-| `vkr_malloc` / `vkr_free` | Pooled buffer allocator (hipMalloc-equivalent) |
-| `vkr_upload` / `vkr_download` | Staging upload/download with sync |
-| `vkr_create_command_pool` / `vkr_create_descriptor_pool` / `vkr_create_pipeline_layout` / `vkr_create_pipeline_cache` | Pool/layout/cache helpers |
-| `vkr_get_arch_index` / `vkr_get_arch_name` / `vkr_has_subgroup` / `vkr_has_coop_matrix` | Capability queries |
-
-All five libraries (vkmath, vkblas, vkquant, vkrand, vkfft) now build their
-contexts on VKRuntime: capability detection, descriptor pool, pipeline layout
-and pipeline cache are created via `vkr_*` helpers instead of duplicated
-inline Vulkan code.
-
-### VKModel (implemented)
-
-GGUF, safetensors, and OpenVINO IR model loaders — parse metadata + tensor
-infos and upload every tensor's raw bytes into device buffers via VKRuntime,
-as ready-to-use components.
-
-| Function | Description |
-|----------|-------------|
-| `vkmodel_load_gguf` / `vkmodel_destroy` | Load/free a GGUF model (all metadata value types, streamed tensor upload) |
-| `vkmodel_load_safetensors` | Load a safetensors model (self-contained JSON header parser, `__metadata__` KV exposure, verbatim offsets) |
-| `vkmodel_load_openvino` | Load an OpenVINO IR v11 model (`<xml>` + `.bin`; tag-scans Const `<data>` + legacy `<weights>`/`<biases>`, element types f32/f16/bf16/f64/i8..i64 mapped natively, per-tensor size + `.bin` span validation) |
-| `vkmodel_get_kv_count/_key/_string` | Host-side metadata access |
-| `vkmodel_get_tensor_count/_name/_dtype/_dtype_name/_nelems/_buffer/_size` | Tensor info + device buffer access |
-| `vkmodel_block_elems` | ggml_type → elements-per-block |
-
-### VKKV (implemented)
-
-Cross-model KV cache transfer — per-head closed-form ridge mapper that maps
-a source model's K/V cache to a target so prefill can be skipped when
-swapping same-family models (design doc pending).
-
-| Function | Description |
-|----------|-------------|
-| `vkkv_create_transfer` / `vkkv_destroy_transfer` | Per-head ridge mapper (host-side fit, GPU apply) |
-| `vkkv_fit_cpu` | Fit `W = (X^T X + λI)^-1 X^T Y` per head from a calibration set |
-| `vkkv_apply` | Map source KV → target KV on GPU (one compute dispatch/head) |
-
-RoPE stripping and top-k layer selection are the caller's responsibility.
-
-### VKDist (implemented, Phase 1 + master/worker + caps)
-
-Distributed compute over TCP — run compute on another PC's Vulkan card. The
-transport is a synchronous, versioned (**`VKDIST_PROTOCOL_VERSION`**) request/
-reply TCP framed protocol: client and server handshake with HELLO, then
-exchange REGISTER_BUFFER / UPLOAD / DISPATCH_GEMM / READBACK / CAPS frames
-until BYE. Remote buffers are opaque `uint64_t` handles; the client never sees
-a Vulkan handle across the wire. Phase 1 adds multi-worker serving (one pthread
-per connection) and client-side column-partitioned GEMM.
-
-A **capability handshake** (`vkdist_query_caps`) lets a coordinator discover
-each worker's GPU before routing work: GPU name, device-local VRAM, the stack's
-shader-tier arch index (0=baseline, 1=subgroup, 2=coopmatrix), subgroup size,
-and the server's frame limit. The **master/worker coordinator**
-(`vkdist_master_create`/`add_worker`/`worker_caps`/`sgemm`/`destroy`) connects
-N workers, records their capabilities, and runs `vkdist_sgemm_partitioned`
-across them. A mandatory **SSH key gate** (`vkdist_verify_ssh_key`, enforced in
-`vkdist_master_add_worker`) refuses any worker the controlling host has no
-established SSH key to — the system will not operate between hosts that do not
-trust each other. To encrypt the data path, run the client through an external
-SSH local port-forward (`ssh -N -L 7001:127.0.0.1:7000 user@worker`).
-
-Verified cross-PC: this machine's RX 9070 XT (RDNA4, 10.0.0.10) driving a
-remote RX 6700 XT (RDNA2, 10.0.0.11) via `tests/test_vkdist_xpc.c`
-(`server` / `client` / `master` modes) — remote sgemm round-trip and
-master/worker partitioned sgemm both PASS. Design + phased roadmap
-(multi-PC, distributed GEMM partition, attention/KV sharding, TLS/discovery)
-in `specs/VKDIST-DESIGN.md`.
-
-| Function | Description |
-|----------|-------------|
-| `vkdist_server_start` / `vkdist_server_accept` / `vkdist_server_run` | TCP server hosting a Vulkan device (per-connection RPC loop) |
-| `vkdist_server_accept_many` / `vkdist_server_serve_many` | Accept `n` connections / serve them concurrently, one pthread each (shared VkBLASContext serialized) |
-| `vkdist_client_connect` | TCP client connect + HELLO handshake |
-| `vkdist_query_caps` | Capability advertisement (GPU name, VRAM, arch tier, subgroup, max frame) |
-| `vkdist_verify_ssh_key` | SSH key-based auth check (BatchMode; security gate) |
-| `vkdist_register_buffer` / `vkdist_upload` / `vkdist_readback` | Remote buffer lifecycle (opaque handles, synchronous) |
-| `vkdist_sgemm` | Remote `vkblas_sgemm` dispatch (C = αAB + βC, in place) |
-| `vkdist_sgemm_partitioned` | Column-partitioned f32 GEMM across `n_workers` connections, merges strips |
-| `vkdist_master_create` / `vkdist_master_add_worker` / `vkdist_master_sgemm` / `vkdist_master_destroy` | Master/worker coordinator (SSH-gated worker discovery + partitioned GEMM) |
-| `vkdist_close` | Send best-effort BYE + close socket |
-
-### Completed Deliverables
-
-- **Real cooperative-matrix GEMM** — `shaders/vkblas/coopmatrix/gemm_{f16,bf16,f64}.comp`
-  and `qgemm_{<fmt>,_f16}.comp` all built and tested via `test_vkblas` (all 14
-  qgemm variants + _f16 twins). `VAIT_COOPMATRIX=1` enables on RDNA4 (RX 9070 XT)
-  and newer. Coopmatrix path dormant by default (driver 26.7.1 crashes on
-  coopMatMulAddKHR, per `specs/HIP-VULKAN-BRIDGE-AUDIT.md`).
-- **`vkr_create_device` deliverable** — canonical full-feature device creation
-  (`src/vkruntime/vkruntime.c`); all Vulkan 1.1-1.4 features enabled, cooperative
-  matrix gated on `VAIT_COOPMATRIX`.
-- **All 19 tests PASS on RX 9070 XT** (`ctest -C Release`).
-
-> CTest registers 19 targets: 12 `vaist_cpp_<mod>_test` (one per module incl. `attn`),
-> `stack_smoke`, `linalg_test`, `blas_test`, `vaist_blas_vulkan_test`, `cpp_smoke`.
-> The `tests/test_vk*.c` files are standalone validation binaries (vkblas, vkmath, etc.)
-> Run `ctest -C Release` for the authoritative count.
-- **All 8 ext BLAS ops** (trsv/trsm/symv/hemv/symm/hemm/syrk/herk) pass in both
-  f32 and f16 — f16 variants convert alpha/beta via `vkblas_f16_to_f32` before dispatch.
-
-### Remaining Gaps (architecturally feasible but not yet done)
-
-- No sparse BLAS — the CSR SpMM/SpSV HIP bridge was removed in the HIP purge;
-  a native Vulkan sparse GEMM is future work.
-- No LAPACK — the LU/inverse/det/QR/Cholesky/eigendecomp HIP bridge was
-  removed in the HIP purge; native Vulkan factorizations are future work.
-- No f16/bf16/f64 convolution variants — only `vkblas_conv*_f32` is wired
-  (dtype codes 61/62/63 reserved in `vkblas_internal.h`).
-- Coopmatrix (COOPMATRIX tier) dormant by default — AMD LLPC driver 26.7.1 crashes on
-  `coopMatMulAddKHR` in `vkCreateComputePipelines`. Activated via `VAIT_COOPMATRIX=1`;
-  stays dormant until AMD fixes it in the Vulkan driver.
-
----
-
-## VAiSt C99 runtime layer (`vaist_*`)
+### VAiSt C99 runtime layer (`vaist_*`)
 
 The `vulkan/{linux,windows}/{c99,c++,python}/` tree and the `include/vaist/`
 headers are the VAiSt runtime + BLAS/linalg layer on top of the `vkblas`/
@@ -421,8 +124,26 @@ loader resolution, then hands off to the per-op `vkblas_*`/`vkmath_*` kernels.
 | `vaist_runtime_vk_proc(rt, name)` | Resolve a Vulkan proc through the runtime |
 
 The runtime does **not** link `vulkan-1` as an import library. It resolves
-Vulkan entry points through `runtime_sym` (`LoadLibraryA` + `GetProcAddress`)
-and `inst_proc` (`vkGetInstanceProcAddr(instance, name)`).
+Vulkan entry points through `runtime_sym`/`inst_proc` (`LoadLibraryA` +
+`GetProcAddress` on Windows, `dlopen` + `dlsym` on Linux).
+
+### VAiSt Attention (`vaist_attn`)
+
+| Function | Description |
+|----------|-------------|
+| `vaist_attn_create(rt, &cfg)` | Create a flash-decode attention context (shader, descriptor layout, pipeline, cmdpool, staging buffers) |
+| `vaist_attn_destroy(ctx)` | Tear down |
+| `vaist_attn_flash_decode(ctx, q, k_cache, v_cache, block_tables, seqlen, out)` | Dispatch paged-attention flash decode |
+
+The `attn_flash_decode.comp` compute shader:
+- Binds 5 SSBOs: `q` (input query, f32), `k_cache` + `v_cache` (GPU buffers, fp16),
+  `block_tables` (uint32 page indices), `out` (f32 output).
+- Push constants (32 bytes): `scale`, `head_dim`, `num_q_heads`, `num_kv_heads`,
+  `seqlen`, `max_blocks`, `block_size`, `q_head_idx`.
+- One workgroup per query head; each thread computes one output element via fused
+  softmax + weighted sum over the key/value cache.
+- On no Vulkan device (sandbox CPU-only), returns `VAIST_DEVICE_ERROR` so the
+  caller falls back to CPU dequant + GEMM.
 
 ### Runtime behaviour: child-process Vulkan probe
 
@@ -438,7 +159,7 @@ physical device whose `vkCreateDevice` raises an uncatchable
   runs probe-only mode.
 - `vaist_runtime_create` skips the spawn when `GetCommandLineW()` contains
   `VAIST_VK_PROBE=1`, so the probe child never re-spawns (runaway recursion
-fix).
+  fix).
 - A `__try/__except` SEH backstop around `vkCreateDevice` plus a
   `vk_dev_attempted` cache flag prevents retrying the crashing call.
 
@@ -447,70 +168,12 @@ fix).
 - `VkCommandBufferAllocateInfo` in the sandbox `vulkan_core.h` lacks
   `pCommandBuffers` while `PFN_vkAllocateCommandBuffers` is 3-arg →
   `VAIST_VK_ALLOC_3ARG_COMMIT` CMake probe + 3-arg/2-arg branch in
-  `vulkan/{linux,windows}/c99/blas/src/vaist_blas.c`.
+  `vulkan/{linux,windows}/c99/{blas,attn}/src/vaist_*.c`.
 - `/WX` on Windows (C2220 → error); C flags `/D_WINDOWS` (no `/EHa`, so SEH
   `__try/__except` is inert for loader crashes).
 - `build-vk-on/` (MSVC Release) is the `VAIST_ENABLE_VULKAN=ON` target against
   the sandbox Vulkan SDK 1.4.357.0; `build/` is the default, no-Vulkan build
   that runs the CPU fallback.
-
-### Tests
-
-- `tests/vaist_blas_vulkan_test.c` — probe-only child entry: checks
-  `argv[1] == "VAIST_VK_PROBE=1"`, calls `vaist_runtime_create(vulkan)` +
-  `vaist_runtime_vk_state`, exits 0/1. On the sandbox it falls back to CPU and
-  prints `PASS (backend=1, cpu-fallback)`.
-- `tests/blas_test.c`, `tests/linalg_test.c`, `tests/stack_smoke.c` — C99
-  BLAS/linalg CPU paths.
-- `tests/cpp_smoke.cpp`, `tests/python_smoke.py` — C++/Python smoke.
-
-### Optimizations
-
-The `vaist_compute` path selector (`vaist_compute_best_path`) picks the fastest
-valid implementation from device caps + problem shape:
-
-- **MATMUl_FREE** — zero-multiplication matmul via ternary `{-1,0,+1}`
-  (2406.02528) and 1-bit XNOR + popcount (2608.01528) matvec kernels
-  (`vaist_matvec_ternary_f32`, `vaist_matvec_binary_f32`). The guaranteed
-  fallback — runs on any Vulkan 1.0 device and any CPU.
-- **VULKAN_TILE** — Vulkan tiled matmul via `vkblas` shaders (shared-memory
-  tiled baseline + `VK_KHR_shader_subgroup` twin). This is the VAiSt analogue
-  of **ThunderKittens 16x16 warp-tile** model
-  (https://github.com/HazyResearch/ThunderKittens): the same tile-oriented
-  "manipulate tiles of data no smaller than 16x16" principle, expressed
-  through Vulkan shared-memory tiling + subgroup shuffle rather than CUDA
-  tensor cores / WGMMA. The cooperative-matrix tier (`DO_NOT_USE/`) is the
-  dormant hardware-tensor path.
-- **VULKAN_DOT** — integer dot-product acceleration (`OpSDotKHR`), dispatched
-  when `integer_dot_product_8bit_accelerated` is reported by the device cap
-  probe.
-- **SIMD** — CPU path (Zen3 AVX2 / Intel AMX) — referenced but **TODO**.
-- **SCALAR** — portable fallback, never fails to build.
-
-ThunderKittens is CUDA/NVIDIA-only; HipKittens exists for AMD. VAiSt instead
-uses the Vulkan subgroup + cooperative-matrix tiers, which are the
-cross-vendor equivalent of ThunderKittens warpgroup matmul-accumulate.
-
-### Remaining Gaps / TODO
-
-The following feature families are architecturally feasible but not yet
-implemented. Where a tiled kernel is the bottleneck, the preferred approach is
-the ThunderKittens-style 16x16 warp-tile + load-store-compute-finish template,
-ported to Vulkan subgroup / cooperative-matrix intrinsics (not CUDA):
-
-- **Attention Families** — MHA, MLA, GDN, Sparse, and Paged attention
-  variants. RoPE and mRoPE positional embeddings.
-- **KV-Cache** — paged block-table management, KV quantization/compression
-  (the `vkkv` ridge-transfer exists but paged KV cache does not).
-- **MoE** — fused routing, grouped expert GEMM, expert-parallel communication.
-- **Sampling** — Top-K, Top-P/nucleus, and rejection-sampling wrappers
-  (`vkrand` provides the PRNG; sampling policy is not wired).
-- **Quantization Extensions** — FP8 and MXPF4 compute paths (the 22
-  dequant/quant ggml-block shaders exist; FP8/MXPF4 are not).
-- **Distributed Collectives** — TP, EP, and PP primitives
-  (`vkdist` provides TCP GEMM; collective primitives are not).
-- **Advanced Speculative Decoding** — EAGLE-3 / dspark scaffolding.
-- **Mamba** — native Conv1D integration.
 
 ---
 
@@ -518,7 +181,8 @@ ported to Vulkan subgroup / cooperative-matrix intrinsics (not CUDA):
 
 ### Prerequisites
 
-- **Vulkan SDK 1.4.357.0** or newer (https://vulkan.lunarg.com)
+- **Vulkan SDK 1.4.357.0** or newer (https://vulkan.lunarg.com) — needed only
+  when `VAIST_ENABLE_VULKAN=ON` (compile + validate shaders + embed SPIR-V)
 - **CMake 3.20+** or Visual Studio 2022 with C++ build tools
 - **AMD GPU** with Vulkan 1.1+ support (RDNA2 = Vulkan 1.0 baseline for
   shaders; Vulkan 1.4 + `VK_KHR_cooperative_matrix` required for the dormant
@@ -532,37 +196,23 @@ Vulkan compute. Build with the default MSVC (`cl.exe`) toolchain.
 Build from a **Visual Studio 2022 Developer Command Prompt** (x64):
 
 ```powershell
-# From VS2022 x64 Native Tools Command Prompt
-cd F:\VAiT
-cmake -B build-msvc -DCMAKE_BUILD_TYPE=Release -G Ninja
-cmake --build build-msvc --config Release
-ctest --test-dir build-msvc -C Release
-```
-
-All 19 tests pass on RX 9070 XT (Vulkan SDK 1.4.357.0).
-
-The `vaist_*` C99 runtime builds as part of the same CMake project. Default
-build (no Vulkan):
-
-```powershell
-$env:VULKAN_SDK="C:\VulkanSDK\1.4.357.0"
+# Default build (no Vulkan SDK required):
+cd C:\vaist
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
-```
 
-With the Vulkan backend enabled (sandbox SDK — the runtime probes in a child
-process and falls back to CPU automatically):
-
-```powershell
+# With the Vulkan backend enabled (sandbox SDK):
 $env:VULKAN_SDK="C:\VulkanSDK\1.4.357.0"
-cmake -B build-vk-on -DCMAKE_BUILD_TYPE=Release -DVAIST_ENABLE_VULKAN=ON
+cmake -B build-vk-on -DCMAKE_BUILD_TYPE=Release -DVAIST_ENABLE_VULKAN=ON -G Ninja
 cmake --build build-vk-on --config Release
+ctest --test-dir build-vk-on -C Release
 ```
 
-The Vulkan probe test (`vaist_blas_vulkan_test`) is the one to watch on the
-sandbox: it prints `PASS (backend=1, cpu-fallback)` and must leave **zero**
-leftover processes (the child-process probe recursion guard prevents spawn
-runaway).
+All 15 `vaist_cpp_*_test` + `vaist_blas_vulkan_test` + `blas_test` +
+`linalg_test` + `vaist_blas_vulkan_test` + `cpp_smoke` pass. The
+`vaist_blas_vulkan_test` is the one to watch on the sandbox: it prints
+`PASS (backend=1, cpu-fallback)` and must leave **zero** leftover processes
+(the child-process probe recursion guard prevents spawn runaway).
 
 ### Linux Toolchain
 
@@ -581,10 +231,9 @@ cd shaders
 ```
 
 File-tree auto-discovery: globs every `.comp` under
-`shaders/<lib>/{baseline,subgroup,coopmatrix}/` (vkblas, vkmath, vkquant,
-vkrand, vkfft), compiles each to SPIR-V, and regenerates the corresponding
-`src/<lib>/shaders_spv.h` with embedded bytecode arrays. Adding a kernel = drop
-a `.comp` + regenerate — no manual build-list edits.
+`shaders/{vkblas,vkmath,vkquant,vkrand,vkfft,vkattn}/{baseline,subgroup,coopmatrix}/`,
+compiles each to SPIR-V, and regenerates the embedded C header array via
+`cmake/spirv_to_header.py`. Adding a kernel = drop a `.comp` + regenerate.
 
 ---
 
@@ -621,14 +270,14 @@ hipblasDestroy(...) →  vkblas_destroy_context(...)
 Types follow the same scheme: `s` = f32, `d` = f64, `h` = f16, `bf` = bf16,
 `c` = complex-f32, `z` = complex-f64. (int8 GEMM reserved but unimplemented.)
 
-### Specialization Constants Over #define
+### Specialization Constants Over `#define`
 
 Tile dimensions, unroll factors, and wave widths are SPIR-V specialization
 constants (`constant_id`), not pre-compiled `#define` variants. One SPIR-V
 binary per shader source can be reconfigured at pipeline creation time without
-recompilation. The ~191 `.comp` files compile to 218 SPIR-V blobs in the
-checked-in `shaders_spv.h` headers — specialization varies tile/wave at
-pipeline-creation time, not by pre-compiled variants.
+recompilation. The 14 shader sources in `shaders/{lib}/baseline/` compile to
+16 SPIR-V blobs (13 compiled + 3 pre-existing); specialization varies tile/wave
+at pipeline-creation time, not by pre-compiled variants.
 
 ---
 
@@ -640,11 +289,8 @@ We welcome contributions. Here is how to get started:
 
 1. Read the root `AGENTS.md` — it is the binding contract for this repo.
 2. Check the `specs/` directory for reference material and the design docs.
-3. Pick an unimplemented component or enhancement (bf16 reductions, f16 ext-GEMM
-   coopmatrix tiers, int8 ops, new block-quant formats, or a new shader tier)
-   and open an issue to claim it.
-4. Read the per-component `AGENTS.md` (e.g. `src/vkblas/AGENTS.md`) before
-   writing any code.
+3. Pick an unimplemented component or enhancement and open an issue to claim it.
+4. Read the per-component `AGENTS.md` (e.g. `src/vkblas/AGENTS.md`) before writing any code.
 
 ### Workflow
 
@@ -666,139 +312,6 @@ We welcome contributions. Here is how to get started:
 - Mirror ROCm API names for mechanical porting.
 - No heap allocation in hot paths.
 - No stubs, placeholders, or TODOs in production code.
-
----
-## POC 1 (SGLANG)
-
----
-
-## VAiT Component Inventory & Reuse Mapping
-
-| VAiT Module | What it Replaces in the Port | Core Capabilities Reused |
-| --- | --- | --- |
-| **`vkmodel`** | Torch model loading + NumPy weight parsing | GGUF + Safetensors parser, direct GPU tensor upload (`vkmodel_load`, `vkmodel_load_safetensors`). **Kills the Python/Torch weight pipeline entirely.** |
-| **`vkblas` + `vkquant**` | `torch.matmul` + llama.cpp GGML | Quantized decode hot-path: 23 dequant / 22 quant formats, `vkblas_qgemm_*_f32/_f16` (INT8 sdot4/sudot4 subgroup tier). |
-| **`vkblas_l1l2`** | Torch lower-level primitives | GEMV, dot, axpy, scal, nrm2, asum, amax (the foundational decode loop primitives). |
-| **`vkmath`** | Torch elementwise ops + JIT kernels | Silu, gelu, softmax, rms_norm, layernorm, argmax, cumsum, reductions, transpose (`f32`/`f16`/`bf16`). |
-| **`vkruntime`** | Homegrown `assm_vk` bootstrap | Device creation, pooled allocator, staging buffers (`vkr_create_device`, `vkr_upload`/`download`). |
-| **`vkkv`** | External KV tools | KV-cache ridge-fit compression (`vkkv_fit_cpu`/`apply`). |
-| **`vkrand`** | Python `random` / `torch.multinomial` | Threefry, uniform, normal PRNG pipelines for sampling. |
-| **`vkdist`** | Distributed infrastructure | TCP distributed primitives for future PD/EP scaling. |
-| **`vkfft`** | External FFT libraries | Radix-2 FFT (`f16`/`f32`). |
-
----
-
-## ⚖️ Functional Division of Labor
-
-* **VAiT (Dense Substrate):** Handles runtime, memory pools, model loading, quantized GEMM hot-paths, math activations/norms, RNG, and KV compression.
-* **Assemble-SGLang (Attention / Speculative Layer):** Retains custom kernels (`shaders/*.comp` compiled via `glslc`) for:
-* RoPE
-* MoE Router / Top-K
-* Fused MLA Decode
-* Tree Verifier
-* GDN Recurrent / Replay
-
----
-
-## ⚙️ Technical Guardrails & Constraints Accepted
-
-1. **ROCm Bridge:** Retained exclusively for the 6 isolated ops (`vkblas_*_lapack`, `sparse`, `conv` $\rightarrow$ `rocSOLVER`/`rocSPARSE`/`MIOpen`). Not on the dense hot path.
-2. **Subgroup Tiering:** Subgroup tier remains the default (coopmatrix fallback disabled due to driver crashes).
-3. **C-to-C++ Interop:** VAiT exposes C99 headers (`#include <vkmodel/vkmodel.h>`), cleanly linked into C++ via standard CMake static targets (`target_link_libraries`).
-
----
-
-## POC 2 AMD ATOM
-
-## ATOM Ponytail-Audit: Port-to-C++/Vulkan/Windows Edition
-
----
-
-### 🔥 The Elimination Ledger (Ranked by Cut Size)
-
-| # | Target / Path | Size | Reason for Elimination / Action |
-| --- | --- | --- | --- |
-| **1** | `atom/mesh/`, `entrypoints/atomesh/`, `github/scripts/atomesh/` | ~70.3K | **Rust implementation.** Fails the C++ / Vulkan port target entirely. Reimplementation of vLLM router + scheduler + PD-disaggregation. |
-| **2** | `atom/kv_transfer/` | 8.4K | ROCm/RDMA/Linux-only (Mooncake, Moriio, offload). Target runs purely on Windows local Vulkan. |
-| **3** | `atom/model_ops/fla_ops/` | 5.65K | Hand-written Triton FLA gated-delta-rule kernels. Triton is incompatible with Vulkan; must be rewritten as a native Vulkan compute shader. |
-| **4** | `atom/entrypoints/openai/` | 4.2K | HTTP/OpenAI server surface (api_server, serving_chat, protocols). Inherit HTTP/streaming directly from the host framework; keep only `atom_standalone_service.py` as a reference. |
-| **5** | `atom/model_ops/mamba_ops/causal_conv1d.py` | 1.4K | Redundant; leverage native `llama.cpp`-style equivalent conv1d compute pipelines instead. |
-| **6** | `atom/model_ops/eplb.py` | 2.6K | YAGNI MoE load-balancing (`eplb_enable` defaults off). |
-| **7** | `atom/plugin/vllm/` & `sglang/deepseek_v4_bridge.py` | 4.2K | Duplicated DSV4/MLA indexing logic. Consolidate into a single native C++ boundary struct. |
-| **8** | `atom/rollout/`, `engine_utility.py` | ~2.0K | RLHF scaffolding with zero in-repo importers. |
-| **9** | Unreferenced plugins (`minimax_m3_sparse.py`, etc.) | 1.66K | Orphaned wrappers with zero code references. |
-| **10** | `atom/model_config/` | 0.85K | Redundant HF config dataclasses duplicating native transformers schemas. |
-| **11** | Torch Dynamo / `torch.compile` machinery | ~0.5K | Entirely eliminated alongside the Python/Torch execution stack. |
-| **12** | MTP Spec-Decode Family (6 files) | ~1.8K | Collapse duplicated SharedHead/norm/proj skeletons into a single parameterized MTP wrapper. |
-| **13** | Llama-Family GQA Cluster (7 architectures) | ~3.7K | Consolidate duplicate attention/MLP decoders into a single unified architecture template (like `mistral3.py`). |
-| **14** | DeepSeek V2 vs V4 Duplication | ~0.5K | Drop duplicated PCP/dual-stream MoE scaffolding; retain V4 HC/Compressor core logic. |
-| **15** | KV-Events Pub/Sub (`atom/distributed/kv_events.py`) | 0.4K | YAGNI ZMQ notification scaffolding. |
-| **16** | `atom/utils/envs.py` & `atom/config.py` | ~0.35K | Collapse 160 scattered environment variables into clean, hardcoded configuration constants. |
-| **17** | `atom/model_engine/arg_utils.py` | ~0.5K | Trim down to the ~20 essential flags required by the standalone runtime. |
-| **18** | `atom/plugin/register.py` | N/A | Delete `set_attn_cls()` no-ops and redundant NSA backend passthroughs. |
-| **19** | `atom/entrypoints/openai/tool_parser/` | ~0.25K | Strip generic scaffolding; retain only the 6 model-specific wire format parsers. |
-| **20** | `ParallelConfig` dead surface (`atom/config.py`) | ~0.1K | Drop `world_size_across_dp`, `asyncio_mode`, and unreferenced DP knobs. |
-
----
-
-### 📦 VAiT Dependency & Reuse Matrix
-
-| Module | Status | Integration Scope |
-| --- | --- | --- |
-| **`vkruntime`** | **Use as Backbone** | Vulkan 1.3/1.4 device creation, pooled allocators, staging upload pipelines, and push descriptors. |
-| **`vkmath`** | **Use as Backbone** | RMSNorm / LayerNorm, Silu / GELU / Softmax activations. |
-| **`vkblas` / `vkquant**` | **Use as Backbone** | Q4_0, Q4_K, Q8_0, Q5_K, Q6_K, Q3_K, IQ4_XS formats; HGEMM/BGEMM; 22 quantization/dequantization schemas. |
-| **`vkrand`** | **Use as Backbone** | Threefry uniform / normal PRNG pipelines for zero-Python token sampling. |
-| **`vkmodel`** | **Use as Backbone** | Native GGUF v2/v3, safetensors, and OpenVINO weight loading directly to GPU memory. |
-| **`vkkv` / `vkfft` / `vkstream**` | **Skip / Exclude** | Ridge-statistical KV-transfer (`vkkv`) and FFT/stream primitives are unnecessary for core LLM execution paths. |
-| **`vkdist`** | **Skip / Exclude** | TCP GEMM offloader; incompatible with the target MSVC local-execution model. |
-
----
-
-### 🛠️ Remaining Engineering Gaps (Native Vulkan kernels required)
-
-To complete the VAiSt C99 runtime + Vulkan engine, the following feature
-families are architecturally feasible but not yet implemented. Acceleration
-strategy is informed by the **HipKittens** paper (Hazy Research,
-arxiv:2511.08083) and the ThunderKittens tile primitives
-(https://github.com/HazyResearch/ThunderKittens):
-
-1. **Attention Families** — MHA, MLA, GDN, Sparse, and Paged attention
-   variants. Use 16×16 register/shared-memory tiles with
-   load-store-compute-finish pipelining (the tile abstraction generalizes
-   across vendors per HipKittens §2).
-2. **KV-Cache** — paged block-table management + compression
-   (`vkkv` ridge-transfer exists but paged KV cache + the chiplet-aware grid
-   scheduling needed on AMD MI3xx do not).
-3. **MoE** — fused routing, grouped expert GEMM, expert-parallel. Use
-   HipKittens 8-wave ping-pong (not NVIDIA wave specialization, which
-   underperforms on AMD due to no register reallocation).
-4. **Positional Embeddings** — RoPE, mRoPE kernels (16×16 tile transpose via
-   `transpose_sep`-style separate args).
-5. **Sampling** — Top-K, Top-P/nucleus, rejection-sampling wrappers
-   (`vkrand` provides the PRNG; policy not wired).
-6. **Quantization Extensions** — FP8 and MXPF4 compute paths (22 ggml-block
-   dequant/quant shaders exist; FP8/MXPF4 do not).
-7. **Distributed Collectives** — TP, EP, PP primitives (`vkdist` provides TCP
-   GEMM; collectives + LLC/L2-aware grid scheduling across chiplets not yet).
-8. **Advanced Speculative Decoding** — EAGLE-3 / dspark scaffolding.
-9. **Mamba** — native Conv1D integration (tile-based, 16×16).
-
-**Microarchitectural notes sourced from HipKittens §1–3 (port to Vulkan
-subgroup / cooperative-matrix, not CUDA):**
-
-- **AMD scheduling** — wave specialization underperforms on CDNA (no register
-  reallocation). Prefer 8-wave ping-pong (compute↔memory cluster alternation)
-  or 4-wave interleave (fine-grained small-tile schedule).
-- **Chiplet-aware grid launch** — AMD MI3xx has 8 XCDs (private L2 + shared
-  LLC); round-robin thread-block scheduling thrashes cache. Reorganize the
-  grid launch order to balance L2 (per-XCD) and LLC (shared) reuse.
-- **Shared-memory swizzling** — AMD `ds_read_b128` (64 banks) and `ds_write_b64`
-  (32 banks) demand per-instruction swizzle patterns; no single pattern fits
-  all layouts. `buffer_load_dword` bypasses the register file (TMA-like).
-- **Tile shapes** — AMD MFMA uses 16×16×32 (vs NVIDIA WGMMA 256×256×16); the
-  2× larger AMD register file + finer granularity is the pipeline-depth
-  alternative to deep multi-stage pipelining.
 
 ---
 
@@ -830,18 +343,13 @@ open-standard projects:
   and the diagnostic layers that make development tractable.
   (https://vulkan.lunarg.com/)
 
-The ROCm project and its components (hipBLAS, rocFFT, rocBLAS, rocrand)
-remain the gold-standard reference for what a GPU-accelerated math library
-API should look like. VAiSt does not seek to replace them on Linux — rather,
-it brings the same capabilities to platforms where ROCm does not run.
-
----
-## License
-
-This project is licensed under the Apache License, Version 2.0.
-See the [LICENSE](LICENSE) file for details.
-
 This project is not affiliated with or endorsed by AMD, the Khronos Group,
 or any other organization whose materials appear in the `specs/` directory.
 All trademarks are the property of their respective owners.
 
+---
+
+## License
+
+This project is licensed under the Apache License, Version 2.0.
+See the [LICENSE](LICENSE) file for details.
