@@ -33,6 +33,7 @@ typedef struct {
     PFN_vkBeginCommandBuffer           BeginCommandBuffer;
     PFN_vkEndCommandBuffer             EndCommandBuffer;
     PFN_vkCreateDescriptorPool         CreateDescriptorPool;
+    PFN_vkDestroyDescriptorPool        DestroyDescriptorPool;
     PFN_vkAllocateDescriptorSets       AllocateDescriptorSets;
     PFN_vkUpdateDescriptorSets         UpdateDescriptorSets;
     PFN_vkCreateDescriptorSetLayout    CreateDescriptorSetLayout;
@@ -48,6 +49,11 @@ typedef struct {
     PFN_vkWaitForFences                WaitForFences;
     PFN_vkQueueSubmit                  QueueSubmit;
     PFN_vkQueueWaitIdle                QueueWaitIdle;
+    PFN_vkCmdBindPipeline              CmdBindPipeline;
+    PFN_vkCmdBindDescriptorSets        CmdBindDescriptorSets;
+    PFN_vkCmdPushConstants             CmdPushConstants;
+    PFN_vkCmdDispatch                  CmdDispatch;
+    PFN_vkCmdPipelineBarrier           CmdPipelineBarrier;
 } vaist_attn_vktbl;
 
 struct vaist_attn_ctx {
@@ -87,11 +93,13 @@ struct vaist_attn_ctx {
 
 #define ATT_CHECK(x) do { VkResult r=(x); if(r!=VK_SUCCESS){ \
     fprintf(stderr,"vaist_attn: %s failed %d at %d\n", #x, (int)r, __LINE__); \
+    return NULL; } }while(0)
+#define ATT_CHECK_STATUS(x) do { VkResult r=(x); if(r!=VK_SUCCESS){ \
+    fprintf(stderr,"vaist_attn: %s failed %d at %d\n", #x, (int)r, __LINE__); \
     return VAIST_DEVICE_ERROR; } }while(0)
 
 static VaistStatus _resolve(vaist_attn_ctx* ctx, const VaistRuntime* rt){
     if (!ctx || !rt) return VAIST_INVALID_ARGUMENT;
-    if (!rt->loader){ return VAIST_UNSUPPORTED; }
 #define R(n) (PFN_vk##n)vaist_runtime_vk_proc(rt,"vk"#n)
     ctx->vk.CreateCommandPool            = R(CreateCommandPool);
     ctx->vk.DestroyCommandPool           = R(DestroyCommandPool);
@@ -100,6 +108,7 @@ static VaistStatus _resolve(vaist_attn_ctx* ctx, const VaistRuntime* rt){
     ctx->vk.BeginCommandBuffer           = R(BeginCommandBuffer);
     ctx->vk.EndCommandBuffer             = R(EndCommandBuffer);
     ctx->vk.CreateDescriptorPool         = R(CreateDescriptorPool);
+    ctx->vk.DestroyDescriptorPool        = R(DestroyDescriptorPool);
     ctx->vk.AllocateDescriptorSets       = R(AllocateDescriptorSets);
     ctx->vk.UpdateDescriptorSets         = R(UpdateDescriptorSets);
     ctx->vk.CreateDescriptorSetLayout    = R(CreateDescriptorSetLayout);
@@ -115,18 +124,20 @@ static VaistStatus _resolve(vaist_attn_ctx* ctx, const VaistRuntime* rt){
     ctx->vk.WaitForFences                = R(WaitForFences);
     ctx->vk.QueueSubmit                  = R(QueueSubmit);
     ctx->vk.QueueWaitIdle                = R(QueueWaitIdle);
+    ctx->vk.CmdBindPipeline              = R(CmdBindPipeline);
+    ctx->vk.CmdBindDescriptorSets        = R(CmdBindDescriptorSets);
+    ctx->vk.CmdPushConstants             = R(CmdPushConstants);
+    ctx->vk.CmdDispatch                  = R(CmdDispatch);
+    ctx->vk.CmdPipelineBarrier           = R(CmdPipelineBarrier);
+    ctx->CreateBuffer                    = R(CreateBuffer);
+    ctx->DestroyBuffer                   = R(DestroyBuffer);
+    ctx->AllocateMemory                  = R(AllocateMemory);
+    ctx->FreeMemory                      = R(FreeMemory);
+    ctx->BindBufferMemory                = R(BindBufferMemory);
+    ctx->MapMemory                       = R(MapMemory);
+    ctx->UnmapMemory                     = R(UnmapMemory);
+    ctx->GetBufferMemoryRequirements     = R(GetBufferMemoryRequirements);
 #undef R
-    /* Buffer/memory procs — resolved via raw loader symbol (host-visible path) */
-#define LR(n) (PFN_vk##n)runtime_sym(rt->loader,(const char*)#n)
-    ctx->CreateBuffer              = LR(CreateBuffer);
-    ctx->DestroyBuffer             = LR(DestroyBuffer);
-    ctx->AllocateMemory            = LR(AllocateMemory);
-    ctx->FreeMemory                = LR(FreeMemory);
-    ctx->BindBufferMemory          = LR(BindBufferMemory);
-    ctx->MapMemory                 = LR(MapMemory);
-    ctx->UnmapMemory               = LR(UnmapMemory);
-    ctx->GetBufferMemoryRequirements = LR(GetBufferMemoryRequirements);
-#undef LR
     if (!ctx->vk.CreateShaderModule) return VAIST_UNSUPPORTED;
     if (!ctx->CreateBuffer) return VAIST_UNSUPPORTED;
     return VAIST_OK;
@@ -359,12 +370,12 @@ VaistStatus vaist_attn_flash_decode(vaist_attn_ctx* ctx,
 
     /* 1. Upload Q to staging buffer */
     void* p = NULL;
-    ATT_CHECK(ctx->MapMemory(ctx->device, ctx->mem_q, 0, ctx->sz_q, 0, &p));
+    ATT_CHECK_STATUS(ctx->MapMemory(ctx->device, ctx->mem_q, 0, ctx->sz_q, 0, &p));
     memcpy(p, q, ctx->sz_q);
     ctx->UnmapMemory(ctx->device, ctx->mem_q);
 
     /* 2. Upload block tables */
-    ATT_CHECK(ctx->MapMemory(ctx->device, ctx->mem_bt, 0, ctx->sz_bt, 0, &p));
+    ATT_CHECK_STATUS(ctx->MapMemory(ctx->device, ctx->mem_bt, 0, ctx->sz_bt, 0, &p));
     memcpy(p, block_tables, ctx->sz_bt);
     ctx->UnmapMemory(ctx->device, ctx->mem_bt);
 
@@ -399,9 +410,9 @@ VaistStatus vaist_attn_flash_decode(vaist_attn_ctx* ctx,
     pc.g      = 0;            /* q_head_idx */
 
     /* 5. Record command buffer */
-    ATT_CHECK(ctx->vk.ResetCommandBuffer(ctx->cb, 0));
+    ATT_CHECK_STATUS(ctx->vk.ResetCommandBuffer(ctx->cb, 0));
     VkCommandBufferBeginInfo cbbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-    ATT_CHECK(ctx->vk.BeginCommandBuffer(ctx->cb, &cbbi));
+    ATT_CHECK_STATUS(ctx->vk.BeginCommandBuffer(ctx->cb, &cbbi));
     ctx->vk.CmdBindPipeline(ctx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->pipeline);
     ctx->vk.CmdBindDescriptorSets(ctx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->pipe_layout,
         0, 1, &ctx->dset, 0, NULL);
@@ -415,20 +426,20 @@ VaistStatus vaist_attn_flash_decode(vaist_attn_ctx* ctx,
     ctx->vk.CmdPipelineBarrier(ctx->cb,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
-    ATT_CHECK(ctx->vk.EndCommandBuffer(ctx->cb));
+    ATT_CHECK_STATUS(ctx->vk.EndCommandBuffer(ctx->cb));
 
     /* 6. Submit + wait */
     VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
     si.commandBufferCount = 1;
     si.pCommandBuffers = &ctx->cb;
     VkFence f = VK_NULL_HANDLE;
-    ATT_CHECK(ctx->vk.CreateFence(ctx->device, &(VkFenceCreateInfo){VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}, NULL, &f));
-    ATT_CHECK(ctx->vk.QueueSubmit(ctx->queue, 1, &si, f));
-    ATT_CHECK(ctx->vk.WaitForFences(ctx->device, 1, &f, VK_TRUE, UINT64_MAX));
+    ATT_CHECK_STATUS(ctx->vk.CreateFence(ctx->device, &(VkFenceCreateInfo){VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}, NULL, &f));
+    ATT_CHECK_STATUS(ctx->vk.QueueSubmit(ctx->queue, 1, &si, f));
+    ATT_CHECK_STATUS(ctx->vk.WaitForFences(ctx->device, 1, &f, VK_TRUE, UINT64_MAX));
     ctx->vk.DestroyFence(ctx->device, f, NULL);
 
     /* 7. Read output */
-    ATT_CHECK(ctx->MapMemory(ctx->device, ctx->mem_out, 0, ctx->sz_out, 0, &p));
+    ATT_CHECK_STATUS(ctx->MapMemory(ctx->device, ctx->mem_out, 0, ctx->sz_out, 0, &p));
     memcpy(out, p, ctx->sz_out);
     ctx->UnmapMemory(ctx->device, ctx->mem_out);
 

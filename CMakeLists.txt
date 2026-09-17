@@ -80,6 +80,10 @@ if(VAIST_VULKAN_INCLUDE)
   target_include_directories(vaist_vulkan_include INTERFACE "${VAIST_VULKAN_INCLUDE}")
 endif()
 
+# Shader output directory (declared here so per-module Vulkan config can reference it).
+set(VAIST_SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/shaders")
+file(MAKE_DIRECTORY "${VAIST_SHADER_OUT_DIR}")
+
 function(vaist_c_warning_flags target)
   target_compile_options(${target} PRIVATE
     $<$<COMPILE_LANG_AND_ID:C,GNU>:-Wall;-Wextra;-Werror>
@@ -133,7 +137,13 @@ foreach(D IN LISTS VAIST_MODULES)
     if(VAIST_ENABLE_VULKAN)
       target_link_libraries(${M} PRIVATE vaist_vulkan_include)
       target_compile_definitions(${M} PRIVATE VAIST_VULKAN_HDR=1 VAIST_ENABLE_VULKAN=1 VAIST_HAVE_VK_HDR=1 VAIST_SPIRV_EMBEDDED=1)
+      if(VAIST_VK_ALLOC_3ARG_COMPILE)
+        target_compile_definitions(${M} PRIVATE VAIST_VK_ALLOC_3ARG=1)
+      endif()
       target_include_directories(${M} PRIVATE "${VAIST_SHADER_OUT_DIR}")
+      if(TARGET vaist_blas_spv_hdr)
+        add_dependencies(${M} vaist_blas_spv_hdr)
+      endif()
     endif()
   endif()
   vaist_c_warning_flags(${M})
@@ -148,9 +158,13 @@ foreach(D IN LISTS VAIST_MODULES)
     else()
       target_link_libraries(${M} PRIVATE dl)
     endif()
-  elseif(WIN32 AND D STREQUAL "runtime" AND VAIST_ENABLE_VULKAN)
-    target_link_libraries(${M} PRIVATE vaist_vulkan_include)
-    target_compile_definitions(${M} PRIVATE VAIST_VULKAN_HDR=1 VAIST_ENABLE_VULKAN=1)
+   elseif(WIN32 AND D STREQUAL "runtime" AND VAIST_ENABLE_VULKAN)
+     target_link_libraries(${M} PRIVATE vaist_vulkan_include)
+     target_compile_definitions(${M} PRIVATE VAIST_VULKAN_HDR=1 VAIST_ENABLE_VULKAN=1)
+   endif()
+  # Pre-existing ATOM port warnings in vaist_quant.c and vaist_blas.c; suppress per-target
+  if(MSVC AND (D STREQUAL "quant" OR D STREQUAL "blas"))
+    target_compile_options(${M} PRIVATE /wd4267 /wd4456 /wd4457 /wd4244 /wd4189 /wd4100)
   endif()
   if(UNIX AND NOT APPLE)
     set_target_properties(${M} PROPERTIES INSTALL_RPATH "$ORIGIN")
@@ -218,11 +232,9 @@ set(VAIST_SHADERS
 # Pre-existing SPIR-V blobs with no source .comp (half-migrated repo).
 # Their base names map to the symbol names vaist_blas.c references.
 set(VAIST_PRECOMPILED_SPV
-  vkblas/gemm_f32_tiled.comp.spv
-  vkblas/matvec_ternary.comp.spv
-  vkblas/matvec_binar.comp.spv)
-set(VAIST_SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/shaders")
-file(MAKE_DIRECTORY "${VAIST_SHADER_OUT_DIR}")
+  gemm_f32_tiled.comp.spv
+  matvec_ternary.comp.spv
+  matvec_binar.comp.spv)
 find_program(GLSLANG_VALIDATOR glslangValidator PATHS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}")
 find_program(SPIRV_VAL spirv-val PATHS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}")
 if(GLSLANG_VALIDATOR)
@@ -239,6 +251,19 @@ if(GLSLANG_VALIDATOR)
       COMMAND ${SPIRV_VAL} "${out}"
       DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${S}"
       COMMENT "glslang: ${S}" VERBATIM)
+    list(APPEND VAIST_SPV "${out}")
+  endforeach()
+  # Pre-existing SPIR-V blobs (no source .comp); copy them into build tree as-is.
+  foreach(S IN LISTS VAIST_PRECOMPILED_SPV)
+    set(out "${VAIST_SHADER_OUT_DIR}/${S}")
+    get_filename_component(_sd "${out}" DIRECTORY)
+    file(MAKE_DIRECTORY "${_sd}")
+    add_custom_command(
+      OUTPUT "${out}"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${S}" "${out}"
+      DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${S}"
+      COMMENT "copy: ${S}" VERBATIM)
     list(APPEND VAIST_SPV "${out}")
   endforeach()
   add_custom_target(vaist_shaders ALL DEPENDS ${VAIST_SPV})
@@ -261,11 +286,11 @@ if(VAIST_ENABLE_VULKAN AND GLSLANG_VALIDATOR AND Python3_Interpreter_FOUND)
   set(VAIST_BLAS_SPV_HDR "${VAIST_SHADER_OUT_DIR}/vaist_blas_spv.h")
   add_custom_command(
     OUTPUT "${VAIST_BLAS_SPV_HDR}"
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/spirv_to_header.py" "${VAIST_BLAS_SPV_HDR}"
-             "vaist_spv_gemm_f32_tiled" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vkblas/gemm_f32_tiled.comp.spv"
-             "vaist_spv_matvec_ternary" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vkblas/matvec_ternary.comp.spv"
-             "vaist_spv_matvec_binar"   "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vkblas/matvec_binar.comp.spv"
-             "vaist_spv_qgemm_q8_0"     "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_q8_0.comp.spv"
+     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/spirv_to_header.py" "${VAIST_BLAS_SPV_HDR}"
+             "vaist_spv_gemm_f32_tiled"   "${VAIST_SHADER_OUT_DIR}/gemm_f32_tiled.comp.spv"
+             "vaist_spv_matvec_ternary"  "${VAIST_SHADER_OUT_DIR}/matvec_ternary.comp.spv"
+             "vaist_spv_matvec_binar"     "${VAIST_SHADER_OUT_DIR}/matvec_binar.comp.spv"
+             "vaist_spv_qgemm_q8_0"       "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_q8_0.comp.spv"
              "vaist_spv_qgemm_q4_0"     "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_q4_0.comp.spv"
              "vaist_spv_qgemm_q4_1"     "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_q4_1.comp.spv"
              "vaist_spv_qgemm_q5_0"     "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_q5_0.comp.spv"
