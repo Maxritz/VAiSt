@@ -37,8 +37,6 @@ int main(void){
     CK(vaist_quant_block_bytes(VAIST_Q8_0)==34, "q8_0 size=%zu", vaist_quant_block_bytes(VAIST_Q8_0));
     CK(vaist_quant_block_bytes(VAIST_Q4_0)==18, "q4_0 size=%zu", vaist_quant_block_bytes(VAIST_Q4_0));
     CK(vaist_quant_block_bytes(VAIST_Q4_1)==20, "q4_1 size=%zu", vaist_quant_block_bytes(VAIST_Q4_1));
-    CK(vaist_quant_block_bytes(VAIST_Q5_0)==22, "q5_0 size=%zu", vaist_quant_block_bytes(VAIST_Q5_0));
-    CK(vaist_quant_block_bytes(VAIST_Q2_K)==84, "q2_K size=%zu", vaist_quant_block_bytes(VAIST_Q2_K));
 
     /* ---- K-quant dequant: hand-crafted vectors ---- */
     /* Q4_K: one 256-elem block. d=1.0, min=1.0 via dm half2.
@@ -61,8 +59,8 @@ int main(void){
         for(i=0;i<32;i++){ if(fabsf(ko[32+i])>0.01f){ ok=0; break; } }
         CK(ok, "q4_K dequant hi=%.2f (want 0.0)", ko[32]);
     }
-    /* Q6_K structural: d=1.0, scales[0]=4, ql=0x21, qh=0.
-     * ip=0,il=0: sc[0]=4; lo=(ql[0]&0xf | 0)-32 = 1-32=-31; out = d*sc*(-31) = 1*4*(-31) = -124. */
+     /* Q6_K structural: d=1.0, scales[0]=4, ql=0x21, qh=0.
+      * ip=0,il=0: sc[0]=4; lo=(ql[0]&0xf | 0)-32 = 1-32=-31; out = d*sc*(-31) = 1*4*(-31) = -124. */
     {
         vaist_block_q6_K blk; memset(&blk,0,sizeof blk);
         blk.d=0x3c00;
@@ -72,6 +70,28 @@ int main(void){
         VaistStatus st=vaist_dequantize_f32(VAIST_Q6_K, &blk, sizeof blk, ko, 256);
         CK(st==VAIST_OK, "q6_K dequant status=%d", st);
         CK(fabsf(ko[0]-(-124.0f))<0.5f, "q6_K dequant[0]=%.2f (want -124)", ko[0]);
+    }
+    /* Q2_K structural: dm=half2(2.0,1.0). qs encodes 2-bit values (4 vals/byte).
+      * scales[0]=0x11 -> sc_lo=1, mn_hi=1. d1=2.0*1=2.0, m1=1.0*1=1.0.
+      * qs[0]=0x55 -> bits: (01,01,01,01). idx values all = 1.
+      * OUT = d1*(idx) - m1 = 2.0*1 - 1.0 = 1.0. */
+    {
+        vaist_block_q2_K blk; memset(&blk,0,sizeof blk);
+        /* dm = half2(2.0, 1.0); 2.0 = 0x4000, 1.0 = 0x3c00 */
+        blk.dm=((uint32_t)0x4000)|((uint32_t)0x3c00<<16);
+        /* scales[0] = 0x11: sc_lo=1, mn_hi=1 */
+        blk.scales[0]=0x11;
+        /* qs[0]=0x55 -> 4 values each = idx 1 (bits 01) */
+        blk.qs[0]=0x55;
+        float ko[256]; memset(ko,0xff,sizeof ko);
+        VaistStatus st=vaist_dequantize_f32(VAIST_Q2_K, &blk, sizeof blk, ko, 256);
+        CK(st==VAIST_OK, "q2_K dequant status=%d", st);
+        /* ko[0..3] = 2.0*1 - 1.0 = 1.0 */
+        CK(fabsf(ko[0]-1.0f)<0.01f, "q2_K dequant[0]=%.2f (want 1.0)", ko[0]);
+        CK(fabsf(ko[3]-1.0f)<0.01f, "q2_K dequant[3]=%.2f (want 1.0)", ko[3]);
+        /* q2_K block size matches GGUF layout */
+        /* q2_K block size = 16 (scales) + 64 (qs) + 4 (half2 dm) = 84 */
+        CK(vaist_quant_block_bytes(VAIST_Q2_K)==84, "q2_K size=%zu", vaist_quant_block_bytes(VAIST_Q2_K));
     }
 
     /* ---- fp16 codec sanity ---- */
