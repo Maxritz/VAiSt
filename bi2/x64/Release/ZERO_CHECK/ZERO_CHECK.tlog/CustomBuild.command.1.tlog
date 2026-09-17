@@ -1,0 +1,10 @@
+^C:\VAIST\BI2\CMAKEFILES\F45668B1DAFD48DAC32A45D799900919\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/vaist -BC:/vaist/bi2 --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/vaist/bi2/VAiSt.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

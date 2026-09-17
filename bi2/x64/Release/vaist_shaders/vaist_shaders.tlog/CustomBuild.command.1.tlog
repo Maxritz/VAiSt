@@ -1,0 +1,174 @@
+^C:\VAIST\BI2\CMAKEFILES\797793BDC6212B1FA8CC5CC763E6B294\ATTN_FLASH_DECODE.COMP.SPV.RULE
+setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 C:/vaist/shaders/vkattn/baseline/attn_flash_decode.comp -o C:/vaist/bi2/shaders/vkattn/baseline/attn_flash_decode.comp.spv
+if %errorlevel% neq 0 goto :cmEnd
+""$"<IF:1,C:\VulkanSDK\1.4.357.0\Bin\spirv-val.exe" C:/vaist/bi2/shaders/vkattn/baseline/attn_flash_decode.comp.spv ",true>"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\VAIST\BI2\CMAKEFILES\C097F742DB9EAB1CFFA0F168C9C8C151\MOE_ROUTE.COMP.SPV.RULE
+setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 C:/vaist/shaders/vkblas/baseline/moe_route.comp -o C:/vaist/bi2/shaders/vkblas/baseline/moe_route.comp.spv
+if %errorlevel% neq 0 goto :cmEnd
+""$"<IF:1,C:\VulkanSDK\1.4.357.0\Bin\spirv-val.exe" C:/vaist/bi2/shaders/vkblas/baseline/moe_route.comp.spv ",true>"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\VAIST\BI2\CMAKEFILES\C097F742DB9EAB1CFFA0F168C9C8C151\QGEMM_IQ4XS.COMP.SPV.RULE
+setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 C:/vaist/shaders/vkblas/baseline/qgemm_iq4xs.comp -o C:/vaist/bi2/shaders/vkblas/baseline/qgemm_iq4xs.comp.spv
+if %errorlevel% neq 0 goto :cmEnd
+""$"<IF:1,C:\VulkanSDK\1.4.357.0\Bin\spirv-val.exe" C:/vaist/bi2/shaders/vkblas/baseline/qgemm_iq4xs.comp.spv ",true>"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\VAIST\BI2\CMAKEFILES\C097F742DB9EAB1CFFA0F168C9C8C151\QGEMM_Q2_K.COMP.SPV.RULE
+setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 C:/vaist/shaders/vkblas/baseline/qgemm_q2_K.comp -o C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q2_K.comp.spv
+if %errorlevel% neq 0 goto :cmEnd
+""$"<IF:1,C:\VulkanSDK\1.4.357.0\Bin\spirv-val.exe" C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q2_K.comp.spv ",true>"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\VAIST\BI2\CMAKEFILES\C097F742DB9EAB1CFFA0F168C9C8C151\QGEMM_Q3K.COMP.SPV.RULE
+setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 C:/vaist/shaders/vkblas/baseline/qgemm_q3k.comp -o C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q3k.comp.spv
+if %errorlevel% neq 0 goto :cmEnd
+""$"<IF:1,C:\VulkanSDK\1.4.357.0\Bin\spirv-val.exe" C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q3k.comp.spv ",true>"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\VAIST\BI2\CMAKEFILES\C097F742DB9EAB1CFFA0F168C9C8C151\QGEMM_Q4_0.COMP.SPV.RULE
+setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 C:/vaist/shaders/vkblas/baseline/qgemm_q4_0.comp -o C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q4_0.comp.spv
+if %errorlevel% neq 0 goto :cmEnd
+""$"<IF:1,C:\VulkanSDK\1.4.357.0\Bin\spirv-val.exe" C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q4_0.comp.spv ",true>"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\VAIST\BI2\CMAKEFILES\C097F742DB9EAB1CFFA0F168C9C8C151\QGEMM_Q4_1.COMP.SPV.RULE
+setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 C:/vaist/shaders/vkblas/baseline/qgemm_q4_1.comp -o C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q4_1.comp.spv
+if %errorlevel% neq 0 goto :cmEnd
+""$"<IF:1,C:\VulkanSDK\1.4.357.0\Bin\spirv-val.exe" C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q4_1.comp.spv ",true>"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\VAIST\BI2\CMAKEFILES\C097F742DB9EAB1CFFA0F168C9C8C151\QGEMM_Q4K.COMP.SPV.RULE
+setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 C:/vaist/shaders/vkblas/baseline/qgemm_q4k.comp -o C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q4k.comp.spv
+if %errorlevel% neq 0 goto :cmEnd
+""$"<IF:1,C:\VulkanSDK\1.4.357.0\Bin\spirv-val.exe" C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q4k.comp.spv ",true>"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\VAIST\BI2\CMAKEFILES\C097F742DB9EAB1CFFA0F168C9C8C151\QGEMM_Q5_0.COMP.SPV.RULE
+setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 C:/vaist/shaders/vkblas/baseline/qgemm_q5_0.comp -o C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q5_0.comp.spv
+if %errorlevel% neq 0 goto :cmEnd
+""$"<IF:1,C:\VulkanSDK\1.4.357.0\Bin\spirv-val.exe" C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q5_0.comp.spv ",true>"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\VAIST\BI2\CMAKEFILES\C097F742DB9EAB1CFFA0F168C9C8C151\QGEMM_Q5_1.COMP.SPV.RULE
+setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 C:/vaist/shaders/vkblas/baseline/qgemm_q5_1.comp -o C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q5_1.comp.spv
+if %errorlevel% neq 0 goto :cmEnd
+""$"<IF:1,C:\VulkanSDK\1.4.357.0\Bin\spirv-val.exe" C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q5_1.comp.spv ",true>"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\VAIST\BI2\CMAKEFILES\C097F742DB9EAB1CFFA0F168C9C8C151\QGEMM_Q5K.COMP.SPV.RULE
+setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 C:/vaist/shaders/vkblas/baseline/qgemm_q5k.comp -o C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q5k.comp.spv
+if %errorlevel% neq 0 goto :cmEnd
+""$"<IF:1,C:\VulkanSDK\1.4.357.0\Bin\spirv-val.exe" C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q5k.comp.spv ",true>"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\VAIST\BI2\CMAKEFILES\C097F742DB9EAB1CFFA0F168C9C8C151\QGEMM_Q6K.COMP.SPV.RULE
+setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 C:/vaist/shaders/vkblas/baseline/qgemm_q6k.comp -o C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q6k.comp.spv
+if %errorlevel% neq 0 goto :cmEnd
+""$"<IF:1,C:\VulkanSDK\1.4.357.0\Bin\spirv-val.exe" C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q6k.comp.spv ",true>"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\VAIST\BI2\CMAKEFILES\C097F742DB9EAB1CFFA0F168C9C8C151\QGEMM_Q8_0.COMP.SPV.RULE
+setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 C:/vaist/shaders/vkblas/baseline/qgemm_q8_0.comp -o C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q8_0.comp.spv
+if %errorlevel% neq 0 goto :cmEnd
+""$"<IF:1,C:\VulkanSDK\1.4.357.0\Bin\spirv-val.exe" C:/vaist/bi2/shaders/vkblas/baseline/qgemm_q8_0.comp.spv ",true>"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\VAIST\BI2\CMAKEFILES\F45668B1DAFD48DAC32A45D799900919\VAIST_SHADERS.RULE
+setlocal
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\VAIST\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/vaist -BC:/vaist/bi2 --check-stamp-file C:/vaist/bi2/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

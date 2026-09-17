@@ -203,41 +203,43 @@ endforeach()
 # -----------------------------------------------------------------------------
 set(VAIST_SHADERS
   vkattn/baseline/attn_flash_decode.comp
-  vkblas/gemm_f32_tiled.comp
-  vkblas/matvec_ternary.comp
-  vkblas/matvec_binar.comp
-  vkblas/qgemm_q8_0.comp
-  vkblas/qgemm_q4_0.comp
-  vkblas/qgemm_q4_1.comp
-  vkblas/qgemm_q5_0.comp
-  vkblas/qgemm_q5_1.comp
-  vkblas/qgemm_q2_K.comp
-  vkblas/qgemm_q3k.comp
-  vkblas/qgemm_q4k.comp
-  vkblas/qgemm_q5k.comp
-  vkblas/qgemm_q6k.comp
-  vkblas/qgemm_iq4xs.comp
-  vkblas/moe_route.comp
-  vklinalg/lu16.comp
-  vklinalg/chol16.comp
-  vklinalg/qr64.comp)
+  vkblas/baseline/qgemm_q8_0.comp
+  vkblas/baseline/qgemm_q4_0.comp
+  vkblas/baseline/qgemm_q4_1.comp
+  vkblas/baseline/qgemm_q5_0.comp
+  vkblas/baseline/qgemm_q5_1.comp
+  vkblas/baseline/qgemm_q2_K.comp
+  vkblas/baseline/qgemm_q3k.comp
+  vkblas/baseline/qgemm_q4k.comp
+  vkblas/baseline/qgemm_q5k.comp
+  vkblas/baseline/qgemm_q6k.comp
+  vkblas/baseline/qgemm_iq4xs.comp
+  vkblas/baseline/moe_route.comp)
+# Pre-existing SPIR-V blobs with no source .comp (half-migrated repo).
+# Their base names map to the symbol names vaist_blas.c references.
+set(VAIST_PRECOMPILED_SPV
+  vkblas/gemm_f32_tiled.comp.spv
+  vkblas/matvec_ternary.comp.spv
+  vkblas/matvec_binar.comp.spv)
 set(VAIST_SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/shaders")
 file(MAKE_DIRECTORY "${VAIST_SHADER_OUT_DIR}")
-find_program(GLSLANG_VALIDATOR glslangValidator PATHS "$ENV{VULKAN_SDK}/Bin" NO_DEFAULT_PATH)
-find_program(SPIRV_VAL spirv-val PATHS "$ENV{VULKAN_SDK}/Bin" NO_DEFAULT_PATH)
+find_program(GLSLANG_VALIDATOR glslangValidator PATHS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}")
+find_program(SPIRV_VAL spirv-val PATHS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}")
 if(GLSLANG_VALIDATOR)
   set(VAIST_SPV "")
   foreach(S IN LISTS VAIST_SHADERS)
-    set(out "${VAIST_SHADER_OUT_DIR}/${S}")
-    file(MAKE_DIRECTORY "${out}")
+    set(out "${VAIST_SHADER_OUT_DIR}/${S}.spv")
+    get_filename_component(_sd "${out}" DIRECTORY)
+    file(MAKE_DIRECTORY "${_sd}")
     add_custom_command(
-      OUTPUT "${out}.spv"
+      OUTPUT "${out}"
       COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.3
               "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${S}"
-              -o "${out}.spv"
+              -o "${out}"
+      COMMAND ${SPIRV_VAL} "${out}"
       DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${S}"
       COMMENT "glslang: ${S}" VERBATIM)
-    list(APPEND VAIST_SPV "${out}.spv")
+    list(APPEND VAIST_SPV "${out}")
   endforeach()
   add_custom_target(vaist_shaders ALL DEPENDS ${VAIST_SPV})
   if(SPIRV_VAL)
@@ -260,22 +262,21 @@ if(VAIST_ENABLE_VULKAN AND GLSLANG_VALIDATOR AND Python3_Interpreter_FOUND)
   add_custom_command(
     OUTPUT "${VAIST_BLAS_SPV_HDR}"
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/spirv_to_header.py" "${VAIST_BLAS_SPV_HDR}"
-             "vaist_spv_gemm_f32_tiled" "${VAIST_SHADER_OUT_DIR}/vkblas/gemm_f32_tiled.comp.spv"
-             "vaist_spv_attn_flash_decode" "${VAIST_SHADER_OUT_DIR}/vkattn/baseline/attn_flash_decode.comp.spv"
-            "vaist_spv_matvec_ternary" "${VAIST_SHADER_OUT_DIR}/vkblas/matvec_ternary.comp.spv"
-            "vaist_spv_matvec_binar"   "${VAIST_SHADER_OUT_DIR}/vkblas/matvec_binar.comp.spv"
-            "vaist_spv_qgemm_q8_0"     "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q8_0.comp.spv"
-            "vaist_spv_qgemm_q4_0"     "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q4_0.comp.spv"
-            "vaist_spv_qgemm_q4_1"     "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q4_1.comp.spv"
-            "vaist_spv_qgemm_q5_0"     "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q5_0.comp.spv"
-            "vaist_spv_qgemm_q5_1"     "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q5_1.comp.spv"
-            "vaist_spv_qgemm_q2_K"     "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q2_K.comp.spv"
-            "vaist_spv_qgemm_q3k"      "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q3k.comp.spv"
-            "vaist_spv_qgemm_q4k"      "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q4k.comp.spv"
-            "vaist_spv_qgemm_q5k"      "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q5k.comp.spv"
-            "vaist_spv_qgemm_q6k"      "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q6k.comp.spv"
-            "vaist_spv_qgemm_iq4xs"    "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_iq4xs.comp.spv"
-             "vaist_spv_moe_route"      "${VAIST_SHADER_OUT_DIR}/vkblas/moe_route.comp.spv"
+             "vaist_spv_gemm_f32_tiled" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vkblas/gemm_f32_tiled.comp.spv"
+             "vaist_spv_matvec_ternary" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vkblas/matvec_ternary.comp.spv"
+             "vaist_spv_matvec_binar"   "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vkblas/matvec_binar.comp.spv"
+             "vaist_spv_qgemm_q8_0"     "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_q8_0.comp.spv"
+             "vaist_spv_qgemm_q4_0"     "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_q4_0.comp.spv"
+             "vaist_spv_qgemm_q4_1"     "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_q4_1.comp.spv"
+             "vaist_spv_qgemm_q5_0"     "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_q5_0.comp.spv"
+             "vaist_spv_qgemm_q5_1"     "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_q5_1.comp.spv"
+             "vaist_spv_qgemm_q2_K"     "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_q2_K.comp.spv"
+             "vaist_spv_qgemm_q3k"      "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_q3k.comp.spv"
+             "vaist_spv_qgemm_q4k"      "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_q4k.comp.spv"
+             "vaist_spv_qgemm_q5k"      "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_q5k.comp.spv"
+             "vaist_spv_qgemm_q6k"      "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_q6k.comp.spv"
+             "vaist_spv_qgemm_iq4xs"    "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_iq4xs.comp.spv"
+             "vaist_spv_moe_route"      "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/moe_route.comp.spv"
              "vaist_spv_attn_flash_decode" "${VAIST_SHADER_OUT_DIR}/vkattn/baseline/attn_flash_decode.comp.spv"
     DEPENDS ${VAIST_SPV}
     COMMENT "embed SPIR-V -> vaist_blas_spv.h" VERBATIM)
