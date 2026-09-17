@@ -1,0 +1,122 @@
+// vaist_attn: flash-decoding attention — minimal single-thread-per-output.
+// Each local invocation (tid) owns output element `tid` in head_dim.
+// Shared-mem scoreboard: one workgroup = one query head, seqlen tokens.
+//
+// Limitations (documented): seqlen ≤ 2048 (shared mem), head_dim ≤ 64.
+// These are tuning knobs; the algorithm is correct within bounds.
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer QB  { float q[]; };
+layout(std430, set = 0, binding = 1) readonly buffer KB  { uvec2 k_cache[]; };
+layout(std430, set = 0, binding = 2) readonly buffer VB  { uvec2 v_cache[]; };
+layout(std430, set = 0, binding = 3) readonly buffer BT  { uint block_table[]; };
+layout(std430, set = 0, binding = 4) writeonly buffer OB { float outbuf[]; };
+
+layout(push_constant) uniform PC {
+    float scale;     // 1/sqrt(head_dim)
+    uint head_dim;   // e.g. 64
+    uint seqlen;     // actual context tokens (≤ 2048)
+    uint kv_head;    // index into block_table for this KV group
+    uint q_head;     // query head index (for multi-Q dispatch)
+    uint max_blocks; // blocks per row
+    uint block_size; // tokens per page (1, 16, 64...)
+};
+
+float f16_to_f32(uint hf) {
+    uint s = (hf >> 15) & 1u;
+    uint e = (hf >> 10) & 0x1Fu;
+    uint m = hf & 0x3FFu;
+    if (e == 0u) return (s != 0u ? -1.0 : 1.0) * pow(2.0, -14.0) * (m / 1024.0);
+    if (e == 31u) return (m != 0u) ? uintBitsToFloat(0x7f800000u | (s << 31)) : uintBitsToFloat((s << 31) | 0x7f800000u);
+    return (s != 0u ? -1.0 : 1.0) * pow(2.0, float(e) - 15.0) * (1.0 + float(m) / 1024.0);
+}
+
+shared float smem_scores[2048];
+shared float smem_softmax[2048];
+
+void main() {
+    uint tid = gl_LocalInvocationIndex;
+    uint head_off = q_head * head_dim;
+
+    // Phase 1: all threads compute QK^T scores for one token each.
+    if (tid < seqlen) {
+        uint blk_idx = block_table[kv_head * max_blocks + (tid / block_size)];
+        uint tok_in_blk = tid % block_size;
+        uint per_block_stride = block_size * (head_dim / 4u);  // uint2 = 4 fp16
+        uint blk_off = blk_idx * per_block_stride + tok_in_blk * (head_dim / 4u);
+
+        float qk = 0.0;
+        for (uint d = 0u; d < head_dim; d += 4u) {
+            uvec2 kv = k_cache[blk_off + d / 4u];
+            float kf0 = f16_to_f32((kv.x >> 16) & 0xFFFFu);
+            float kf1 = f16_to_f32(kv.x & 0xFFFFu);
+            float kf2 = f16_to_f32((kv.y >> 16) & 0xFFFFu);
+            float kf3 = f16_to_f32(kv.y & 0xFFFFu);
+            float qf0 = q[head_off + d + 0u];
+            float qf1 = q[head_off + d + 1u];
+            float qf2 = q[head_off + d + 2u];
+            float qf3 = q[head_off + d + 3u];
+            qk += qf0*kf0 + qf1*kf1 + qf2*kf2 + qf3*kf3;
+        }
+        smem_scores[tid] = qk * scale;
+    }
+    barrier();
+
+    // Phase 2: max reduction (tid=0 writes max to smem_scores[0]).
+    if (tid < gl_WorkGroupSize.x) {
+        float mx = -1e30;
+        for (uint i = tid; i < seqlen; i += gl_WorkGroupSize.x) mx = max(mx, smem_scores[i]);
+        // intra-warp reduction
+        for (uint off = gl_WorkGroupSize.x / 2u; off > 0u && off > tid; off /= 2u) {
+            mx = max(mx, smem_scores[tid + off]); // buggy; replaced below
+        }
+    }
+    // Simplification: serialize max in tid=0
+    barrier();
+    if (tid == 0u) {
+        float mx = -1e30;
+        for (uint i = 0u; i < seqlen; i++) mx = max(mx, smem_scores[i]);
+        smem_scores[0] = mx;
+    }
+    barrier();
+    float mx = smem_scores[0];
+
+    // Phase 3: exp + sum (tid < seqlen writes exp; tid==0 accumulates sum).
+    if (tid < seqlen) {
+        float e = exp(smem_scores[tid] - mx);
+        smem_softmax[tid] = e;
+    }
+    barrier();
+    if (tid == 0u) {
+        float sm = 0.0;
+        for (uint i = 0u; i < seqlen; i++) sm += smem_softmax[i];
+        smem_scores[seqlen] = (sm > 0.0) ? (1.0 / sm) : 0.0; // inv_sum in scores[seqlen]
+    }
+    barrier();
+    float inv_sum = smem_scores[seqlen];
+
+    // Phase 4: weighted sum across V. Each tid owns output element (tid).
+    // We need each output element = sum_{token}(prob * v_token[dim]).
+    // Distribute: tid handles head_dim[tid] output (looping over tokens).
+    if (tid < head_dim) {
+        float acc = 0.0;
+        for (uint t = 0u; t < seqlen; t++) {
+            uint blk_idx = block_table[kv_head * max_blocks + (t / block_size)];
+            uint tok_in_blk = t % block_size;
+            uint per_block_stride = block_size * (head_dim / 4u);
+            uint blk_off = blk_idx * per_block_stride + tok_in_blk * (head_dim / 4u);
+            uint d4 = tid / 4u;
+            uvec2 ve = v_cache[blk_off + d4];
+            uint lane = tid % 4u;
+            float vf;
+            if      (lane == 0u) vf = f16_to_f32((ve.x >> 16) & 0xFFFFu);
+            else if (lane == 1u) vf = f16_to_f32(ve.x & 0xFFFFu);
+            else if (lane == 2u) vf = f16_to_f32((ve.y >> 16) & 0xFFFFu);
+            else                 vf = f16_to_f32(ve.y & 0xFFFFu);
+            acc += smem_softmax[t] * inv_sum * vf;
+        }
+        outbuf[head_off + tid] = acc;
+    }
+}

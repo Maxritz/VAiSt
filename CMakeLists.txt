@@ -194,6 +194,7 @@ endforeach()
 # Mirrors scripts/run_vulkan_checks.sh (ctest + spirv-val must pass).
 # -----------------------------------------------------------------------------
 set(VAIST_SHADERS
+  vkattn/baseline/attn_flash_decode.comp
   vkblas/gemm_f32_tiled.comp
   vkblas/matvec_ternary.comp
   vkblas/matvec_binar.comp
@@ -251,7 +252,8 @@ if(VAIST_ENABLE_VULKAN AND GLSLANG_VALIDATOR AND Python3_Interpreter_FOUND)
   add_custom_command(
     OUTPUT "${VAIST_BLAS_SPV_HDR}"
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/spirv_to_header.py" "${VAIST_BLAS_SPV_HDR}"
-            "vaist_spv_gemm_f32_tiled" "${VAIST_SHADER_OUT_DIR}/vkblas/gemm_f32_tiled.comp.spv"
+             "vaist_spv_gemm_f32_tiled" "${VAIST_SHADER_OUT_DIR}/vkblas/gemm_f32_tiled.comp.spv"
+             "vaist_spv_attn_flash_decode" "${VAIST_SHADER_OUT_DIR}/vkattn/baseline/attn_flash_decode.comp.spv"
             "vaist_spv_matvec_ternary" "${VAIST_SHADER_OUT_DIR}/vkblas/matvec_ternary.comp.spv"
             "vaist_spv_matvec_binar"   "${VAIST_SHADER_OUT_DIR}/vkblas/matvec_binar.comp.spv"
             "vaist_spv_qgemm_q8_0"     "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q8_0.comp.spv"
