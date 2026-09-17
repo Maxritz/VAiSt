@@ -1,0 +1,2 @@
+#include "vaist_tensor.h"
+namespace vaist { class Tensor { VaistTensor*p_; public: Tensor():p_(nullptr){} ~Tensor(){vaist_tensor_destroy(p_);} VaistStatus create(VaistDType t,const uint64_t*s,uint32_t r){return vaist_tensor_create(t,r,s,&p_);} VaistTensor* get()const{return p_;} }; }

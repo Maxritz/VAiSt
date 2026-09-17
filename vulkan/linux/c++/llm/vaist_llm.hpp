@@ -1,0 +1,2 @@
+#include "vaist_llm.h"
+namespace vaist { class KV { VaistKVCache*p_; public: KV():p_(nullptr){} ~KV(){vaist_kv_destroy(p_);} VaistStatus create(size_t c,size_t w){return vaist_kv_create(c,w,&p_);} }; }

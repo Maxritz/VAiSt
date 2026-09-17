@@ -1,0 +1,16 @@
+build*/
+build-*/
+*.obj
+*.o
+*.exe
+*.dll
+*.lib
+*.exp
+*.pdb
+*.log
+*.out
+run.log
+run_out.txt
+_probe_main.obj
+Testing/
+.opencode/
