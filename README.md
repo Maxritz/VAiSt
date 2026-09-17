@@ -753,19 +753,50 @@ We welcome contributions. Here is how to get started:
 
 ---
 
-### 🛠️ Remaining Engineering Gaps (New Native Vulkan Kernels Required)
+### 🛠️ Remaining Engineering Gaps (Native Vulkan kernels required)
 
-To complete the pure C++/Vulkan engine, the following missing features must be implemented as native VAiT-style libraries:
+To complete the VAiSt C99 runtime + Vulkan engine, the following feature
+families are architecturally feasible but not yet implemented. Acceleration
+strategy is informed by the **HipKittens** paper (Hazy Research,
+arxiv:2511.08083) and the ThunderKittens tile primitives
+(https://github.com/HazyResearch/ThunderKittens):
 
-1. **Attention Families:** MHA, MLA, GDN, Sparse, and Paged attention variants.
-2. **KV-Cache:** Paged block-table management.
-3. **MoE:** Fused routing, grouped expert GEMM, and expert-parallel communication.
-4. **Positional Embeddings:** RoPE and mRoPE kernels.
-5. **Sampling:** Top-K, Top-P, nucleus, and rejection-sampling wrappers.
-6. **Quantization Extensions:** FP8 and MXFP4 compute paths.
-7. **Distributed Collectives:** TP, EP, and PP primitives.
-8. **Advanced Speculative Decoding:** EAGLE-3 / dspark scaffolding.
-9. **Mamba:** Native Conv1D integration.
+1. **Attention Families** — MHA, MLA, GDN, Sparse, and Paged attention
+   variants. Use 16×16 register/shared-memory tiles with
+   load-store-compute-finish pipelining (the tile abstraction generalizes
+   across vendors per HipKittens §2).
+2. **KV-Cache** — paged block-table management + compression
+   (`vkkv` ridge-transfer exists but paged KV cache + the chiplet-aware grid
+   scheduling needed on AMD MI3xx do not).
+3. **MoE** — fused routing, grouped expert GEMM, expert-parallel. Use
+   HipKittens 8-wave ping-pong (not NVIDIA wave specialization, which
+   underperforms on AMD due to no register reallocation).
+4. **Positional Embeddings** — RoPE, mRoPE kernels (16×16 tile transpose via
+   `transpose_sep`-style separate args).
+5. **Sampling** — Top-K, Top-P/nucleus, rejection-sampling wrappers
+   (`vkrand` provides the PRNG; policy not wired).
+6. **Quantization Extensions** — FP8 and MXPF4 compute paths (22 ggml-block
+   dequant/quant shaders exist; FP8/MXPF4 do not).
+7. **Distributed Collectives** — TP, EP, PP primitives (`vkdist` provides TCP
+   GEMM; collectives + LLC/L2-aware grid scheduling across chiplets not yet).
+8. **Advanced Speculative Decoding** — EAGLE-3 / dspark scaffolding.
+9. **Mamba** — native Conv1D integration (tile-based, 16×16).
+
+**Microarchitectural notes sourced from HipKittens §1–3 (port to Vulkan
+subgroup / cooperative-matrix, not CUDA):**
+
+- **AMD scheduling** — wave specialization underperforms on CDNA (no register
+  reallocation). Prefer 8-wave ping-pong (compute↔memory cluster alternation)
+  or 4-wave interleave (fine-grained small-tile schedule).
+- **Chiplet-aware grid launch** — AMD MI3xx has 8 XCDs (private L2 + shared
+  LLC); round-robin thread-block scheduling thrashes cache. Reorganize the
+  grid launch order to balance L2 (per-XCD) and LLC (shared) reuse.
+- **Shared-memory swizzling** — AMD `ds_read_b128` (64 banks) and `ds_write_b64`
+  (32 banks) demand per-instruction swizzle patterns; no single pattern fits
+  all layouts. `buffer_load_dword` bypasses the register file (TMA-like).
+- **Tile shapes** — AMD MFMA uses 16×16×32 (vs NVIDIA WGMMA 256×256×16); the
+  2× larger AMD register file + finer granularity is the pipeline-depth
+  alternative to deep multi-stage pipelining.
 
 ---
 
