@@ -1,0 +1,2 @@
+#include "vaist_runtime.h"
+namespace vaist { class Runtime { VaistRuntime*p_; public: explicit Runtime(VaistBackend b=VAIST_BACKEND_AUTO):p_(nullptr){if(vaist_runtime_create(b,&p_)!=VAIST_OK)p_=nullptr;} ~Runtime(){vaist_runtime_destroy(p_);} Runtime(const Runtime&)=delete; Runtime& operator=(const Runtime&)=delete; VaistRuntime* get()const{return p_;} VaistRuntimeInfo info()const{VaistRuntimeInfo i{};vaist_runtime_info(p_,&i);return i;} }; }

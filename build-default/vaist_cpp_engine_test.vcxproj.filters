@@ -1,0 +1,16 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="C:\Users\rina0423\Desktop\VAiSt\vulkan\windows\c++\engine\test_engine.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\rina0423\Desktop\VAiSt\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{FCBB3AA6-AA4C-3A6B-ACEC-3229BE9287CA}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,2 @@
+C:/vaist/bi/CMakeFiles/CMakeScratch/TryCompile-cegrm4/CMakeFiles/cmTC_af9aa.dir
+C:/vaist/bi/CMakeFiles/CMakeScratch/TryCompile-cegrm4/CMakeFiles/ALL_BUILD.dir

@@ -49,8 +49,9 @@ VAiSt fixes this by starting from first principles:
   supports and falls back gracefully.
 
 - **Shared shader sources.** ~191 GLSL compute shader sources compile into
-  SPIR-V binaries via compile-time specialization (~63 sources per lib across vkblas/vkmath/vkquant/vkrand/vkfft/vkblas_l1l2/vkkv; per-lib counts vary), compiling to
-  218 SPIR-V blobs. Specialization varies tile/wave at
+  SPIR-V binaries via compile-time specialization (sources distributed across
+  vkblas/vkmath/vkquant/vkrand/vkfft/vkblas_l1l2; per-lib counts vary),
+  compiling to 191 SPIR-V blobs. Specialization varies tile/wave at
   pipeline-creation time, not by pre-compiled variants.
 
 ---
@@ -87,7 +88,7 @@ VAiSt
 ├── specs/                Design docs, ISA reference, architecture notes
 │   ├── Common_Issues.md        GPU hang / device-lost / fence issues (catalog)
 │   └── (per-subsystem specs)
-├── tests/                17+ test harnesses (build + run green on RX 9070 XT)
+├── tests/                19 test harnesses (12 vk-library tests + 7 runtime/CTest) (build + run green on RX 9070 XT)
 ├── docs/                 Vulkan ↔ Torch migration guide
 ├── build/                Default build (no Vulkan SDK)
 └── build-vk-on/          VAIST_ENABLE_VULKAN=ON (sandbox SDK 1.4.357)
@@ -375,11 +376,12 @@ in `specs/VKDIST-DESIGN.md`.
 - **`vkr_create_device` deliverable** — canonical full-feature device creation
   (`src/vkruntime/vkruntime.c`); all Vulkan 1.1-1.4 features enabled, cooperative
   matrix gated on `VAIT_COOPMATRIX`.
-- **All 17 tests PASS on RX 9070 XT** (`ctest -C Release`).
+- **All 19 tests PASS on RX 9070 XT** (`ctest -C Release`).
 
-> Test count: 17 always-built harnesses (conv3d, conv12d, vkblas, vkmath,
-> vkquant, vkrand, vkfft, vkruntime, vkblas_l1l2, vkmodel, vkkv, vkstream,
-> vkdist, ...). Run `ctest -C Release` for the authoritative count.
+> CTest registers 19 targets: 12 `vaist_cpp_<mod>_test` (one per module incl. `attn`),
+> `stack_smoke`, `linalg_test`, `blas_test`, `vaist_blas_vulkan_test`, `cpp_smoke`.
+> The `tests/test_vk*.c` files are standalone validation binaries (vkblas, vkmath, etc.)
+> Run `ctest -C Release` for the authoritative count.
 - **All 8 ext BLAS ops** (trsv/trsm/symv/hemv/symm/hemm/syrk/herk) pass in both
   f32 and f16 — f16 variants convert alpha/beta via `vkblas_f16_to_f32` before dispatch.
 
@@ -537,7 +539,7 @@ cmake --build build-msvc --config Release
 ctest --test-dir build-msvc -C Release
 ```
 
-All 17 tests pass on RX 9070 XT (Vulkan SDK 1.4.357.0).
+All 19 tests pass on RX 9070 XT (Vulkan SDK 1.4.357.0).
 
 The `vaist_*` C99 runtime builds as part of the same CMake project. Default
 build (no Vulkan):

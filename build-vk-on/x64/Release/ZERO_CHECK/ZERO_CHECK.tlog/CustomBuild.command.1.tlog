@@ -1,0 +1,10 @@
+^C:\VAIST\BUILD-VK-ON\CMAKEFILES\E9BAB00DB70DA25815BEF996A19A2722\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/vaist -BC:/vaist/build-vk-on --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/vaist/build-vk-on/VAiSt.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

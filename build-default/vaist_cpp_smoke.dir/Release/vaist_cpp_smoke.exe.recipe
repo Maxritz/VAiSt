@@ -1,0 +1,56 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <ProjectOutputs>
+    <ProjectOutput>
+      <FullPath>C:\Users\rina0423\Desktop\VAiSt\build-default\x64\Release\ZERO_CHECK</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\rina0423\Desktop\VAiSt\build-default\Release\vaist_core.dll</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\rina0423\Desktop\VAiSt\build-default\Release\vaist_ai.dll</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\rina0423\Desktop\VAiSt\build-default\Release\vaist_runtime.dll</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\rina0423\Desktop\VAiSt\build-default\Release\vaist_compute.dll</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\rina0423\Desktop\VAiSt\build-default\Release\vaist_blas.dll</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\rina0423\Desktop\VAiSt\build-default\Release\vaist_distributed.dll</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\rina0423\Desktop\VAiSt\build-default\Release\vaist_engine.dll</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\rina0423\Desktop\VAiSt\build-default\Release\vaist_graph.dll</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\rina0423\Desktop\VAiSt\build-default\Release\vaist_linalg.dll</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\rina0423\Desktop\VAiSt\build-default\Release\vaist_llm.dll</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\rina0423\Desktop\VAiSt\build-default\Release\vaist_model.dll</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\rina0423\Desktop\VAiSt\build-default\Release\vaist_nn.dll</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\rina0423\Desktop\VAiSt\build-default\Release\vaist_quant.dll</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\rina0423\Desktop\VAiSt\build-default\Release\vaist_tensor.dll</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\rina0423\Desktop\VAiSt\build-default\Release\vaist_cpp_smoke.exe</FullPath>
+    </ProjectOutput>
+  </ProjectOutputs>
+  <ContentFiles />
+  <SatelliteDlls />
+  <NonRecipeFileRefs />
+</Project>

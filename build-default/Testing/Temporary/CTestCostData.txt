@@ -1,0 +1,22 @@
+vaist_cpp_blas_test 1 0.0633954
+vaist_cpp_linalg_test 2 0.0161084
+stack_smoke 2 0.0204345
+linalg_test 2 0.0175084
+blas_test 3 0.0128765
+vaist_blas_vulkan_test 3 0.012833
+vaist_cpp_core_test 1 0.0665875
+vaist_cpp_runtime_test 1 0.0658772
+vaist_cpp_tensor_test 2 0.0142754
+vaist_cpp_compute_test 1 0.0632127
+vaist_cpp_quant_test 1 0.0628416
+vaist_cpp_graph_test 1 0.0660851
+vaist_cpp_model_test 1 0.063085
+vaist_cpp_nn_test 1 0.0689619
+vaist_cpp_llm_test 1 0.0660034
+vaist_cpp_engine_test 1 0.0638169
+vaist_cpp_ai_test 1 0.0611831
+vaist_cpp_distributed_test 1 0.0684333
+cpp_smoke 2 0.0175388
+python_component_load 0 0
+clean_staging_load 0 0
+---
