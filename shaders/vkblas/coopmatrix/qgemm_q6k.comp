@@ -1,0 +1,139 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_KHR_cooperative_matrix : enable
+
+// Fused coopmatrix quantized GEMM: y = alpha * (dequant_q6k(W) * x) + beta * y.
+//
+// Q6_K block: 210 B/block of 256 elems (ggml block_q6_K).
+// out = d*sc*(level-32)
+
+layout(constant_id = 0) const uint TILE_M   = 16;
+layout(constant_id = 1) const uint TILE_N   = 16;
+layout(constant_id = 2) const uint TILE_K   = 16;
+layout(constant_id = 3) const uint SG_WIDTH = 32;
+
+#define CM_M 16
+#define CM_N 16
+#define CM_K 16
+#define CM_SCOPE   3
+#define CM_USE_A   0
+#define CM_USE_B   1
+#define CM_USE_ACC 2
+
+layout(push_constant) uniform PC {
+    uint  m, n, k;
+    float alpha, beta;
+    uint  lda, ldb, ldc, ldd;
+    int   transA, transB, beta_is_zero, _pad0;
+    uint  strideA, strideB, strideC, strideD;
+    uint  batchCount, _pad1, _pad2, _pad3;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufW { uint8_t data_W[]; };
+layout(set = 0, binding = 1) restrict readonly buffer BufX { float data_X[]; };
+layout(set = 0, binding = 2) restrict readonly buffer BufY { float data_Y[]; };
+layout(set = 0, binding = 3) writeonly  buffer BufZ { float data_Z[]; };
+
+shared float As[CM_M * CM_K];
+shared float Bs[CM_K * CM_N];
+shared float Ds[CM_M * CM_N];
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+coopmat<float, CM_SCOPE, CM_M, CM_K, CM_USE_A>  a_frag;
+coopmat<float, CM_SCOPE, CM_K, CM_N, CM_USE_B>  b_frag;
+coopmat<float, CM_SCOPE, CM_M, CM_N, CM_USE_ACC> acc_frag;
+
+void main() {
+    uint lane   = gl_LocalInvocationIndex;
+    uint grRow  = gl_WorkGroupID.x;
+    uint grCol  = gl_WorkGroupID.y;
+    uint batch  = gl_WorkGroupID.z;
+
+    uint globalRow0 = grRow * CM_M;
+    uint globalCol0 = grCol * CM_N;
+
+    uint numTiles = (pc.k + CM_K - 1) / CM_K;
+
+    for (uint t = 0; t < numTiles; ++t) {
+        for (uint i = lane; i < CM_M * CM_K; i += SG_WIDTH) {
+            uint r   = i / CM_K;
+            uint c   = i % CM_K;
+            uint aRow = globalRow0 + r;
+            uint aCol = t * CM_K + c;
+
+            float val = 0.0f;
+            if (aRow < pc.m && aCol < pc.k) {
+                uint kk     = aCol;
+                uint block  = kk / 256u;
+                uint lane2  = kk & 255u;
+                uint base   = aRow * pc.lda + block * 210u;
+
+                uint d_bits = uint(data_W[base + 208u]) | (uint(data_W[base + 209u]) << 8u);
+                float d = unpackHalf2x16(d_bits).x;
+
+                uint chunk = lane2 >> 7u;
+                uint sub   = (lane2 >> 5u) & 3u;
+                uint l     = lane2 & 31u;
+                uint is    = l >> 4u;
+
+                uint ql_off = chunk * 64u + l + (sub & 1u) * 32u;
+                uint qh_off = chunk * 32u + l;
+                uint sc_off = chunk * 8u + is + sub * 2u;
+
+                uint ql = uint(data_W[base + ql_off]);
+                uint qh = uint(data_W[base + 128u + qh_off]);
+                uint ql4 = (sub == 0u || sub == 1u) ? (ql & 0xFu) : (ql >> 4u);
+                uint qh2 = (qh >> (sub * 2u)) & 3u;
+                int  level = int(ql4 | (qh2 << 4u)) - 32;
+
+                int  sc = int(int8_t(data_W[base + 192u + sc_off]));
+                val = d * float(sc) * float(level);
+            }
+            As[i] = val;
+        }
+
+        for (uint i = lane; i < CM_K * CM_N; i += SG_WIDTH) {
+            uint r   = i / CM_N;
+            uint c   = i % CM_N;
+            uint bRow = t * CM_K + r;
+            uint bCol = globalCol0 + c;
+
+            bool in_k = bRow < pc.k;
+            bool in_n = bCol < pc.n;
+            Bs[i] = (in_k && in_n) ? data_X[bRow + bCol * pc.ldb + batch * pc.strideB] : 0.0f;
+        }
+
+        barrier();
+
+        coopMatLoad(a_frag, As, 0, CM_K, 0);
+        coopMatLoad(b_frag, Bs, 0, CM_N, 0);
+        acc_frag = coopMatMulAdd(a_frag, b_frag, acc_frag);
+
+        barrier();
+    }
+
+    coopMatStore(acc_frag, Ds, 0, CM_N, 0);
+    barrier();
+
+    for (uint i = lane; i < CM_M * CM_N; i += SG_WIDTH) {
+        uint r = i / CM_N;
+        uint c = i % CM_N;
+
+        uint globalRow = globalRow0 + r;
+        uint globalCol = globalCol0 + c;
+
+        if (globalRow >= pc.m || globalCol >= pc.n) { continue; }
+
+        float result = pc.alpha * Ds[i];
+
+        if (pc.beta_is_zero == 0) {
+            uint cIdx = globalRow + globalCol * pc.ldc + batch * pc.strideC;
+            result += pc.beta * data_Y[cIdx];
+        }
+
+        uint dIdx = globalRow + globalCol * pc.ldd + batch * pc.strideD;
+        data_Z[dIdx] = result;
+    }
+}

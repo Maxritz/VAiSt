@@ -1,0 +1,61 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Q6_K block dequantization to f32 (ggml block_q6_K, 210 bytes/block).
+// Layout: uint8_t ql[128], uint8_t qh[64], int8_t scales[16], ggml_half d.
+// Dequant (canonical ggml dequantize_row_q6_K), QK_K = 256 elements:
+//   2 chunks of 128. Within a chunk, for l in [0,32), is = l/16:
+//     q1 = ((ql[l]&0xF)     | ((qh[l]>>0)&3)<<4) - 32   -> y[l+0]
+//     q2 = ((ql[l+32]&0xF)  | ((qh[l]>>2)&3)<<4) - 32   -> y[l+32]
+//     q3 = ((ql[l]>>4)      | ((qh[l]>>4)&3)<<4) - 32   -> y[l+64]
+//     q4 = ((ql[l+32]>>4)   | ((qh[l]>>6)&3)<<4) - 32   -> y[l+96]
+//   y = d * sc[is + sub*2] * q, sc int8 (signed)
+// One thread per output element; block = idx >> 8, lane = idx & 255.
+
+layout(push_constant) uniform PC {
+    uint num_blocks;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn {
+    uint8_t raw[];
+};
+layout(scalar, set = 0, binding = 2) writeonly buffer BufOut {
+    float out_f32[];
+};
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = pc.num_blocks * 256u;
+    if (idx >= total) { return; }
+
+    uint block = idx >> 8;
+    uint lane  = idx & 255u;
+    uint base  = block * 210u;
+
+    uint d_bits = uint(raw[base + 208u]) | (uint(raw[base + 209u]) << 8u);
+    float d = unpackHalf2x16(d_bits).x;
+
+    uint chunk = lane >> 7;          /* 0..1                                  */
+    uint sub   = (lane >> 5) & 3u;   /* q1..q4 within chunk                   */
+    uint l     = lane & 31u;
+    uint is    = l >> 4;             /* 0..1 -> scale index low 2 of sub's 8  */
+
+    uint ql_off = chunk * 64u + l + (sub & 1u) * 32u;
+    uint qh_off = chunk * 32u + l;
+    uint sc_off = chunk * 8u + is + sub * 2u;
+
+    uint ql = uint(raw[base + ql_off]);
+    uint qh = uint(raw[base + 128u + qh_off]);
+    uint ql4 = (sub == 0u || sub == 1u) ? (ql & 0xFu) : (ql >> 4u);
+    uint qh2 = (qh >> (sub * 2u)) & 3u;
+    int level = int(ql4 | (qh2 << 4u)) - 32;
+
+    int sc = int(int8_t(raw[base + 192u + sc_off]));
+    out_f32[idx] = d * float(sc) * float(level);
+}

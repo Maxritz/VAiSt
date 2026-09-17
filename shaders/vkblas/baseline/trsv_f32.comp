@@ -1,0 +1,112 @@
+#version 450
+
+/**
+ * \file trsv_f32.comp
+ * \brief Triangular solve for vectors (BLAS Level 2):  op(A) * x = alpha * b
+ *
+ * Classic forward-/back-substitution on the lower/upper triangle of a
+ * column-major matrix A. The vector b is scaled by alpha then overwritten
+ * with the solution x in-place in the output buffer.
+ *
+ * Field mapping (reuses the shared vkblas push-constant block):
+ *   pc.m      = n    (matrix is n x n)
+ *   pc.lda    = leading dimension of A
+ *   pc.ldb    = incb (must be 1)
+ *   pc.ldc    = incx (must be 1)
+ *   pc.transA = 0 normal, 1 transpose
+ *   pc.transB = uplo: 0 lower, 1 upper
+ *   pc._pad0  = diag: 0 non-unit, 1 unit
+ */
+
+layout(push_constant) uniform PC {
+    uint  m;        /* n (square dimension: rows == cols) */
+    uint  n;        /* unused (==0) */
+    uint  k;        /* unused (==0) */
+    float alpha;    /* scale applied to b before solve */
+    float beta;     /* unused */
+    uint  lda;      /* leading dim of A */
+    uint  ldb;      /* incb (==1 always) */
+    uint  ldc;      /* incx (==1 always) */
+    uint  ldd;      /* unused */
+    int   transA;   /* VKBLAS_OP_N=0, VKBLAS_OP_T=1 */
+    int   transB;   /* uplo: 0 = lower, 1 = upper */
+    int   beta_is_zero; /* unused */
+    int   _pad0;    /* diag: 0 = non-unit, 1 = unit */
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  _pad2;
+    uint  _pad3;
+} pc;
+
+layout(set = 0, binding = 0) restrict readonly buffer BufA { float data_A[]; };
+layout(set = 0, binding = 1) restrict readonly buffer BufB { float data_B[]; };
+layout(set = 0, binding = 2) restrict readonly buffer BufC { float data_C[]; };
+layout(set = 0, binding = 3) buffer BufD { float data_D[]; };   /* read/write: in-out x */
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    const uint n   = pc.m;
+    const bool lowerA      = (pc.transB == 0);
+    const bool unitDiag    = (pc._pad0 == 1);
+    const uint batch       = gl_WorkGroupID.x;
+    const uint aOff        = batch * pc.strideA;
+    const uint bOff        = batch * pc.strideB;
+    const uint xOff        = batch * pc.strideD;
+
+    /* Copy, scale:  x = alpha * b  (then solve op(A) x_new = x) */
+    for (uint i = 0; i < n; ++i)
+        data_D[xOff + i] = pc.alpha * data_B[bOff + i];
+
+    if (pc.transA == 0) {
+        /* No transpose */
+        if (lowerA) {
+            /* Forward substitution: L x = b */
+            for (uint i = 0; i < n; ++i) {
+                float sum = data_D[xOff + i];
+                for (uint j = 0; j < i; ++j)
+                    sum -= data_A[aOff + i + j * pc.lda] * data_D[xOff + j];
+                float diag = unitDiag ? 1.0 : data_A[aOff + i + i * pc.lda];
+                data_D[xOff + i] = sum / diag;
+            }
+        } else {
+            /* Back substitution: U x = b */
+            for (int ii = int(n) - 1; ii >= 0; --ii) {
+                uint i = uint(ii);
+                float sum = data_D[xOff + i];
+                for (uint j = i + 1; j < n; ++j)
+                    sum -= data_A[aOff + i + j * pc.lda] * data_D[xOff + j];
+                float diag = unitDiag ? 1.0 : data_A[aOff + i + i * pc.lda];
+                data_D[xOff + i] = sum / diag;
+            }
+        }
+    } else {
+        /* Transpose: A^T.  A^T has opposite triangle.  A^T x = b:
+           - Original lower A  -> A^T is upper -> back substitution
+           - Original upper A  -> A^T is lower -> forward substitution */
+        if (lowerA) {
+            /* A^T upper (since A lower): back substitution */
+            for (int ii = int(n) - 1; ii >= 0; --ii) {
+                uint i = uint(ii);
+                float sum = data_D[xOff + i];
+                for (uint j = i + 1; j < n; ++j)
+                    sum -= data_A[aOff + j + i * pc.lda] * data_D[xOff + j];
+                float diag = unitDiag ? 1.0 : data_A[aOff + i + i * pc.lda];
+                data_D[xOff + i] = sum / diag;
+            }
+        } else {
+            /* A^T lower (since A upper): forward substitution */
+            for (uint i = 0; i < n; ++i) {
+                float sum = data_D[xOff + i];
+                for (uint j = 0; j < i; ++j)
+                    sum -= data_A[aOff + j + i * pc.lda] * data_D[xOff + j];
+                float diag = unitDiag ? 1.0 : data_A[aOff + i + i * pc.lda];
+                data_D[xOff + i] = sum / diag;
+            }
+        }
+    }
+}

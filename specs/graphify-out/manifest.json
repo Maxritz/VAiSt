@@ -1,0 +1,92 @@
+{
+  "vk_mem_alloc.h": {
+    "mtime": 1785185547.7233815,
+    "ast_hash": "1645b0f4f757edcc808247f226b57c5d",
+    "semantic_hash": "1645b0f4f757edcc808247f226b57c5d"
+  },
+  "vulkan_core.h": {
+    "mtime": 1785182831.254215,
+    "ast_hash": "167a1403aca4eb9e14450deac9e6260e",
+    "semantic_hash": "167a1403aca4eb9e14450deac9e6260e"
+  },
+  "rdna2_isa.txt": {
+    "mtime": 1786262528.708591,
+    "ast_hash": "c68afbb411d5a93dda2a45d441c8f8ce",
+    "semantic_hash": "c68afbb411d5a93dda2a45d441c8f8ce"
+  },
+  "rdna4_isa.txt": {
+    "mtime": 1786262539.2485726,
+    "ast_hash": "72bfe8d60803b429ddb850b8b284cd67",
+    "semantic_hash": "72bfe8d60803b429ddb850b8b284cd67"
+  },
+  "vulkan_layers_whitepaper.txt": {
+    "mtime": 1786262540.2074628,
+    "ast_hash": "79cec6749838c01de8c19e22b194fa4a",
+    "semantic_hash": "79cec6749838c01de8c19e22b194fa4a"
+  },
+  "validusage.json": {
+    "mtime": 1785182831.3615844,
+    "ast_hash": "30bd26902e7e9886e142a769d1aa6ac6",
+    "semantic_hash": "30bd26902e7e9886e142a769d1aa6ac6"
+  },
+  "vk_amd_extensions.txt": {
+    "mtime": 1786264748.363696,
+    "ast_hash": "8bd69283e6916e8ab0c0d31bdeed07a9",
+    "semantic_hash": "8bd69283e6916e8ab0c0d31bdeed07a9"
+  },
+  "vk_api_structs.txt": {
+    "mtime": 1786264748.3901868,
+    "ast_hash": "8a79b4b2fabdca65a55a8c7ac861bfac",
+    "semantic_hash": "8a79b4b2fabdca65a55a8c7ac861bfac"
+  },
+  "vk_coop_matrix.txt": {
+    "mtime": 1786264748.379674,
+    "ast_hash": "d1e6165bda69ed5f5a6fcca07a4f0f2e",
+    "semantic_hash": "d1e6165bda69ed5f5a6fcca07a4f0f2e"
+  },
+  "rocm-reference/amd_hip_cooperative_groups.h": {
+    "mtime": 1782253699.9328966,
+    "ast_hash": "1a407af67ab2ccd9e3f81d2845fca544",
+    "semantic_hash": "1a407af67ab2ccd9e3f81d2845fca544"
+  },
+  "rocm-reference/amd_hip_fp16.h": {
+    "mtime": 1782253699.9338958,
+    "ast_hash": "aae3c9f6cb6459a6bac1b54c778cc455",
+    "semantic_hash": "aae3c9f6cb6459a6bac1b54c778cc455"
+  },
+  "rocm-reference/hip_runtime_api.h": {
+    "mtime": 1782253700.647034,
+    "ast_hash": "fdc82c73bae88d8b3f665dc6d05442f6",
+    "semantic_hash": "fdc82c73bae88d8b3f665dc6d05442f6"
+  },
+  "rocm-reference/hipblas.h": {
+    "mtime": 1782302015.8810081,
+    "ast_hash": "4d5b0eb1d4d3644d9035ebbe11d68913",
+    "semantic_hash": "4d5b0eb1d4d3644d9035ebbe11d68913"
+  },
+  "rocm-reference/hipblaslt.h": {
+    "mtime": 1782253611.1865191,
+    "ast_hash": "6be3e374c51f65ec5ce7f8f3f942987b",
+    "semantic_hash": "6be3e374c51f65ec5ce7f8f3f942987b"
+  },
+  "rocm-reference/rocblas-functions.h": {
+    "mtime": 1782299608.3220656,
+    "ast_hash": "0386c524a8d31a5829385dbe6bfcda8a",
+    "semantic_hash": "0386c524a8d31a5829385dbe6bfcda8a"
+  },
+  "rocm-reference/rocblas.h": {
+    "mtime": 1782299608.4414256,
+    "ast_hash": "5706d87ed8f7c81d4c413e758f3e767c",
+    "semantic_hash": "5706d87ed8f7c81d4c413e758f3e767c"
+  },
+  "rocm-reference/rocfft.h": {
+    "mtime": 1782299145.8312156,
+    "ast_hash": "ebf1985ba673f2a0d654ab400c6f5c18",
+    "semantic_hash": "ebf1985ba673f2a0d654ab400c6f5c18"
+  },
+  "rocm-reference/rocrand.h": {
+    "mtime": 1782253694.2063968,
+    "ast_hash": "a366f32bc510804e7bb41633c2f92a03",
+    "semantic_hash": "a366f32bc510804e7bb41633c2f92a03"
+  }
+}

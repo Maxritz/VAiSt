@@ -1,0 +1,49 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Q4_0 block dequantization to f32.
+// Block = 20 bytes: f32 scale d (bytes 0..3) + 16 x uint8 packed nibbles
+// (bytes 4..19). For element i in [0, 32):
+//   xi = qs[i>>1];
+//   nibble = (i&1) ? (xi>>4) : (xi&0xF);
+//   v = (int)nibble - 8;
+//   out[i] = d * v.
+// One thread per output element; block = idx >> 5, lane = idx & 31.
+
+layout(push_constant) uniform PC {
+    uint num_blocks;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn {
+    uint8_t qs_raw[];
+};
+layout(scalar, set = 0, binding = 2) writeonly buffer BufOut {
+    float out_f32[];
+};
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = pc.num_blocks * 32u;
+    if (idx >= total) { return; }
+
+    uint block = idx >> 5;
+    uint lane  = idx & 31u;
+
+    uint base = block * 20u;
+    uint d_bits = uint(qs_raw[base]) |
+                 (uint(qs_raw[base + 1u]) << 8u) |
+                 (uint(qs_raw[base + 2u]) << 16u) |
+                 (uint(qs_raw[base + 3u]) << 24u);
+    float d = uintBitsToFloat(d_bits);
+
+    uint xi = uint(qs_raw[base + 4u + (lane >> 1u)]);
+    uint nib = (lane & 1u) != 0u ? (xi >> 4u) : (xi & 0xFu);
+    int v = int(nib) - 8;
+    out_f32[idx] = d * float(v);
+}

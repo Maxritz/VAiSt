@@ -1,0 +1,107 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Forward/inverse radix-2 complex FFT (f16 I/O), baseline tier.
+//
+// Same shared-memory Cooley-Tukey DIT structure as fft_f32.comp, but the
+// input/output buffers are interleaved float16_t (Re, Im) pairs (element j
+// lives at in[2j], in[2j+1]) while all internal compute and shared memory is
+// f32 (matches the f16 elementwise shader strategy in vkmath: f32 internal
+// compute, f16 I/O). GL_EXT_scalar_block_layout keeps the float16_t arrays
+// tightly packed.
+//
+// One workgroup of 256 threads per FFT; n active elements (n = power of two,
+// 2 <= n <= 1024) covered by a strided loop. Direction semantics match
+// fft_f32.comp: pc.direction == 0 forward (exp(-2*pi*i*j/m)), == 1 inverse
+// (exp(+2*pi*i*j/m)), unnormalized.
+//
+// Barrier rule: every thread in the workgroup (all 256) executes every
+// barrier() the same number of times; the strided-loop trip count iters is
+// uniform (derived from pc.n). Memory ops are guarded by (idx < pc.n);
+// barriers are kept outside any conditional.
+
+layout(push_constant) uniform PC {
+    uint n;          // FFT size (power of two, 2..1024)
+    uint log2n;      // log2(n)
+    uint direction;  // 0 = forward, 1 = inverse
+    uint mode;       // 0 = row (stride 1), 1 = col (stride n)
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn  { float16_t in_data[]; };
+layout(scalar, set = 0, binding = 2) writeonly           buffer BufOut { float16_t out_data[]; };
+
+shared vec2 s[1024];
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+uint bit_reverse(uint x, uint bits) {
+    uint r = 0u;
+    for (uint i = 0u; i < bits; i++) {
+        r = (r << 1u) | (x & 1u);
+        x >>= 1u;
+    }
+    return r;
+}
+
+// Complex multiply: a * b with Re/Im in vec2 (.x = Re, .y = Im).
+vec2 cmul(vec2 a, vec2 b) {
+    return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint iters = (pc.n + 255u) / 256u;
+
+    // Buffer slice: base = first element of the slice, stride = element step.
+    // Row: base = wg*n, stride 1. Col: base = wg, stride n.
+    uint base   = (pc.mode == 0u) ? gl_WorkGroupID.x * pc.n : gl_WorkGroupID.x;
+    uint stride = (pc.mode == 0u) ? 1u : pc.n;
+
+    // Load with bit-reversal permutation (f16 -> f32, interleaved Re/Im).
+    for (uint e = 0u; e < iters; e++) {
+        uint idx = tid + e * 256u;
+        if (idx < pc.n) {
+            uint buf_idx = base + idx * stride;
+            s[bit_reverse(idx, pc.log2n)] = vec2(
+                float(in_data[2u * buf_idx]),
+                float(in_data[2u * buf_idx + 1u]));
+        }
+    }
+    barrier();
+
+    // Twiddle sign: forward = -2*pi*i*j/m, inverse = +2*pi*i*j/m.
+    float dir = (pc.direction == 0u) ? -1.0 : 1.0;
+
+    for (uint m = 2u; m <= pc.n; m <<= 1u) {
+        uint hs = m >> 1u;  /* half of the stage size */
+        for (uint e = 0u; e < iters; e++) {
+            uint idx = tid + e * 256u;
+            if ((idx < pc.n) && ((idx & hs) == 0u)) {
+                uint j  = idx & (hs - 1u);
+                uint lo = idx;
+                uint hi = idx | hs;
+
+                float angle = dir * 6.283185307179586 * float(j) / float(m);
+                vec2  w     = vec2(cos(angle), sin(angle));
+
+                vec2 u = s[lo];
+                vec2 v = cmul(s[hi], w);
+
+                s[lo] = u + v;
+                s[hi] = u - v;
+            }
+        }
+        barrier();
+    }
+
+    // Write result (f32 -> f16, interleaved Re/Im).
+    for (uint e = 0u; e < iters; e++) {
+        uint idx = tid + e * 256u;
+        if (idx < pc.n) {
+            uint buf_idx = base + idx * stride;
+            out_data[2u * buf_idx]      = float16_t(s[idx].x);
+            out_data[2u * buf_idx + 1u] = float16_t(s[idx].y);
+        }
+    }
+}

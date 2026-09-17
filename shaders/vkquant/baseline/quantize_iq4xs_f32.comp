@@ -1,0 +1,131 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// IQ4_XS forward quantizer (136 B/block, 256 elems). ggml quantize_row_iq4_xs_ref (ntry=7 path).
+// 1 thread per 256-element block (thread 0 transliteration of the ggml ref).
+// Grid search is a direct exhaustive search over the embedded dequant grid tables
+// (in dequant units), replacing ggml's runtime kmap/neighbours optimisation.
+
+layout(push_constant) uniform PC {
+    uint num_blocks;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn {
+    float x[];
+};
+layout(scalar, set = 0, binding = 2) writeonly buffer BufOut {
+    uint8_t obytes[];
+};
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+int nearest_int(float fval) {
+    return int(round(fval));
+}
+
+
+const int iq4nl[16] = int[](-127, -104, -83, -65, -49, -35, -22, -10,
+                              1,   13,  25,  38,  53,  69,  89, 113);
+
+int best_index_int8(int n, int val[16], float xx) {
+    if (xx <= float(val[0])) return 0;
+    if (xx >= float(val[n-1])) return n-1;
+    int ml = 0, mu = n-1;
+    while (mu-ml > 1) {
+        int mav = (ml+mu)/2;
+        if (xx < float(val[mav])) mu = mav; else ml = mav;
+    }
+    return (xx - float(val[mu-1]) < float(val[mu]) - xx) ? mu-1 : mu;
+}
+
+void main_body(uint gblk) {
+    uint base_in = gblk * 256u;
+    uint base_out = gblk * 136u;
+
+    float scales[8];
+    int  L[256];
+
+    float max_scale = 0.0f, amax_scale = 0.0f;
+    for (int ib = 0; ib < 8; ++ib) {
+        float sumqx = 0.0f, sumq2 = 0.0f;
+        float amax = 0.0f, mx = 0.0f;
+        for (int i = 0; i < 32; ++i) {
+            float v = x[base_in + 32*ib + i];
+            float a = abs(v);
+            if (a > amax) { amax = a; mx = v; }
+        }
+        if (amax < 1e-15f) {
+            scales[ib] = 0.0f;
+            continue;
+        }
+        float d0 = -mx / float(iq4nl[0]);
+        float id = (d0 != 0.0f) ? (1.0f / d0) : 0.0f;
+        for (int i = 0; i < 32; ++i) {
+            L[32*ib + i] = best_index_int8(16, iq4nl, id * x[base_in + 32*ib + i]);
+            float q = float(iq4nl[L[32*ib + i]]);
+            float w = x[base_in + 32*ib + i] * x[base_in + 32*ib + i];
+            sumqx += w * q * x[base_in + 32*ib + i];
+            sumq2 += w * q * q;
+        }
+        float d = (sumq2 > 0.0f) ? (sumqx / sumq2) : 0.0f;
+        float best = d * sumqx;
+        for (int itry = -7; itry <= 7; ++itry) {
+            id = (float(itry) + float(iq4nl[0])) / mx;
+            sumqx = 0.0f; sumq2 = 0.0f;
+            for (int i = 0; i < 32; ++i) {
+                L[32*ib + i] = best_index_int8(16, iq4nl, id * x[base_in + 32*ib + i]);
+                float q = float(iq4nl[L[32*ib + i]]);
+                float w = x[base_in + 32*ib + i] * x[base_in + 32*ib + i];
+                sumqx += w * q * x[base_in + 32*ib + i];
+                sumq2 += w * q * q;
+            }
+            if (sumq2 > 0.0f && sumqx*sumqx > best*sumq2) {
+                d = sumqx / sumq2; best = d * sumqx;
+            }
+        }
+        scales[ib] = d;
+        float abs_d = abs(d);
+        if (abs_d > amax_scale) { amax_scale = abs_d; max_scale = d; }
+    }
+
+    for (int i = 0; i < 8; ++i) { obytes[base_out + 4u + uint(i)] = uint8_t(0u); }
+    float dblock = -max_scale / 32.0f;
+    uint dh = packHalf2x16(vec2(dblock, 0.0f));
+    obytes[base_out] = uint8_t(dh & 0xFFu);
+    obytes[base_out + 1u] = uint8_t((dh >> 8u) & 0xFFu);
+    float idb = (dblock != 0.0f) ? (1.0f / dblock) : 0.0f;
+    uint scales_h = 0u;
+    for (int ib = 0; ib < 8; ++ib) {
+        int l = nearest_int(idb * scales[ib]);
+        l = clamp(l, -32, 31);
+        float dl = dblock * float(l);
+        float idl = (dl != 0.0f) ? (1.0f / dl) : 0.0f;
+        for (int i = 0; i < 32; ++i) {
+            L[32*ib + i] = best_index_int8(16, iq4nl, idl * x[base_in + 32*ib + i]);
+        }
+        l += 32;
+        int l_l = l & 0xf;
+        int l_h = l >> 4;
+        if (ib % 2 == 0) obytes[base_out + 4u + uint(ib/2)] = uint8_t(l_l & 0xFF);
+        else obytes[base_out + 4u + uint(ib/2)] |= uint8_t((l_l & 0xF) << 4);
+        scales_h |= (uint(l_h & 0x3) << (2u * uint(ib % 8)));
+    }
+    obytes[base_out + 2u] = uint8_t(scales_h & 0xFFu);
+    obytes[base_out + 3u] = uint8_t((scales_h >> 8u) & 0xFFu);
+
+    for (int i = 0; i < 8; ++i) {
+        for (int j = 0; j < 16; ++j) {
+            uint q0 = uint(L[32*i + j]) & 0xFu;
+            uint q1 = uint(L[32*i + 16 + j]) & 0xFu;
+            obytes[base_out + 8u + uint(16*i + j)] = uint8_t(q0 | (q1 << 4u));
+        }
+    }
+}
+void main() {
+    uint gblk = gl_WorkGroupID.x;
+    if (gblk >= pc.num_blocks) { return; }
+    main_body(gblk);
+}

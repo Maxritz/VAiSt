@@ -1,0 +1,72 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// TQ1_0 block dequantization to f32 (ggml block_tq1_0, 54 bytes/block, 256 elems).
+// Layout: uint8_t qs[48] @0, uint8_t qh[4] @48, ggml_half d @52.
+// Dequant (canonical ggml dequantize_row_tq1_0), ternary (3 values), pow3 = {1,3,9,27,81,243}:
+//   first 5 groups of 32 (qs[0..31], n=0..4, m=0..31):
+//     q = qs[m]*pow3[n]; xi = (uint16(q)*3) >> 8; y = (xi-1)*d
+//   next 5 groups of 16 (qs[32..47], n=0..4, m=0..15):
+//     q = qs[32+m]*pow3[n]; xi = (uint16(q)*3) >> 8; y = (xi-1)*d
+//   last 4 groups of 4 (qh[0..3], n=0..3, m=0..3):
+//     q = qh[m]*pow3[n]; xi = (uint16(q)*3) >> 8; y = (xi-1)*d
+// uint8 q truncates byte*pow3 to 8 bits (matches ggml exactly).
+// One thread per output element; block = idx >> 8, lane = idx & 255.
+
+layout(push_constant) uniform PC {
+    uint num_blocks;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn {
+    uint8_t raw[];
+};
+layout(scalar, set = 0, binding = 2) writeonly buffer BufOut {
+    float out_f32[];
+};
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = pc.num_blocks * 256u;
+    if (idx >= total) { return; }
+
+    uint block = idx >> 8;
+    uint lane  = idx & 255u;
+    uint base  = block * 54u;
+
+    uint d_bits = uint(raw[base + 52u]) | (uint(raw[base + 53u]) << 8u);
+    float d = unpackHalf2x16(d_bits).x;
+
+    uint pow3;
+    uint byte;
+    if (lane < 160u) {
+        /* 5 groups of 32 from qs[0..31] */
+        uint n = lane >> 5;
+        uint m = lane & 31u;
+        pow3 = (n == 0u) ? 1u : (n == 1u) ? 3u : (n == 2u) ? 9u : (n == 3u) ? 27u : 81u;
+        byte = uint(raw[base + m]);
+    } else if (lane < 240u) {
+        /* 5 groups of 16 from qs[32..47] */
+        uint t = lane - 160u;
+        uint n = t >> 4;
+        uint m = t & 15u;
+        pow3 = (n == 0u) ? 1u : (n == 1u) ? 3u : (n == 2u) ? 9u : (n == 3u) ? 27u : 81u;
+        byte = uint(raw[base + 32u + m]);
+    } else {
+        /* 4 groups of 4 from qh[0..3] */
+        uint t = lane - 240u;
+        uint n = t >> 2;
+        uint m = t & 3u;
+        pow3 = (n == 0u) ? 1u : (n == 1u) ? 3u : (n == 2u) ? 9u : 27u;
+        byte = uint(raw[base + 48u + m]);
+    }
+
+    uint q = (byte * pow3) & 0xFFu;   /* ggml: uint8_t q = qs[m] * pow3[n] */
+    uint xi = (q * 3u) >> 8u;        /* ggml: (uint16_t)q * 3 >> 8        */
+    out_f32[idx] = (float(int(xi)) - 1.0f) * d;
+}

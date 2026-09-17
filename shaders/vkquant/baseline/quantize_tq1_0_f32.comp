@@ -1,0 +1,79 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// TQ1_0 forward quantizer (54 B/block, 256 elems). ggml quantize_row_tq1_0_ref.
+// 1 thread per 256-element block (thread 0 transliteration of the ggml ref).
+// Grid search is a direct exhaustive search over the embedded dequant grid tables
+// (in dequant units), replacing ggml's runtime kmap/neighbours optimisation.
+
+layout(push_constant) uniform PC {
+    uint num_blocks;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn {
+    float x[];
+};
+layout(scalar, set = 0, binding = 2) writeonly buffer BufOut {
+    uint8_t obytes[];
+};
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+int nearest_int(float fval) {
+    return int(round(fval));
+}
+
+
+void main_body(uint gblk) {
+    uint base_in = gblk * 256u;
+    uint base_out = gblk * 54u;
+
+    float amax = 0.0f;
+    for (uint i = 0u; i < 256u; ++i) {
+        float v = x[base_in + i];
+        float a = abs(v);
+        if (a > amax) amax = a;
+    }
+    float d = amax;
+    float id = (d != 0.0f) ? (1.0f / d) : 0.0f;
+
+    for (uint m = 0u; m < 32u; ++m) {
+        uint q = 0u;
+        for (uint n = 0u; n < 5u; ++n) {
+            int xi = nearest_int(x[base_in + m + n * 32u] * id) + 1;
+            q = q * 3u + uint(xi);
+        }
+        q = (q * 256u + 242u) / 243u;
+        obytes[base_out + m] = uint8_t(q);
+    }
+    for (uint m = 0u; m < 16u; ++m) {
+        uint q = 0u;
+        for (uint n = 0u; n < 5u; ++n) {
+            int xi = nearest_int(x[base_in + 160u + m + n * 16u] * id) + 1;
+            q = q * 3u + uint(xi);
+        }
+        q = (q * 256u + 242u) / 243u;
+        obytes[base_out + 32u + m] = uint8_t(q);
+    }
+    for (uint j = 0u; j < 4u; ++j) {
+        uint q = 0u;
+        for (uint m = 0u; m < 4u; ++m) {
+            int xi = nearest_int(x[base_in + 240u + j + m * 4u] * id) + 1;
+            q = q * 3u + uint(xi);
+        }
+        q *= 3u;
+        q = (q * 256u + 242u) / 243u;
+        obytes[base_out + 48u + j] = uint8_t(q);
+    }
+    uint dh = packHalf2x16(vec2(d, 0.0f));
+    obytes[base_out + 52u] = uint8_t(dh & 0xFFu);
+    obytes[base_out + 53u] = uint8_t((dh >> 8u) & 0xFFu);
+}
+void main() {
+    uint gblk = gl_WorkGroupID.x;
+    if (gblk >= pc.num_blocks) { return; }
+    main_body(gblk);
+}

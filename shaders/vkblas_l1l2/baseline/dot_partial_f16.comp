@@ -1,0 +1,76 @@
+#version 450
+
+// BLAS Level 1 dot (f16, stage 1 partial): result[g] = sum_i x[i]*y[i]
+// Halfs stored one-per-uint32 (low 16 bits); accumulate and store partials as
+// f32.  Stage 2 reuses the f32 dot_finalize kernel (partials are f32).
+// binding 0 = x (read, uint),  binding 1 = y (read, uint),
+// binding 3 = partials (write, f32).
+
+float f16_unpack(uint u) {
+    u &= 0xFFFFu;
+    uint sign = (u >> 15u) & 1u;
+    uint expo = (u >> 10u) & 0x1Fu;
+    uint man  = u & 0x3FFu;
+    float mag;
+    if (expo == 0u) {
+        mag = float(man) * (1.0 / 16777216.0);
+    } else if (expo == 31u) {
+        mag = 1.0e30;
+    } else {
+        mag = (1.0 + float(man) / 1024.0) * exp2(float(int(expo)) - 15.0);
+    }
+    return sign != 0u ? -mag : mag;
+}
+
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    float alpha;
+    float beta;
+    uint  lda;
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  _pad2;
+    uint  _pad3;
+} pc;
+
+layout(set = 0, binding = 0) restrict readonly buffer BufX { uint x[]; };
+layout(set = 0, binding = 1) restrict readonly buffer BufY { uint y[]; };
+layout(set = 0, binding = 3) writeonly          buffer BufOut { float data[]; };
+
+shared float sdata[256];
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint g = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    uint idx = g * 256u + tid;
+
+    float acc = 0.0;
+    if (idx < pc.n) {
+        acc = f16_unpack(x[idx * pc.lda]) * f16_unpack(y[idx * pc.ldb]);
+    }
+
+    sdata[tid] = acc;
+    barrier();
+
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) { sdata[tid] += sdata[tid + s]; }
+        barrier();
+    }
+
+    if (tid == 0u) { data[g] = sdata[0]; }
+}

@@ -1,0 +1,43 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Q8_1 block dequantization to f32 (ggml block_q8_1, 36 bytes/block).
+// Layout: ggml_half d (2B LE) @0, ggml_half s (2B LE) @2, int8_t qs[32] @4.
+// Dequant (canonical ggml dequantize_row_q8_0 applies to the qs payload):
+//   y[i] = d * qs[i]
+// The `s` field (d * sum(qs)) is stored for layout fidelity but not used by
+// dequantization (it exists for dot-product optimizations only).
+// One thread per output element; block = idx >> 5, lane = idx & 31.
+
+layout(push_constant) uniform PC {
+    uint num_blocks;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn {
+    uint8_t raw[];
+};
+layout(scalar, set = 0, binding = 2) writeonly buffer BufOut {
+    float out_f32[];
+};
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = pc.num_blocks * 32u;
+    if (idx >= total) { return; }
+
+    uint block = idx >> 5;
+    uint lane  = idx & 31u;
+    uint base  = block * 36u;
+
+    uint d_bits = uint(raw[base]) | (uint(raw[base + 1u]) << 8u);
+    float d = unpackHalf2x16(d_bits).x;
+
+    int8_t q = int8_t(raw[base + 4u + lane]);
+    out_f32[idx] = d * float(q);
+}

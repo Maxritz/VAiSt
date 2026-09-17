@@ -1,0 +1,125 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Fused quantized GEMM: y = alpha * (dequant_q4_0(W) * x) + beta * y.
+//
+// W is the weight matrix (pc.m rows x k cols), stored row-wise as Q4_0
+// blocks of 32 elements (20 bytes each: f32 scale d + 16 x uint8 packed
+// nibbles). Row r's blocks start at byte offset r * pc.lda; block b covers
+// k-elements [32b, 32b+32) at byte offset b*20 within the row.
+//   dequant:  v = (nibble - 8);  out = d * v
+//
+// x is the f32 activation matrix (k x pc.n), column-major (x[kk + c*pc.ldb]).
+// y is the output (pc.m x pc.n), column-major (y[r + c*pc.ldd]).
+// pc.m = weight rows, pc.n = activation cols. pc.lda = row byte stride (ldw).
+
+// Specialization constants
+layout(constant_id = 0) const uint TILE_M = 16;
+layout(constant_id = 1) const uint TILE_N = 16;
+layout(constant_id = 2) const uint TILE_K = 16;
+
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    float alpha;
+    float beta;
+    uint  lda;
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  _pad2;
+    uint  _pad3;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufW { uint8_t data_W[]; };
+layout(set = 0, binding = 1) restrict readonly buffer BufX { float data_X[]; };
+layout(set = 0, binding = 2) restrict readonly buffer BufY { float data_Y[]; };
+layout(set = 0, binding = 3) writeonly  buffer BufZ { float data_Z[]; };
+
+shared float As[TILE_M * TILE_K];
+shared float Bs[TILE_K * TILE_N];
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    uint row = gl_LocalInvocationID.x;
+    uint col = gl_LocalInvocationID.y;
+
+    uint grRow = gl_WorkGroupID.x;
+    uint grCol = gl_WorkGroupID.y;
+
+    uint globalRow = grRow * TILE_M + row;   /* weight row (0..pc.m)   */
+    uint globalCol = grCol * TILE_N + col;   /* activation col (0..pc.n) */
+
+    float acc = 0.0;
+    uint numTiles = (pc.k + TILE_K - 1) / TILE_K;
+
+    for (uint t = 0; t < numTiles; ++t) {
+        // ── Load W tile (TILE_M rows x TILE_K cols), dequantizing Q4_0 ──
+        for (uint a_col = col; a_col < TILE_K; a_col += TILE_N) {
+            uint aRow = globalRow;
+            uint kk   = t * TILE_K + a_col;            /* global k index  */
+            uint block = kk / 32u;                     /* block in row    */
+            uint lane  = kk & 31u;                     /* element in block */
+            uint base  = aRow * pc.lda + block * 20u;  /* block byte base */
+
+            float val = 0.0f;
+            if (aRow < pc.m && kk < pc.k) {
+                uint d_bits = uint(data_W[base]) |
+                              (uint(data_W[base + 1u]) << 8u) |
+                              (uint(data_W[base + 2u]) << 16u) |
+                              (uint(data_W[base + 3u]) << 24u);
+                float d = uintBitsToFloat(d_bits);
+
+                uint xi  = uint(data_W[base + 4u + (lane >> 1u)]);
+                uint nib = (lane & 1u) != 0u ? (xi >> 4u) : (xi & 0xFu);
+                int  v   = int(nib) - 8;
+                val = d * float(v);
+            }
+            As[row * TILE_K + a_col] = val;
+        }
+
+        // ── Load x tile (TILE_K rows x TILE_N cols) ─────────────────────
+        for (uint b_row = row; b_row < TILE_K; b_row += TILE_M) {
+            uint bRow = t * TILE_K + b_row;
+            uint bCol = globalCol;
+            bool in_bounds = (bRow < pc.k) && (bCol < pc.n);
+            uint idx = bRow + bCol * pc.ldb;
+            Bs[b_row * TILE_N + col] = in_bounds ? data_X[idx] : 0.0f;
+        }
+
+        barrier();
+
+        // ── Compute: acc += sum_k As[row, kk] * Bs[kk, col] ──────────────
+        for (uint kk = 0; kk < TILE_K; ++kk) {
+            acc += As[row * TILE_K + kk] * Bs[kk * TILE_N + col];
+        }
+
+        barrier();
+    }
+
+    // ── Scale and write (guard tiles that overhang m/n) ──────────────────
+    if (globalRow >= pc.m || globalCol >= pc.n) { return; }
+
+    float result = pc.alpha * acc;
+
+    if (pc.beta_is_zero == 0) {
+        uint cIdx = globalRow + globalCol * pc.ldc;
+        result += pc.beta * data_Y[cIdx];
+    }
+
+    uint dIdx = globalRow + globalCol * pc.ldd;
+    data_Z[dIdx] = result;
+}

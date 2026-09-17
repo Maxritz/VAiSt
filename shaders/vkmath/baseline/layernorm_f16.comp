@@ -1,0 +1,86 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_ARB_gpu_shader_int64 : require
+
+// Layer normalization over each row (f16 I/O, f32 compute):
+// out[r][c] = (in[r][c] - mean_r) / sqrt(var_r + eps)
+//   mean_r = (1/N) * sum_c in[r][c]
+//   var_r  = (1/N) * sum_c in[r][c]^2 - mean_r^2
+// eps is passed in pc.alpha.
+// Input:  [num_rows * num_cols]  (binding 0)
+// Output: [num_rows * num_cols]  (binding 2)
+// Each workgroup handles one row; grid-stride loop for cols > 256.
+
+layout(push_constant) uniform PC {
+    uint  num_elements;
+    uint  num_rows;
+    uint  num_cols;
+    float alpha;
+    float beta;
+    uint  _pad0;
+    uint  _pad1;
+    uint  _pad2;
+    uint64_t stride_a;
+    uint64_t stride_b;
+    uint64_t stride_out;
+    uint64_t batch_count;
+    uint64_t _pad3;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly  buffer BufIn  { float16_t data[]; };
+layout(scalar, set = 0, binding = 2) writeonly           buffer BufOut { float16_t data_out[]; };
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+shared float sdata[256];
+shared float smean;
+shared float sinv_std;
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    uint base = row * pc.num_cols;
+
+    float sum = 0.0;
+    float ss = 0.0;
+    for (uint i = tid; i < pc.num_cols; i += 256u) {
+        float v = float(data[base + i]);
+        sum += v;
+        ss += v * v;
+    }
+
+    sdata[tid] = sum;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        barrier();
+    }
+    float row_sum = sdata[0];
+
+    sdata[tid] = ss;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        barrier();
+    }
+    float row_ss = sdata[0];
+
+    if (tid == 0u) {
+        float inv_n = 1.0 / float(pc.num_cols);
+        float mean = row_sum * inv_n;
+        float var = row_ss * inv_n - mean * mean;
+        smean = mean;
+        sinv_std = inversesqrt(max(var, 0.0) + pc.alpha);
+    }
+    barrier();
+
+    for (uint i = tid; i < pc.num_cols; i += 256u) {
+        float v = float(data[base + i]);
+        data_out[base + i] = float16_t((v - smean) * sinv_std);
+    }
+}

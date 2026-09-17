@@ -1,0 +1,48 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// TQ2_0 block dequantization to f32 (ggml block_tq2_0, 66 bytes/block, 256 elems).
+// Layout: uint8_t qs[64] @0, ggml_half d @64.
+// Dequant (canonical ggml dequantize_row_tq2_0), 2 bits per element:
+//   for j in {0,32}: for l in 0..3: for m in 0..31:
+//     q = (qs[j+m] >> 2*l) & 3;  y = (q-1)*d
+// One thread per output element; block = idx >> 8, lane = idx & 255.
+
+layout(push_constant) uniform PC {
+    uint num_blocks;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn {
+    uint8_t raw[];
+};
+layout(scalar, set = 0, binding = 2) writeonly buffer BufOut {
+    float out_f32[];
+};
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = pc.num_blocks * 256u;
+    if (idx >= total) { return; }
+
+    uint block = idx >> 8;
+    uint lane  = idx & 255u;
+    uint base  = block * 66u;
+
+    uint d_bits = uint(raw[base + 64u]) | (uint(raw[base + 65u]) << 8u);
+    float d = unpackHalf2x16(d_bits).x;
+
+    uint hf = lane >> 7;
+    uint l  = (lane >> 5) & 3u;
+    uint m  = lane & 31u;
+
+    uint qbyte = uint(raw[base + hf * 32u + m]);
+    int q = int((qbyte >> (l * 2u)) & 3u);
+
+    out_f32[idx] = (float(q) - 1.0f) * d;
+}

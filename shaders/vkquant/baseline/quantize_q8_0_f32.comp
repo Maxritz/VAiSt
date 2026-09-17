@@ -1,0 +1,67 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Forward quantization f32 -> Q8_0 (our f32-scale format, 36 bytes/block).
+// Block layout: f32 d (bytes 0..3) + 32 x int8 qs (bytes 4..35).
+// Per block: d = max(|x|) / 127; q = round(x/d) clamped to [-127,127].
+// 256 threads/workgroup; 8 blocks of 32 elements per workgroup.
+// Block-local max via shared memory tree reduction.
+
+layout(push_constant) uniform PC {
+    uint num_blocks;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn {
+    float x[];
+};
+layout(scalar, set = 0, binding = 2) writeonly buffer BufOut {
+    uint8_t obytes[];
+};
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+shared float smax[256];
+
+void main() {
+    uint tid  = gl_LocalInvocationID.x;
+    uint blk  = tid >> 5;              /* block within workgroup (0..7)      */
+    uint lane = tid & 31u;
+    uint base = blk * 32u;
+    uint gblk = gl_WorkGroupID.x * 8u + blk;
+    uint gidx = gblk * 32u + lane;
+
+    float v = 0.0f;
+    if (gidx < pc.num_blocks * 32u) v = abs(x[gidx]);
+    smax[tid] = v;
+    barrier();
+
+    for (uint s = 16u; s > 0u; s >>= 1u) {
+        if (lane < s) smax[tid] = max(smax[tid], smax[tid + s]);
+        barrier();
+    }
+
+    if (lane == 0u) {
+        float d = smax[base] / 127.0f;
+        if (d == 0.0f) d = 1.0f;
+        smax[base] = d;                       /* broadcast scale via shared  */
+        if (gblk < pc.num_blocks) {
+            uint bits = floatBitsToUint(d);
+            obytes[gblk * 36u + 0u] = uint8_t(bits & 0xFFu);
+            obytes[gblk * 36u + 1u] = uint8_t((bits >> 8u) & 0xFFu);
+            obytes[gblk * 36u + 2u] = uint8_t((bits >> 16u) & 0xFFu);
+            obytes[gblk * 36u + 3u] = uint8_t((bits >> 24u) & 0xFFu);
+        }
+    }
+    barrier();
+
+    int q = 0;
+    if (gblk < pc.num_blocks) {
+        float d = smax[base];
+        q = clamp(int(round(x[gidx] / d)), -127, 127);
+        obytes[gblk * 36u + 4u + lane] = uint8_t(uint(q) & 0xFFu);
+    }
+}

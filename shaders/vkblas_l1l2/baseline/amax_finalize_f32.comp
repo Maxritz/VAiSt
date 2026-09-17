@@ -1,0 +1,75 @@
+#version 450
+
+// BLAS Level 1 amax (stage 2, finalize): result[0] = global index of max |x|
+// pc.batchCount = number of (index,value) partial pairs from amax_partial_f32.
+// Pairs stored as data[2i] = index (uint), data[2i+1] = value (float bits).
+// Ties resolve to the lowest index.  Result index is 0-based.
+// Single workgroup, grid-stride loop for G > 256.
+// binding 3 = partial pairs / result (read-write, uint).
+
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    float alpha;
+    float beta;
+    uint  lda;
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  _pad2;
+    uint  _pad3;
+} pc;
+
+layout(set = 0, binding = 3) buffer BufOut { uint data[]; };
+
+shared uint  s_idx[256];
+shared float s_val[256];
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint G = pc.batchCount;
+
+    float best = -1.0e30;
+    uint  best_idx = 0u;
+    for (uint i = tid; i < G; i += 256u) {
+        uint  idx = data[2u * i];
+        float v   = uintBitsToFloat(data[2u * i + 1u]);
+        if (v > best) {
+            best = v;
+            best_idx = idx;
+        }
+    }
+
+    s_idx[tid] = best_idx;
+    s_val[tid] = best;
+    barrier();
+
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) {
+            uint o = tid + s;
+            /* Larger value wins; on a tie the LOWER index wins (BLAS iamax
+               returns the first occurrence of the maximum). */
+            if (s_val[o] > s_val[tid] ||
+                (s_val[o] == s_val[tid] && s_idx[o] < s_idx[tid])) {
+                s_val[tid] = s_val[o];
+                s_idx[tid] = s_idx[o];
+            }
+        }
+        barrier();
+    }
+
+    if (tid == 0u) { data[0] = floatBitsToUint(float(s_idx[0])); }
+}

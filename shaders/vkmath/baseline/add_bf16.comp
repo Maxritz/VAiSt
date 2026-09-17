@@ -1,0 +1,39 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Elementwise bf16 add: out = a + b
+//   bf16 stored as uint16_t (truncation), same convention as cast_f32_to_bf16.
+//   Compute in f32, truncate back to bf16.
+
+layout(push_constant) uniform PC {
+    uint  num_elements;
+    uint  num_rows;
+    uint  num_cols;
+    float alpha;
+    float beta;
+    uint  _pad0;
+    uint  _pad1;
+    uint  _pad2;
+    uint64_t stride_a;
+    uint64_t stride_b;
+    uint64_t stride_out;
+    uint64_t batch_count;
+    uint64_t _pad3;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly  buffer BufA   { uint16_t data_a[]; };
+layout(scalar, set = 0, binding = 1) restrict readonly  buffer BufB   { uint16_t data_b[]; };
+layout(scalar, set = 0, binding = 2) writeonly           buffer BufOut { uint16_t data_out[]; };
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.num_elements) { return; }
+
+    float a = uintBitsToFloat(uint(data_a[idx]) << 16);
+    float b = uintBitsToFloat(uint(data_b[idx]) << 16);
+    data_out[idx] = uint16_t(floatBitsToUint(a + b) >> 16);
+}

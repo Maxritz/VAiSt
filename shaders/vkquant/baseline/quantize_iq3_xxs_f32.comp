@@ -1,0 +1,233 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// IQ3_XXS forward quantizer (98 B/block, 256 elems). Direct grid search over the dequant grid (q=byte/4). 8 groups of 32 (4 subgroups of 8, two 4-elem grid points each); scale search is in [-15,15] step 0.2; d = max_scale/31*1.0125; signs 7-bit via ksigns parity.
+// 1 thread per 256-element block (thread 0 transliteration of the ggml ref).
+// Grid search is a direct exhaustive search over the embedded dequant grid tables
+// (in dequant units), replacing ggml's runtime kmap/neighbours optimisation.
+
+layout(push_constant) uniform PC {
+    uint num_blocks;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn {
+    float x[];
+};
+layout(scalar, set = 0, binding = 2) writeonly buffer BufOut {
+    uint8_t obytes[];
+};
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+int nearest_int(float fval) {
+    return int(round(fval));
+}
+
+const uint iq3xxs_grid[256] = uint[](    0x04040404, 0x04040414, 0x04040424, 0x04040C0C, 0x04040C1C, 0x04040C3E, 0x04041404, 0x04041414,
+    0x04041C0C, 0x04042414, 0x04043E1C, 0x04043E2C, 0x040C040C, 0x040C041C, 0x040C0C04, 0x040C0C14,
+    0x040C140C, 0x040C142C, 0x040C1C04, 0x040C1C14, 0x040C240C, 0x040C2C24, 0x040C3E04, 0x04140404,
+    0x04140414, 0x04140424, 0x04140C0C, 0x04141404, 0x04141414, 0x04141C0C, 0x04141C1C, 0x04141C3E,
+    0x04142C0C, 0x04142C3E, 0x04143E2C, 0x041C040C, 0x041C043E, 0x041C0C04, 0x041C0C14, 0x041C142C,
+    0x041C3E04, 0x04240C1C, 0x04241C3E, 0x04242424, 0x04242C3E, 0x04243E1C, 0x04243E2C, 0x042C040C,
+    0x042C043E, 0x042C1C14, 0x042C2C14, 0x04341C2C, 0x04343424, 0x043E0C04, 0x043E0C24, 0x043E0C34,
+    0x043E241C, 0x043E340C, 0x0C04040C, 0x0C04041C, 0x0C040C04, 0x0C040C14, 0x0C04140C, 0x0C04141C,
+    0x0C041C04, 0x0C041C14, 0x0C041C24, 0x0C04243E, 0x0C042C04, 0x0C0C0404, 0x0C0C0414, 0x0C0C0C0C,
+    0x0C0C1404, 0x0C0C1414, 0x0C14040C, 0x0C14041C, 0x0C140C04, 0x0C140C14, 0x0C14140C, 0x0C141C04,
+    0x0C143E14, 0x0C1C0404, 0x0C1C0414, 0x0C1C1404, 0x0C1C1C0C, 0x0C1C2434, 0x0C1C3434, 0x0C24040C,
+    0x0C24042C, 0x0C242C04, 0x0C2C1404, 0x0C2C1424, 0x0C2C2434, 0x0C2C3E0C, 0x0C34042C, 0x0C3E1414,
+    0x0C3E2404, 0x14040404, 0x14040414, 0x14040C0C, 0x14040C1C, 0x14041404, 0x14041414, 0x14041434,
+    0x14041C0C, 0x14042414, 0x140C040C, 0x140C041C, 0x140C042C, 0x140C0C04, 0x140C0C14, 0x140C140C,
+    0x140C1C04, 0x140C341C, 0x140C343E, 0x140C3E04, 0x14140404, 0x14140414, 0x14140C0C, 0x14140C3E,
+    0x14141404, 0x14141414, 0x14141C3E, 0x14142404, 0x14142C2C, 0x141C040C, 0x141C0C04, 0x141C0C24,
+    0x141C3E04, 0x141C3E24, 0x14241C2C, 0x14242C1C, 0x142C041C, 0x142C143E, 0x142C240C, 0x142C3E24,
+    0x143E040C, 0x143E041C, 0x143E0C34, 0x143E242C, 0x1C04040C, 0x1C040C04, 0x1C040C14, 0x1C04140C,
+    0x1C04141C, 0x1C042C04, 0x1C04342C, 0x1C043E14, 0x1C0C0404, 0x1C0C0414, 0x1C0C1404, 0x1C0C1C0C,
+    0x1C0C2424, 0x1C0C2434, 0x1C14040C, 0x1C14041C, 0x1C140C04, 0x1C14142C, 0x1C142C14, 0x1C143E14,
+    0x1C1C0C0C, 0x1C1C1C1C, 0x1C241C04, 0x1C24243E, 0x1C243E14, 0x1C2C0404, 0x1C2C0434, 0x1C2C1414,
+    0x1C2C2C2C, 0x1C340C24, 0x1C341C34, 0x1C34341C, 0x1C3E1C1C, 0x1C3E3404, 0x24040424, 0x24040C3E,
+    0x24041C2C, 0x24041C3E, 0x24042C1C, 0x24042C3E, 0x240C3E24, 0x24141404, 0x24141C3E, 0x24142404,
+    0x24143404, 0x24143434, 0x241C043E, 0x241C242C, 0x24240424, 0x24242C0C, 0x24243424, 0x242C142C,
+    0x242C241C, 0x242C3E04, 0x243E042C, 0x243E0C04, 0x243E0C14, 0x243E1C04, 0x2C040C14, 0x2C04240C,
+    0x2C043E04, 0x2C0C0404, 0x2C0C0434, 0x2C0C1434, 0x2C0C2C2C, 0x2C140C24, 0x2C141C14, 0x2C143E14,
+    0x2C1C0414, 0x2C1C2C1C, 0x2C240C04, 0x2C24141C, 0x2C24143E, 0x2C243E14, 0x2C2C0414, 0x2C2C1C0C,
+    0x2C342C04, 0x2C3E1424, 0x2C3E2414, 0x34041424, 0x34042424, 0x34042434, 0x34043424, 0x340C140C,
+    0x340C340C, 0x34140C3E, 0x34143424, 0x341C1C04, 0x341C1C34, 0x34242424, 0x342C042C, 0x342C2C14,
+    0x34341C1C, 0x343E041C, 0x343E140C, 0x3E04041C, 0x3E04042C, 0x3E04043E, 0x3E040C04, 0x3E041C14,
+    0x3E042C14, 0x3E0C1434, 0x3E0C2404, 0x3E140C14, 0x3E14242C, 0x3E142C14, 0x3E1C0404, 0x3E1C0C2C,
+    0x3E1C1C1C, 0x3E1C3404, 0x3E24140C, 0x3E24240C, 0x3E2C0404, 0x3E2C0414, 0x3E2C1424, 0x3E341C04);
+int grid_byte(int idx, int j) {
+    return int((iq3xxs_grid[idx] >> uint(j * 8)) & 0xFFu);
+}
+
+const uint ksigns_iq2xs[128] = uint[](
+     0, 129, 130,   3, 132,   5,   6, 135, 136,   9,  10, 139,  12, 141, 142,  15,
+   144,  17,  18, 147,  20, 149, 150,  23,  24, 153, 154,  27, 156,  29,  30, 159,
+   160,  33,  34, 163,  36, 165, 166,  39,  40, 169, 170,  43, 172,  45,  46, 175,
+    48, 177, 178,  51, 180,  53,  54, 183, 184,  57,  58, 187,  60, 189, 190,  63,
+   192,  65,  66, 195,  68, 197, 198,  71,  72, 201, 202,  75, 204,  77,  78, 207,
+    80, 209, 210,  83, 212,  85,  86, 215, 216,  89,  90, 219,  92, 221, 222,  95,
+    96, 225, 226,  99, 228, 101, 102, 231, 232, 105, 106, 235, 108, 237, 238, 111,
+   240, 113, 114, 243, 116, 245, 246, 119, 120, 249, 250, 123, 252, 125, 126, 255);
+
+void main_body(uint gblk) {
+    uint base_in = gblk * 256u;
+    uint base_out = gblk * 98u;
+
+    float scales[8];
+    uint  lout[8];
+    uint  grididx[8*8];
+    float xval_all[256];
+    uint  bs[8*4];
+    uint  aux[8];
+    for (int i = 0; i < 8; ++i) aux[i] = 0u;
+    for (int i = 0; i < 8*8; ++i) grididx[i] = 0u;
+    for (int i = 0; i < 8*4; ++i) bs[i] = 0u;
+
+    float max_scale = 0.0f;
+    for (int ib = 0; ib < 8; ++ib) {
+        float xval[32];
+        uint  s[4];
+        for (int k = 0; k < 4; ++k) {
+            int nflip = 0; uint ss = 0u;
+            for (int i = 0; i < 8; ++i) {
+                float v = x[base_in + 32*ib + 8*k + i];
+                if (v >= 0.0f) { xval[8*k+i] = v; }
+                else { xval[8*k+i] = -v; ++nflip; ss |= (1u << i); }
+            }
+            if ((nflip % 2) != 0) {
+                int imin = 0; float mn = 1e30f;
+                for (int i = 0; i < 8; ++i) {
+                    float ax = xval[8*k+i]*xval[8*k+i];
+                    if (ax < mn) { mn = ax; imin = i; }
+                }
+                xval[8*k+imin] = -xval[8*k+imin];
+                ss ^= (1u << imin);
+            }
+            s[k] = ss & 127u;
+        }
+        float mx = xval[0];
+        for (int i = 1; i < 32; ++i) mx = max(mx, xval[i]);
+        for (int i = 0; i < 32; ++i) xval_all[32*ib + i] = xval[i];
+        if (mx < 1e-8f) {
+            scales[ib] = 0.0f;
+            lout[ib] = 0u;
+            continue;
+        }
+        float best = 0.0f;
+        float scale = mx / 15.0f;
+        uint  best_grid[8];
+        for (int k = 0; k < 8; ++k) best_grid[k] = 0u;
+        for (int is = -15; is <= 15; ++is) {
+            float id = (15.0f + float(is)*0.2f) / mx;
+            float this_scale = 1.0f / id;
+            uint gtmp[8];
+            for (int k = 0; k < 8; ++k) {
+                int bg = -1; float berr = 1e30f;
+                for (int g = 0; g < 256; ++g) {
+                    float err = 0.0f;
+                    for (int i = 0; i < 4; ++i) {
+                        float q = float(grid_byte(g, i)) / 4.0f;
+                        float dd = this_scale * q - xval[4*k+i];
+                        err += dd * dd;
+                    }
+                    if (err < berr) { berr = err; bg = g; }
+                }
+                gtmp[k] = uint(bg);
+            }
+            float sumqx = 0.0f, sumq2 = 0.0f;
+            for (int i = 0; i < 32; ++i) {
+                int g = int(gtmp[i >> 2]);
+                float q = float(grid_byte(g, i & 3)) / 4.0f;
+                sumqx += xval[i] * q;
+                sumq2 += q * q;
+            }
+            if (sumq2 > 0.0f && sumqx*sumqx > best*sumq2) {
+                scale = sumqx / sumq2; best = scale * sumqx;
+                for (int k = 0; k < 8; ++k) best_grid[k] = gtmp[k];
+            }
+        }
+        if (scale > 0.0f) {
+            uint gtmp[8];
+            for (int k = 0; k < 8; ++k) {
+                int bg = -1; float berr = 1e30f;
+                for (int g = 0; g < 256; ++g) {
+                    float err = 0.0f;
+                    for (int i = 0; i < 4; ++i) {
+                        float q = float(grid_byte(g, i)) / 4.0f;
+                        float dd = scale * q - xval[4*k+i];
+                        err += dd * dd;
+                    }
+                    if (err < berr) { berr = err; bg = g; }
+                }
+                gtmp[k] = uint(bg);
+            }
+            float sumqx = 0.0f, sumq2 = 0.0f;
+            for (int i = 0; i < 32; ++i) {
+                int g = int(gtmp[i >> 2]);
+                float q = float(grid_byte(g, i & 3)) / 4.0f;
+                sumqx += xval[i] * q;
+                sumq2 += q * q;
+            }
+            if (sumq2 > 0.0f) scale = sumqx / sumq2;
+            for (int k = 0; k < 8; ++k) best_grid[k] = gtmp[k];
+        }
+        if (scale < 0.0f) {
+            scale = -scale;
+            for (int k = 0; k < 4; ++k) s[k] = (~s[k]) & 127u;
+        }
+        for (int k = 0; k < 8; ++k) grididx[8*ib + k] = best_grid[k];
+        for (int k = 0; k < 4; ++k) bs[4*ib + k] = s[k];
+        scales[ib] = scale;
+        max_scale = max(max_scale, scale);
+    }
+
+    if (max_scale < 1e-15f) {
+        for (uint i = 0u; i < 98u; ++i) obytes[base_out + i] = uint8_t(0u);
+        return;
+    }
+    float d = (max_scale / 31.0f) * 1.0125f;
+    uint dh = packHalf2x16(vec2(d, 0.0f));
+    obytes[base_out] = uint8_t(dh & 0xFFu);
+    obytes[base_out + 1u] = uint8_t((dh >> 8u) & 0xFFu);
+    float id = 1.0f / d;
+    for (int ib = 0; ib < 8; ++ib) {
+        int l = nearest_int(0.5f * (id * scales[ib] - 1.0f));
+        l = clamp(l, 0, 15);
+        lout[ib] = uint(l);
+        aux[ib] = bs[4*ib] | (bs[4*ib+1] << 7u) | (bs[4*ib+2] << 14u) | (bs[4*ib+3] << 21u) | (uint(l) << 28u);
+    }
+    // final requantize of grid indices against the quantized db
+    for (int ib = 0; ib < 8; ++ib) {
+        float db = d * (0.5f + float(lout[ib])) * 0.5f;
+        if (db == 0.0f) continue;
+        for (int k = 0; k < 8; ++k) {
+            int bg = -1; float berr = 1e30f;
+            for (int g = 0; g < 256; ++g) {
+                float err = 0.0f;
+                for (int i = 0; i < 4; ++i) {
+                    float q = float(grid_byte(g, i));
+                    float dd = db * q - xval_all[32*ib + 4*k + i];
+                    err += dd * dd;
+                }
+                if (err < berr) { berr = err; bg = g; }
+            }
+            grididx[8*ib + k] = uint(bg);
+        }
+    }
+    for (int ib = 0; ib < 8; ++ib) {
+        for (int k = 0; k < 8; ++k) {
+            obytes[base_out + 2u + uint(8*ib + k)] = uint8_t(grididx[8*ib + k] & 0xFFu);
+        }
+        for (uint j = 0u; j < 4u; ++j) {
+            obytes[base_out + 66u + uint(4*ib) + j] = uint8_t((aux[ib] >> (8u*j)) & 0xFFu);
+        }
+    }
+}
+void main() {
+    uint gblk = gl_WorkGroupID.x;
+    if (gblk >= pc.num_blocks) { return; }
+    main_body(gblk);
+}

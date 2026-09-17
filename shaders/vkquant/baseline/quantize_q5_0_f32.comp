@@ -1,0 +1,66 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Forward quantization f32 -> Q5_0 (ggml block_q5_0, 22 bytes/block, 32 elems).
+// ggml quantize_row_q5_0_ref scale selection:
+//   d = max / -16  (max = signed value with largest |x|);  id = 1/d
+//   xi = clamp((int8)(x*id + 16.5f), 0, 31);  low 4 bits -> qs, 5th bit -> qh
+// One workgroup of 1 thread handles one block (transliteration of the ref).
+
+layout(push_constant) uniform PC {
+    uint num_blocks;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufIn {
+    float x[];
+};
+layout(scalar, set = 0, binding = 2) writeonly buffer BufOut {
+    uint8_t obytes[];
+};
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+shared float sx[32];
+
+void main() {
+    uint gblk = gl_WorkGroupID.x;
+    uint base_in = gblk * 32u;
+    uint base_out = gblk * 22u;
+
+    for (uint i = 0u; i < 32u; ++i) {
+        sx[i] = (gblk < pc.num_blocks) ? x[base_in + i] : 0.0f;
+    }
+
+    float amax = 0.0f;
+    float mx = 0.0f;
+    for (uint i = 0u; i < 32u; ++i) {
+        float av = abs(sx[i]);
+        if (av > amax) { amax = av; mx = sx[i]; }
+    }
+
+    float d  = mx / -16.0f;
+    float id = (d != 0.0f) ? (1.0f / d) : 0.0f;
+
+    uint qh = 0u;
+    for (uint j = 0u; j < 16u; ++j) {
+        float v0 = sx[j]      * id;
+        float v1 = sx[j + 16u] * id;
+        int xi0 = min(31, int(v0 + 16.5f));
+        int xi1 = min(31, int(v1 + 16.5f));
+        obytes[base_out + 6u + j] = uint8_t(uint(xi0 & 0xF) | uint((xi1 & 0xF) << 4));
+        if ((xi0 & 0x10) != 0) qh |= 1u << (j + 0u);
+        if ((xi1 & 0x10) != 0) qh |= 1u << (j + 16u);
+    }
+
+    uint dh = packHalf2x16(vec2(d, 0.0f));
+    obytes[base_out + 0u] = uint8_t(dh & 0xFFu);
+    obytes[base_out + 1u] = uint8_t((dh >> 8u) & 0xFFu);
+    obytes[base_out + 2u] = uint8_t(qh & 0xFFu);
+    obytes[base_out + 3u] = uint8_t((qh >> 8u) & 0xFFu);
+    obytes[base_out + 4u] = uint8_t((qh >> 16u) & 0xFFu);
+    obytes[base_out + 5u] = uint8_t((qh >> 24u) & 0xFFu);
+}
