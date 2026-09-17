@@ -25,22 +25,25 @@ typedef struct {
 VAIST_API vaist_attn_ctx* vaist_attn_create(const VaistRuntime* rt, const vaist_attn_cfg* cfg);
 VAIST_API VaistStatus vaist_attn_destroy(vaist_attn_ctx* ctx);
 
-/* Dispatch one prefill or decode step.
-   Caller provides VkBuffer handles (from vaist_buffer_gpu_handle or direct).
-   q_buf:   VkBuffer (host_dim * num_q_heads floats, host-visible for upload)
-   k_cache: VkBuffer (fp16 K-cache, paged)
-   v_cache: VkBuffer (fp16 V-cache, paged)
-   bt_buf:  VkBuffer (num_kv_heads * max_blocks uint32 page indices)
-   out_buf: VkBuffer (host_dim * num_q_heads floats, host-visible for readback)
-   All buffers must be bound to memory and host-visible if staging is used.
+/* Dispatch flash-decode attention.
+   q:          [num_q_heads * head_dim] f32 input query (host-visible)
+   k_cache:    VkBuffer handle (fp16 K-cache, paged, via vaist_buffer_gpu_handle)
+   v_cache:    VkBuffer handle (fp16 V-cache, paged)
+   block_tables:[num_kv_heads * max_blocks] uint32 page indices (host-visible)
+   seqlen:     current context length (≤ cfg.max_seqlen)
+   out:        [num_q_heads * head_dim] f32 output (host-visible, written on success)
 
-   seqlen: current context length (≤ ctx->cfg.max_seqlen)
+   K/V cache buffers must be pre-populated by the caller (via vaist_buffer_upload
+   or GPU-side fill). Returns VAIST_DEVICE_ERROR if no Vulkan device available,
+   so the caller falls back to CPU dequant+GEMM.
 */
 VAIST_API VaistStatus vaist_attn_flash_decode(vaist_attn_ctx* ctx,
-    const void* q,                    // host_dim * num_q_heads (f32)
-    const uint32_t* block_tables,      // num_kv_heads * max_blocks
-    uint32_t seqlen,                   // current context length
-    float* out);                       // host_dim * num_q_heads (f32)
+    const void* q,
+    void* k_cache_gpu_buf,
+    void* v_cache_gpu_buf,
+    const uint32_t* block_tables,
+    uint32_t seqlen,
+    float* out);
 
 #ifdef __cplusplus
 }
