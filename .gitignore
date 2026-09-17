@@ -1,0 +1,30 @@
+# Build directories
+build-*/
+build/
+bi2/
+bi3/
+
+# CMake artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+VAiSt.sln
+*.vcxproj
+*.vcxproj.filters
+*.tlog/
+
+# Object files
+*.obj
+*.o
+*.out
+*.exp
+*.lib
+*.dll
+*.so
+*.exe
+
+# Logs
+*.log
+run.log
+run_out.txt
