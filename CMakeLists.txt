@@ -19,7 +19,7 @@ set(VAIST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/vulkan/${VAIST_PLATFORM}")
 set(VAIST_C99 "${VAIST_ROOT}/c99")
 set(VAIST_CPP "${VAIST_ROOT}/c++")
 set(VAIST_PYTHON "${VAIST_ROOT}/python")
-set(VAIST_MODULES core runtime tensor compute quant graph model nn llm engine ai distributed blas linalg)
+set(VAIST_MODULES core runtime tensor compute quant graph model nn llm engine ai distributed blas linalg attn)
 
 option(VAIST_ENABLE_VULKAN "Pull in the Vulkan SDK headers for the Vulkan compute backend" OFF)
 if(VAIST_ENABLE_VULKAN)
@@ -119,14 +119,22 @@ foreach(D IN LISTS VAIST_MODULES)
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/vaist>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/vaist>)
   target_link_libraries(${M} PRIVATE vaist_core)
-   if(D STREQUAL "blas")
-     target_link_libraries(${M} PRIVATE vaist_runtime vaist_compute vaist_quant)
-   endif()
+  if(D STREQUAL "blas")
+    target_link_libraries(${M} PRIVATE vaist_runtime vaist_compute vaist_quant)
+  endif()
   if(D STREQUAL "compute")
     target_link_libraries(${M} PRIVATE vaist_runtime)
   endif()
   if(D STREQUAL "linalg")
     target_link_libraries(${M} PRIVATE vaist_blas vaist_runtime)
+  endif()
+  if(D STREQUAL "attn")
+    target_link_libraries(${M} PRIVATE vaist_runtime vaist_compute vaist_quant)
+    if(VAIST_ENABLE_VULKAN)
+      target_link_libraries(${M} PRIVATE vaist_vulkan_include)
+      target_compile_definitions(${M} PRIVATE VAIST_VULKAN_HDR=1 VAIST_ENABLE_VULKAN=1 VAIST_HAVE_VK_HDR=1 VAIST_SPIRV_EMBEDDED=1)
+      target_include_directories(${M} PRIVATE "${VAIST_SHADER_OUT_DIR}")
+    endif()
   endif()
   vaist_c_warning_flags(${M})
   if(WIN32)
@@ -267,7 +275,8 @@ if(VAIST_ENABLE_VULKAN AND GLSLANG_VALIDATOR AND Python3_Interpreter_FOUND)
             "vaist_spv_qgemm_q5k"      "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q5k.comp.spv"
             "vaist_spv_qgemm_q6k"      "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q6k.comp.spv"
             "vaist_spv_qgemm_iq4xs"    "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_iq4xs.comp.spv"
-            "vaist_spv_moe_route"      "${VAIST_SHADER_OUT_DIR}/vkblas/moe_route.comp.spv"
+             "vaist_spv_moe_route"      "${VAIST_SHADER_OUT_DIR}/vkblas/moe_route.comp.spv"
+             "vaist_spv_attn_flash_decode" "${VAIST_SHADER_OUT_DIR}/vkattn/baseline/attn_flash_decode.comp.spv"
     DEPENDS ${VAIST_SPV}
     COMMENT "embed SPIR-V -> vaist_blas_spv.h" VERBATIM)
   add_custom_target(vaist_blas_spv_hdr DEPENDS "${VAIST_BLAS_SPV_HDR}")
@@ -383,7 +392,7 @@ endif()
 # Install/export contract.
 # -----------------------------------------------------------------------------
 include(GNUInstallDirs)
-install(TARGETS vaist_core vaist_runtime vaist_tensor vaist_compute vaist_quant vaist_graph vaist_model vaist_nn vaist_llm vaist_engine vaist_ai vaist_distributed vaist_blas vaist_linalg
+install(TARGETS vaist_core vaist_runtime vaist_tensor vaist_compute vaist_quant vaist_graph vaist_model vaist_nn vaist_llm vaist_engine vaist_ai vaist_distributed vaist_blas vaist_linalg vaist_attn
   EXPORT VAiStTargets
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
