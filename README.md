@@ -43,12 +43,23 @@ physical device whose `vkCreateDevice` raises an uncatchable
 
 ## Layout
 
-- `include/vaist/` — public headers
-- `vulkan/{linux,windows}/{c99,c++,python}/{ai,blas,compute,core,distributed,engine,graph,linalg,llm,model,nn,quant,runtime,tensor}/`
-- `tests/` — `vaist_blas_vulkan_test.c` (probe-only child entry), `blas_test.c`,
-  `linalg_test.c`, `stack_smoke.c`, C++/Python smoke tests
-- `shaders/` — SPIR-V kernels (cooperative matrix isolated under
+- `include/vaist/` — VAiSt public headers (ai, blas, compute, core,
+  distributed, engine, graph, linalg, llm, model, nn, quant, runtime, tensor)
+- `include/vk*/` + `src/vk*/` — the Vulkan BLAS/math/quant/fft/model/runtime
+  libraries (vkblas, vkblas_l1l2, vkdist, vkfft, vkkv, vkmath, vkmodel,
+  vkquant, vkrand, vkruntime, vkstream) with their SPIR-V shaders under
+  `shaders/vk*/`
+- `vulkan/{linux,windows}/{c99,c++,python}/{ai,blas,compute,core,distributed,
+  engine,graph,linalg,llm,model,nn,quant,runtime,tensor}/` — the VAiSt
+  implementation tree (cooperative matrix isolated under
   `vulkan/DO_NOT_USE/cooperative_matrix/`)
+- `cmake/spirv_to_header.py` — SPIR-V → C header tool
+- `tests/` — `vaist_blas_vulkan_test.c` (probe-only child entry),
+  `blas_test.c`, `linalg_test.c`, `stack_smoke.c`, plus `test_vk*.c` for each
+  library and C++/Python smoke tests
+- `docs/vulkan_torch_migration_guide.md` — migration notes
+- `specs/`, `specs-large/` — Vulkan spec/reference material
+- `build/` (default, no Vulkan) and `build-vk-on/` (`VAIST_ENABLE_VULKAN=ON`)
 
 The code is intentionally buildable without requiring the Vulkan SDK for the
 baseline CPU path. The runtime detects the platform Vulkan loader
