@@ -462,6 +462,54 @@ fix).
   BLAS/linalg CPU paths.
 - `tests/cpp_smoke.cpp`, `tests/python_smoke.py` — C++/Python smoke.
 
+### Optimizations
+
+The `vaist_compute` path selector (`vaist_compute_best_path`) picks the fastest
+valid implementation from device caps + problem shape:
+
+- **MATMUl_FREE** — zero-multiplication matmul via ternary `{-1,0,+1}`
+  (2406.02528) and 1-bit XNOR + popcount (2608.01528) matvec kernels
+  (`vaist_matvec_ternary_f32`, `vaist_matvec_binary_f32`). The guaranteed
+  fallback — runs on any Vulkan 1.0 device and any CPU.
+- **VULKAN_TILE** — Vulkan tiled matmul via `vkblas` shaders (shared-memory
+  tiled baseline + `VK_KHR_shader_subgroup` twin). This is the VAiSt analogue
+  of **ThunderKittens 16x16 warp-tile** model
+  (https://github.com/HazyResearch/ThunderKittens): the same tile-oriented
+  "manipulate tiles of data no smaller than 16x16" principle, expressed
+  through Vulkan shared-memory tiling + subgroup shuffle rather than CUDA
+  tensor cores / WGMMA. The cooperative-matrix tier (`DO_NOT_USE/`) is the
+  dormant hardware-tensor path.
+- **VULKAN_DOT** — integer dot-product acceleration (`OpSDotKHR`), dispatched
+  when `integer_dot_product_8bit_accelerated` is reported by the device cap
+  probe.
+- **SIMD** — CPU path (Zen3 AVX2 / Intel AMX) — referenced but **TODO**.
+- **SCALAR** — portable fallback, never fails to build.
+
+ThunderKittens is CUDA/NVIDIA-only; HipKittens exists for AMD. VAiSt instead
+uses the Vulkan subgroup + cooperative-matrix tiers, which are the
+cross-vendor equivalent of ThunderKittens warpgroup matmul-accumulate.
+
+### Remaining Gaps / TODO
+
+The following feature families are architecturally feasible but not yet
+implemented. Where a tiled kernel is the bottleneck, the preferred approach is
+the ThunderKittens-style 16x16 warp-tile + load-store-compute-finish template,
+ported to Vulkan subgroup / cooperative-matrix intrinsics (not CUDA):
+
+- **Attention Families** — MHA, MLA, GDN, Sparse, and Paged attention
+  variants. RoPE and mRoPE positional embeddings.
+- **KV-Cache** — paged block-table management, KV quantization/compression
+  (the `vkkv` ridge-transfer exists but paged KV cache does not).
+- **MoE** — fused routing, grouped expert GEMM, expert-parallel communication.
+- **Sampling** — Top-K, Top-P/nucleus, and rejection-sampling wrappers
+  (`vkrand` provides the PRNG; sampling policy is not wired).
+- **Quantization Extensions** — FP8 and MXPF4 compute paths (the 22
+  dequant/quant ggml-block shaders exist; FP8/MXPF4 are not).
+- **Distributed Collectives** — TP, EP, and PP primitives
+  (`vkdist` provides TCP GEMM; collective primitives are not).
+- **Advanced Speculative Decoding** — EAGLE-3 / dspark scaffolding.
+- **Mamba** — native Conv1D integration.
+
 ---
 
 ## Building
