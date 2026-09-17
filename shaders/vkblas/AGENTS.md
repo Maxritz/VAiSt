@@ -68,11 +68,22 @@ Layout follows std140 packing rules. `int64_t` requires `shaderInt64` feature
 - `gemm_i8.comp`  — int8 GEMM
 - `qgemm_q8_0.comp` — fused quantized GEMM, Q8_0 weights (dequant-in-matmul)
 - `qgemm_q4_0.comp` — fused quantized GEMM, Q4_0 weights (dequant-in-matmul)
+- `qgemm_q4_1.comp` — fused quantized GEMM, Q4_1 weights (dequant-in-matmul)
+- `qgemm_q5_0.comp` — fused quantized GEMM, Q5_0 weights (dequant-in-matmul)
+- `qgemm_q5_1.comp` — fused quantized GEMM, Q5_1 weights (dequant-in-matmul)
+- `qgemm_q8_0.comp` — fused quantized GEMM, Q8_0 weights (dequant-in-matmul)
+- `qgemm_q2_K.comp`  — fused quantized GEMM, Q2_K weights (dequant-in-matmul)
+- `qgemm_q3k.comp`  — fused quantized GEMM, Q3_K weights (dequant-in-matmul)
 - `qgemm_q4k.comp`  — fused quantized GEMM, Q4_K weights (dequant-in-matmul)
 - `qgemm_q5k.comp`  — fused quantized GEMM, Q5_K weights (dequant-in-matmul)
 - `qgemm_q6k.comp`  — fused quantized GEMM, Q6_K weights (dequant-in-matmul)
-- `qgemm_q3k.comp`  — fused quantized GEMM, Q3_K weights (dequant-in-matmul)
 - `qgemm_iq4xs.comp` — fused quantized GEMM, IQ4_XS weights (dequant-in-matmul)
+
+All qgemm shaders cover the FreeToken-ROCm `mmq.cuh` dispatch set (q4_0, q4_1,
+q5_0, q5_1, q8_0, q2_K, q3_K, q4_K, q5_K, q6_K) plus IQ4_XS. The CPU fallback
+path (`vaist_blas_mul_mat_q` → `vaist_dequantize_f32` → `gemm_scalar`) covers
+any format not yet wired into the Vulkan shader table; the fused qgemm shaders
+are embedded SPIR-V for the tier-dispatch fast path.
 
 Each variant is declared per tier directory; not every (kernel, tier) pair has
 a blob — the runtime falls back to the highest tier that ships one. Today:
@@ -113,6 +124,13 @@ The dequant math is ported verbatim from the vkquant shaders / ggml-common.h:
   per 16-group; `out = d * sc * (level - 32)`.
 - **Q3_K**: 110 B/block of 256 (ggml `block_q3_K`). 2-bit levels with sign
   mask + 16 x 6-bit packed int8 scales; `out = d * (sc - 32) * level`.
+- **Q2_K**: 84 B/block of 256 (ggml `block_q2_K`). 2-bit levels, 16 x 4-bit
+  scale/min nibbles, fp16 d + dmin; `out = d*sc*level - dmin*mn`.
+- **Q4_1**: 20 B/block of 32 (ggml `block_q4_1`). fp16 d + f16 m + 16 packed
+  nibbles; `out = d*nib + m`. (symmetric variant of Q4_0.)
+- **Q5_0**: 22 B/block of 32 (ggml `block_q5_0`). fp16 d, qh[4] (5th-bit pack),
+  16 nibbles; `out = d*((nib|qhbit)-16)`.
+- **Q5_1**: 24 B/block of 32 (ggml `block_q5_1`). Like Q5_0 + fp16 min; `out = d*(nib|qhbit) + m`.
 - **IQ4_XS**: 136 B/block of 256 (ggml `block_iq4_xs`). Non-linear 4-bit
   `kvalues_iq4nl` LUT; `out = d*(ls-32) * iq4nl[nib]`.
 

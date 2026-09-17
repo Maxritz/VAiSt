@@ -4,6 +4,7 @@
 #include "vaist_runtime.h"
 #include "vaist_compute.h"   /* VaistComputePath (needed by vaist_blas_best_path) */
 #include "vaist_tensor.h"
+#include "vaist_quant.h"     /* VaistQuantType (for vaist_blas_mul_mat_q) */
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -54,6 +55,22 @@ VAIST_API VaistStatus vaist_blas_matvec_ternary(const VaistRuntime*rt,
         const int8_t*wsign,const float*scale,size_t k,size_t n,const float*x,float*y);
 VAIST_API VaistStatus vaist_blas_matvec_binary(const VaistRuntime*rt,
         const uint8_t*wbit,const float*scale,size_t k,size_t n,const float*x,float*y);
+
+/* Quantized matmul: C(m,n) += A(m,k) * W_q(k,n)
+ *   'w' is a GGUF quantized weight blob in 'qtype' format, row-major blocks.
+ *   Dequantizes W_q to fp32 on the CPU (scalar fallback) then calls gemm_scalar.
+ *   TODO: Vulkan fused dequant+gemm compute shader (vaist_blas_vk_mul_mat_q). */
+VAIST_API VaistStatus vaist_blas_mul_mat_q(const VaistRuntime*rt,
+        const float*A,float*C,size_t m,size_t k,size_t n,
+        const void*w,VaistQuantType qtype);
+
+/* MoE routing: top-k gate dispatch (mirrors FreeToken moe.cuh + ATOM
+ * atom/attention/flash_deciding.py).  CPU fallback computes argmax(dot) per row;
+ * the Vulkan fast path dispatches the moe_route.comp shader. */
+VAIST_API VaistStatus vaist_blas_moe_route(const VaistRuntime*rt,
+        const float*x,size_t m,size_t k,size_t k_gate,
+        const float*gate,size_t num_experts,
+        uint32_t*indices,float*scores);
 
 /* Pick the best path now that device caps are available. */
 VAIST_API VaistComputePath vaist_blas_best_path(const VaistRuntime*rt,

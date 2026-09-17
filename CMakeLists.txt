@@ -119,9 +119,9 @@ foreach(D IN LISTS VAIST_MODULES)
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/vaist>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/vaist>)
   target_link_libraries(${M} PRIVATE vaist_core)
-  if(D STREQUAL "blas")
-    target_link_libraries(${M} PRIVATE vaist_runtime vaist_compute)
-  endif()
+   if(D STREQUAL "blas")
+     target_link_libraries(${M} PRIVATE vaist_runtime vaist_compute vaist_quant)
+   endif()
   if(D STREQUAL "compute")
     target_link_libraries(${M} PRIVATE vaist_runtime)
   endif()
@@ -197,6 +197,18 @@ set(VAIST_SHADERS
   vkblas/gemm_f32_tiled.comp
   vkblas/matvec_ternary.comp
   vkblas/matvec_binar.comp
+  vkblas/qgemm_q8_0.comp
+  vkblas/qgemm_q4_0.comp
+  vkblas/qgemm_q4_1.comp
+  vkblas/qgemm_q5_0.comp
+  vkblas/qgemm_q5_1.comp
+  vkblas/qgemm_q2_K.comp
+  vkblas/qgemm_q3k.comp
+  vkblas/qgemm_q4k.comp
+  vkblas/qgemm_q5k.comp
+  vkblas/qgemm_q6k.comp
+  vkblas/qgemm_iq4xs.comp
+  vkblas/moe_route.comp
   vklinalg/lu16.comp
   vklinalg/chol16.comp
   vklinalg/qr64.comp)
@@ -242,6 +254,18 @@ if(VAIST_ENABLE_VULKAN AND GLSLANG_VALIDATOR AND Python3_Interpreter_FOUND)
             "vaist_spv_gemm_f32_tiled" "${VAIST_SHADER_OUT_DIR}/vkblas/gemm_f32_tiled.comp.spv"
             "vaist_spv_matvec_ternary" "${VAIST_SHADER_OUT_DIR}/vkblas/matvec_ternary.comp.spv"
             "vaist_spv_matvec_binar"   "${VAIST_SHADER_OUT_DIR}/vkblas/matvec_binar.comp.spv"
+            "vaist_spv_qgemm_q8_0"     "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q8_0.comp.spv"
+            "vaist_spv_qgemm_q4_0"     "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q4_0.comp.spv"
+            "vaist_spv_qgemm_q4_1"     "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q4_1.comp.spv"
+            "vaist_spv_qgemm_q5_0"     "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q5_0.comp.spv"
+            "vaist_spv_qgemm_q5_1"     "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q5_1.comp.spv"
+            "vaist_spv_qgemm_q2_K"     "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q2_K.comp.spv"
+            "vaist_spv_qgemm_q3k"      "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q3k.comp.spv"
+            "vaist_spv_qgemm_q4k"      "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q4k.comp.spv"
+            "vaist_spv_qgemm_q5k"      "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q5k.comp.spv"
+            "vaist_spv_qgemm_q6k"      "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_q6k.comp.spv"
+            "vaist_spv_qgemm_iq4xs"    "${VAIST_SHADER_OUT_DIR}/vkblas/qgemm_iq4xs.comp.spv"
+            "vaist_spv_moe_route"      "${VAIST_SHADER_OUT_DIR}/vkblas/moe_route.comp.spv"
     DEPENDS ${VAIST_SPV}
     COMMENT "embed SPIR-V -> vaist_blas_spv.h" VERBATIM)
   add_custom_target(vaist_blas_spv_hdr DEPENDS "${VAIST_BLAS_SPV_HDR}")

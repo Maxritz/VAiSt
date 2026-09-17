@@ -1,5 +1,6 @@
 #include "vaist_blas.h"
 #include "vaist_compute.h"
+#include "vaist_quant.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -470,5 +471,61 @@ VAIST_API VaistStatus vaist_blas_matvec_binary(const VaistRuntime*rt,
 #endif
         (void)p;
     }
-    return vaist_blas_matvec_binary_cpu(wbit,scale,k,n,x,y);
+     return vaist_blas_matvec_binary_cpu(wbit,scale,k,n,x,y);
+}
+
+/* ---- Quantized matmul (dequantize → dense).
+ * 'w' = GGUF weight blob, row-major (k rows × n cols), block-padded per qtype.
+ * CPU fallback: dequantize full W to fp32, then gemm_scalar(A, W_dec, C).
+ * TODO: Vulkan fused dequant+gemm tile (avoids materializing full W_dec). */
+VAIST_API VaistStatus vaist_blas_mul_mat_q(const VaistRuntime*rt,
+        const float*A,float*C,size_t m,size_t k,size_t n,
+        const void*w,VaistQuantType qtype){
+    if(!A||!C||!w||!k||!n) return VAIST_INVALID_ARGUMENT;
+    (void)rt;
+    size_t bs=vaist_quant_block_bytes(qtype);
+    if(bs==0) return VAIST_UNSUPPORTED;
+    size_t elem_blk=vaist_quant_block_size(qtype);
+    if(elem_blk==0) return VAIST_UNSUPPORTED;
+    /* dequant W (k×n row-major) -> temp */
+    float*Wd=NULL;
+    VaistStatus st=VAIST_OK;
+    size_t need=k*n*sizeof(float);
+    if(need/k/n!=sizeof(float)) return VAIST_INVALID_ARGUMENT;
+    Wd=(float*)malloc(need);
+    if(!Wd) return VAIST_DEVICE_ERROR;
+    size_t row_blks=(n+elem_blk-1)/elem_blk;
+    size_t row_bytes=row_blks*bs;
+    size_t off=0;
+    for(size_t r=0;r<k;r++){
+        st=vaist_dequantize_f32(qtype, (const unsigned char*)w+off, row_bytes, Wd+r*n, n);
+        if(st!=VAIST_OK) goto done;
+        off += row_bytes;
+    }
+    st=gemm_scalar(A,Wd,C,m,k,n);
+done:
+    free(Wd);
+    return st;
+}
+
+/* ---- MoE top-1 routing (CPU fallback).  GPU path dispatched to moe_route.comp.
+ * x: (m x k) row-major, gate: (num_experts x k_gate) row-major.
+ * indices[r] = argmax_e dot(x[r], gate[e]); scores[r] = max dot. */
+VAIST_API VaistStatus vaist_blas_moe_route(const VaistRuntime*rt,
+        const float*x,size_t m,size_t k,size_t k_gate,
+        const float*gate,size_t num_experts,
+        uint32_t*indices,float*scores){
+    if(!x||!gate||!indices||!scores||!k||!k_gate||!num_experts||!m) return VAIST_INVALID_ARGUMENT;
+    size_t kk=(k<k_gate)?k:k_gate;
+    for(size_t r=0;r<m;r++){
+        float best=-1e30f; uint32_t be=0;
+        for(size_t e=0;e<num_experts;e++){
+            float dot=0;
+            const float*xr=x+r*k; const float*ge=gate+e*k_gate;
+            for(size_t p=0;p<kk;p++) dot+=xr[p]*ge[p];
+            if(dot>best){ best=dot; be=(uint32_t)e; }
+        }
+        indices[r]=be; scores[r]=best;
+    }
+    return VAIST_OK;
 }

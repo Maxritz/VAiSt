@@ -1,0 +1,120 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Fused quantized GEMM: y = alpha * (dequant_q5_1(W) * x) + beta * y.
+// W is (pc.m x k), Q5_1 blocks of 32 elems (24 bytes: f16 d@0, f16 m@2, qh[4]@4, qs[16]@8).
+//   dequant: xh_0 = ((qh>>(j+0))<<4)&0x10; xh_1 = ((qh>>(j+12))&0x10)
+//            v0 = (qs[j]&0xF)|xh_0;  v1 = (qs[j]>>4)|xh_1
+//            out = v * d + m
+// x is f32 (k x pc.n), column-major. y is (pc.m x pc.n), column-major.
+
+layout(constant_id = 0) const uint TILE_M = 16;
+layout(constant_id = 1) const uint TILE_N = 16;
+layout(constant_id = 2) const uint TILE_K = 16;
+
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    float alpha;
+    float beta;
+    uint  lda;
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  _pad2;
+    uint  _pad3;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufW { uint8_t data_W[]; };
+layout(set = 0, binding = 1) restrict readonly buffer BufX { float data_X[]; };
+layout(set = 0, binding = 2) restrict readonly buffer BufY { float data_Y[]; };
+layout(set = 0, binding = 3) writeonly  buffer BufZ { float data_Z[]; };
+
+shared float As[TILE_M * TILE_K];
+shared float Bs[TILE_K * TILE_N];
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    uint row = gl_LocalInvocationID.x;
+    uint col = gl_LocalInvocationID.y;
+    uint grRow = gl_WorkGroupID.x;
+    uint grCol = gl_WorkGroupID.y;
+    uint globalRow = grRow * TILE_M + row;
+    uint globalCol = grCol * TILE_N + col;
+
+    float acc = 0.0;
+    uint numTiles = (pc.k + TILE_K - 1) / TILE_K;
+
+    for (uint t = 0; t < numTiles; ++t) {
+        for (uint a_col = col; a_col < TILE_K; a_col += TILE_N) {
+            uint aRow = globalRow;
+            uint kk   = t * TILE_K + a_col;
+            uint block = kk / 32u;
+            uint lane  = kk & 31u;
+            uint base  = aRow * pc.lda + block * 24u;
+
+            float val = 0.0f;
+            if (aRow < pc.m && kk < pc.k) {
+                uint d_bits = uint(data_W[base]) | (uint(data_W[base + 1u]) << 8u);
+                uint m_bits = uint(data_W[base + 2u]) | (uint(data_W[base + 3u]) << 8u);
+                float d = unpackHalf2x16(d_bits).x;
+                float m = unpackHalf2x16(m_bits).x;
+                uint qh = uint(data_W[base + 4u]) |
+                          (uint(data_W[base + 5u]) << 8u) |
+                          (uint(data_W[base + 6u]) << 16u) |
+                          (uint(data_W[base + 7u]) << 24u);
+                uint j = lane & 15u;
+                uint qbyte = uint(data_W[base + 8u + j]);
+                uint v;
+                if (lane < 16u) {
+                    uint xh_0 = ((qh >> (j + 0u)) << 4u) & 0x10u;
+                    v = (qbyte & 0xFu) | xh_0;
+                } else {
+                    uint xh_1 = ((qh >> (j + 12u))      ) & 0x10u;
+                    v = (qbyte >> 4u) | xh_1;
+                }
+                val = d * float(v) + m;
+            }
+            As[row * TILE_K + a_col] = val;
+        }
+
+        for (uint b_row = row; b_row < TILE_K; b_row += TILE_M) {
+            uint bRow = t * TILE_K + b_row;
+            uint bCol = globalCol;
+            bool in_bounds = (bRow < pc.k) && (bCol < pc.n);
+            uint idx = bRow + bCol * pc.ldb;
+            Bs[b_row * TILE_N + col] = in_bounds ? data_X[idx] : 0.0f;
+        }
+
+        barrier();
+
+        for (uint kk = 0; kk < TILE_K; ++kk) {
+            acc += As[row * TILE_K + kk] * Bs[kk * TILE_N + col];
+        }
+
+        barrier();
+    }
+
+    if (globalRow >= pc.m || globalCol >= pc.n) { return; }
+
+    float result = pc.alpha * acc;
+    if (pc.beta_is_zero == 0) {
+        uint cIdx = globalRow + globalCol * pc.ldc;
+        result += pc.beta * data_Y[cIdx];
+    }
+    uint dIdx = globalRow + globalCol * pc.ldd;
+    data_Z[dIdx] = result;
+}
