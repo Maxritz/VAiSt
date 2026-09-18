@@ -10,13 +10,27 @@
 #include "vaist_engine.h"
 #include "vaist_ai.h"
 #include "vaist_distributed.h"
+#include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
-static int check(int x,const char*n){if(!x){fprintf(stderr,"FAIL:%s\n",n);return 0;}return 1;}
+static int check(int x,const char*n){if(!x){fprintf(stderr,"[T] FAIL:%s\n",n);return 0;}fprintf(stderr,"[T] PASS:%s\n",n);return 1;}
 static VaistStatus addop(const float*a,const float*b,float*o,size_t n){return vaist_add_f32(a,b,o,n);}
-int main(void){
- int ok=1; float a[4]={1,2,3,4},b[4]={4,3,2,1},o[4]; size_t used=0,count=0; uint32_t tok[8]; uint32_t id=0; char text[64];
+int main(int argc, char **argv){
+#if defined(_WIN32)
+    if(argc>=2 && (argv[1] && strcmp(argv[1],"VAIST_VK_PROBE=1")==0)){
+        /* Child probe process: validate Vulkan device then exit silently */
+        VaistRuntime*r=NULL;
+        if(vaist_runtime_create(VAIST_BACKEND_VULKAN,&r)==VAIST_OK){
+            void *dev=NULL,*q=NULL;uint32_t qf=0;
+            int ok = (vaist_runtime_vk_state(r,&dev,&q,&qf)==VAIST_OK && dev && q) ? 0 : 1;
+            vaist_runtime_destroy(r);
+            return ok;
+        }
+        return 1;
+    }
+#endif
+    int ok=1; float a[4]={1,2,3,4},b[4]={4,3,2,1},o[4]; size_t used=0,count=0; uint32_t tok[8]; uint32_t id=0; char text[64];
  ok&=check(vaist_get_abi_version().major==1,"abi");
  ok&=check(vaist_add_f32(a,b,o,4)==VAIST_OK&&o[0]==5&&o[3]==5,"add");
  ok&=check(vaist_matmul_f32(a,b,o,1,4,1)==VAIST_OK&&fabsf(o[0]-20)<1e-5f,"matmul");

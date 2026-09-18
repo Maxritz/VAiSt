@@ -36,3 +36,56 @@ The sandbox's `C:\VulkanSDK\1.4.357.0\Include\vulkan\vulkan_core.h` is **inconsi
 - SVD (`gesvd`), `geqrf`/`orgqr` (Householder) complete kernels — `geqrf` staged, QR/solve stubbed; not in test scope.
 - Python C-extension packages for `blas` (and complete `linalg`) — missing `vulkan/**/python/blas/` dir; caused `python_component_load` + `clean_staging_load` to fail (pre-existing infra gap, outside numerical scope). Skipped per YAGNI.
 - Cross-platform (Linux) compile check — linux/windows mirrors kept in sync via script; only Windows/MSVC verified here.
+
+## [2026-09-18] finding: quant-dequant-OOB-zero-fill
+- file: vulkan/windows/c99/quant/src/vaist_quant.c:208 @see debug-core
+- severity: critical
+- desc: OUT macro else-branch wrote 0 past caller buffer (o[idx]=0 for idx>=n), smashing stack arrays; fixed to skip OOB lanes
+- validation: stack_smoke 16/16 PASS (graph_execute o0=5, kv o1=2, cosine=1)
+
+## [2026-09-18] finding: DBG_TRACE instrumentation added
+- files: c99/graph, c99/llm, c99/ai, c99/runtime, c++/graph, c++/llm, c++/ai, c++/runtime, c++/npu+test, c++/xpu+test, tests/stack_smoke.c
+- desc: [T] markers on entry/branch/result; runtime destroy_vk NULL-gipa guard added
+- validation: clean MSVC build (/WX), markers visible in all test binaries
+
+## [2026-09-18] finding: ctest-segfault-probe-spawn-fixed
+- file: vulkan/windows/c99/runtime/src/vaist_runtime.c:97 @see debug-core
+- severity: critical
+- desc: _snwprintf_s overstated cmd buffer (sizeof bytes vs wchar count); DBG_TRACE markers added to probe path
+- validation: 0/70 fails standalone, ctest 24/24 x5 runs
+
+## [2026-09-18] finding: python-pkg-gaps-closed
+- files: vulkan/windows/python/{blas,attn,xpu,linalg}/, tests/python_components.py, tests/clean_staging.py
+- severity: medium
+- desc: created missing loader pkgs (blas/attn/xpu), fixed empty linalg pkg, extended test MODULES 14->17
+- validation: python_component_load + clean_staging_load PASS
+
+## [2026-09-18] finding: driver-fault-isolation-cpu-no-vk
+- files: vulkan/{windows,linux}/c99/runtime/src/vaist_runtime.c @see debug-core
+- severity: critical
+- desc: EventLog proved faulting modules were IntelControlLib/igvkMedia64/ucrtbase (never our code); CPU runtimes no longer LoadLibrary the ICD nor spawn probe child; SEM_NOGPFAULTERRORBOX inherited by probe child
+- validation: 0 new EventLog crashes over ~200 execs, ctest 24/24 x5, markers show loader=NULL + cpu-no-vk path
+
+## [2026-09-18] finding: probe-spawn-hardening-cache-plus-truncation-guard
+- files: vulkan/{windows,linux}/c99/runtime/src/vaist_runtime.c (g_probe_done/g_probe_ok cache, GetModuleFileNameW truncation guard)
+- severity: high
+- desc: one probe child per process max; bad self-path fails probe instead of spawning
+- validation: 0/100 standalone loops, ctest 24/24 x3, EventLog silent
+
+## [2026-09-18] finding: simd-path-trap-verified
+- files: vulkan/{windows,linux}/c99/blas/src/vaist_blas.c (DBG_TRACE trap on empty SIMD branch)
+- severity: low
+- desc: dense GEMM with CPU runtime selects SIMD path with no kernels; trap proves silent scalar fallback
+- validation: throwaway probe (since removed) showed trap + C0=8 C3=13 correct; ctest 24/24
+
+## [2026-09-18] finding: openvino-perf-hints-mapped-to-npu-xpu
+- files: include/vaist/vaist_npu.h, vaist_xpu.h, c99/npu/vaist_npu.c, c99/xpu/vaist_xpu.c, c++/npu+xpu tests
+- severity: medium
+- desc: perf-hint enums (LATENCY/THROUGHPUT/EFFICIENCY) drive tile sizes; SPARSE flag skips zero terms; conv static-shape validation (stride/dims, div-by-zero fix)
+- validation: hint loops all-correct (NPU C0=5 all tiles, XPU exact transpose), ctest 24/24
+
+## [2026-09-18] finding: real-npu-detection-via-level-zero
+- files: vulkan/windows/c99/npu/src/vaist_npu.c, include/vaist/vaist_npu.h, c++/npu/test_npu.cpp
+- severity: high
+- desc: dynamic ze_loader binding (no link dep); NPU matched as Intel VPU-type device; new vaist_npu_device_id(); only verified struct prefix read (name/clock are driver garbage)
+- validation: present=1 device=0x7d1d on MTL 135H, ctest 24/24

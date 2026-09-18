@@ -1,2 +1,3 @@
 #include "vaist_graph.hpp"
-int main(){ vaist::Graph g; return g.get()!=nullptr?0:1; }
+#include <cstdio>
+int main(){ vaist::Graph g; int rc=g.get()!=nullptr?0:1; std::fprintf(stderr,"[T] %s:test_graph rc=%d p=%p\n",rc?"FAIL":"PASS",rc,(void*)g.get()); return rc; }

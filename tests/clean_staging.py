@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-MODULES = ['core', 'runtime', 'tensor', 'compute', 'quant', 'graph', 'model', 'nn', 'llm', 'engine', 'ai', 'distributed', 'blas', 'linalg']
+MODULES = ['core', 'runtime', 'tensor', 'compute', 'quant', 'graph', 'model', 'nn', 'llm', 'engine', 'ai', 'distributed', 'blas', 'linalg', 'attn', 'npu', 'xpu']
 
 def main():
     if len(sys.argv) != 4:

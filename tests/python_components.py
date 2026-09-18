@@ -6,7 +6,8 @@ from pathlib import Path
 
 MODULES = (
     "core", "runtime", "tensor", "compute", "quant", "graph",
-    "model", "nn", "llm", "engine", "ai", "distributed", "blas", "linalg"
+    "model", "nn", "llm", "engine", "ai", "distributed", "blas", "linalg",
+    "attn", "npu", "xpu"
 )
 
 

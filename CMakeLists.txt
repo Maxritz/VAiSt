@@ -19,7 +19,7 @@ set(VAIST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/vulkan/${VAIST_PLATFORM}")
 set(VAIST_C99 "${VAIST_ROOT}/c99")
 set(VAIST_CPP "${VAIST_ROOT}/c++")
 set(VAIST_PYTHON "${VAIST_ROOT}/python")
-set(VAIST_MODULES core runtime tensor compute quant graph model nn llm engine ai distributed blas linalg attn)
+set(VAIST_MODULES core runtime tensor compute quant graph model nn llm engine ai distributed blas linalg attn npu xpu)
 
 option(VAIST_ENABLE_VULKAN "Pull in the Vulkan SDK headers for the Vulkan compute backend" OFF)
 if(VAIST_ENABLE_VULKAN)
@@ -145,6 +145,20 @@ foreach(D IN LISTS VAIST_MODULES)
         add_dependencies(${M} vaist_blas_spv_hdr)
       endif()
     endif()
+  endif()
+  if(D STREQUAL "npu")
+    target_link_libraries(${M} PRIVATE vaist_core)
+    if(WIN32)
+      target_compile_definitions(${M} PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    vaist_c_warning_flags(${M})
+  endif()
+  if(D STREQUAL "xpu")
+    target_link_libraries(${M} PRIVATE vaist_core)
+    if(WIN32)
+      target_compile_definitions(${M} PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    vaist_c_warning_flags(${M})
   endif()
   vaist_c_warning_flags(${M})
   if(WIN32)
@@ -418,7 +432,7 @@ endif()
 # Install/export contract.
 # -----------------------------------------------------------------------------
 include(GNUInstallDirs)
-install(TARGETS vaist_core vaist_runtime vaist_tensor vaist_compute vaist_quant vaist_graph vaist_model vaist_nn vaist_llm vaist_engine vaist_ai vaist_distributed vaist_blas vaist_linalg vaist_attn
+install(TARGETS vaist_core vaist_runtime vaist_tensor vaist_compute vaist_quant vaist_graph vaist_model vaist_nn vaist_llm vaist_engine vaist_ai vaist_distributed vaist_blas vaist_linalg vaist_attn vaist_npu vaist_xpu
   EXPORT VAiStTargets
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

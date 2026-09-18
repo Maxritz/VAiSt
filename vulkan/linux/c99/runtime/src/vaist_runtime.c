@@ -80,18 +80,23 @@ static void runtime_close(void*h){
  *
  * The child is this same executable, launched with VAIST_VK_PROBE=1 in its
  * environment; the test binary's main() honours that as a probe-only entry. */
+/* Probe verdict is machine state: spawn at most one child per process. */
+static int g_probe_done=0;
+static int g_probe_ok=0;
 static int vaist_vk_device_probe_child(void){
     wchar_t wself[MAX_PATH];
     wchar_t cmd[MAX_PATH*2];
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     DWORD code=1;
-    if(!GetModuleFileNameW(NULL,wself,MAX_PATH)) return 0;
+    DWORD nself;
+    nself=GetModuleFileNameW(NULL,wself,MAX_PATH);
+    if(nself==0||nself>=MAX_PATH) return 0;
     /* Pass the probe flag as a COMMAND-LINE ARGUMENT (SetEnvironmentVariableA does
      * NOT propagate to CreateProcessW's inherited env block on Windows, so an
      * env var would be invisible to the child and every child would re-spawn →
      * runaway recursion). The child's main() reads argv for the flag. */
-    _snwprintf_s(cmd,sizeof(cmd),_TRUNCATE,L"%ls VAIST_VK_PROBE=1",wself);
+    _snwprintf_s(cmd,(sizeof(cmd)/sizeof(cmd[0])),_TRUNCATE,L"%ls VAIST_VK_PROBE=1",wself);
     memset(&si,0,sizeof(si)); si.cb=sizeof(si);
     memset(&pi,0,sizeof(pi));
     if(!CreateProcessW(wself,cmd,NULL,NULL,FALSE,0,NULL,NULL,&si,&pi)) return 0;
@@ -109,6 +114,20 @@ VAIST_API VaistStatus vaist_runtime_create(VaistBackend requested, VaistRuntime 
     *out=NULL;
     if(requested!=VAIST_BACKEND_AUTO&&requested!=VAIST_BACKEND_CPU&&requested!=VAIST_BACKEND_VULKAN)
         return VAIST_INVALID_ARGUMENT;
+    if(requested!=VAIST_BACKEND_CPU){
+#if VAIST_HAVE_VK_HDR && defined(_WIN32)
+    /* Probe FIRST in a disposable child; this process loads the ICD only
+     * after the child proves a usable device. */
+    { wchar_t *cl=GetCommandLineW();
+      int probe=cl? (wcsstr(cl,L"VAIST_VK_PROBE=1")!=NULL) : 0;
+      if(!probe){
+          if(!g_probe_done){ g_probe_ok=vaist_vk_device_probe_child(); g_probe_done=1; }
+          has=g_probe_ok?1u:0u;
+      } else {
+          has=1u;
+      } }
+    if(has){
+#endif
 #if defined(_WIN32)
     h=runtime_load_vk("vulkan-1.dll");
 #else
@@ -116,23 +135,9 @@ VAIST_API VaistStatus vaist_runtime_create(VaistBackend requested, VaistRuntime 
 #endif
     has = h ? 1u : 0u;
 #if VAIST_HAVE_VK_HDR && defined(_WIN32)
-    /* Gate "Vulkan available" on a real, creatable logical device. The sandbox
-     * loader enumerates a phantom physical device; only a child-process
-     * vkCreateDevice probe can tell real GPUs from stubs without crashing the
-     * parent (the probe is disabled inside the probe child itself). */
-    if(has){
-        /* Skip the child-probe spawn when WE are the probe child (the parent
-         * passes the flag on the command line; reading it from the process
-         * command line is reliable across the DLL/exe boundary). */
-        wchar_t *cl=GetCommandLineW();
-        int probe=cl? (wcsstr(cl,L"VAIST_VK_PROBE=1")!=NULL) : 0;
-        if(!probe){
-            if(!vaist_vk_device_probe_child()){
-                has=0u;
-            }
-        }
     }
 #endif
+    }
     if(requested==VAIST_BACKEND_VULKAN && !has) return VAIST_DEVICE_ERROR;
     r=(VaistRuntime*)calloc(1,sizeof(*r));
     if(!r){ runtime_close(h); return VAIST_OUT_OF_MEMORY; }

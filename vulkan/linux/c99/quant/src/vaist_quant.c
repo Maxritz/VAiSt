@@ -205,7 +205,7 @@ VAIST_API VaistStatus vaist_quantize_f32(VaistQuantType q,const float*s,size_t n
  * one 32- or 256-element block.  Caller allocates >= n floats (n may be the
  * full vector length); trailing partial blocks are zero-filled to block size.
  * Mirrors the CUDA dequantize_block_* thread-mapping by iterating per-lane. ---- */
-#define OUT(o,idx,val) do{ if((size_t)(idx)<n ) o[(idx)]=(val); else o[(idx)]=0; }while(0)
+#define OUT(o,idx,val) do{ if((size_t)(idx)<n ) o[(idx)]=(val); }while(0)
 
 VAIST_API VaistStatus vaist_dequantize_f32(VaistQuantType q,const void*src,size_t bytes,float*o,size_t n){
     if(!src||!o||!n) return VAIST_INVALID_ARGUMENT;

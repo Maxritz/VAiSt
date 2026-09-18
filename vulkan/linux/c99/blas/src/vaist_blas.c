@@ -4,6 +4,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#ifndef DBG_TRACE
+#define DBG_TRACE(...) do { fprintf(stderr, "[T] %s:%d %s: ", __FILE__, __LINE__, __func__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
+#endif
 
 /* ---- CPU kernels: scalar fallback, Zen3-friendly (no SIMD forced here;
  *      callers can swap in vaist_compute SIMD for the dense fp32 path). ---- */
@@ -438,6 +442,7 @@ VAIST_API VaistStatus vaist_blas_gemm(const VaistRuntime*rt,
     }
     if(p==VAIST_PATH_SIMD){
         /* TODO: AVX2 (Zen3) / AMX (Intel P-core) dispatch via vaist_compute SIMD. */
+        DBG_TRACE("trap: SIMD path selected but unimplemented -> scalar-fallback m=%lu k=%lu n=%lu",(unsigned long)m,(unsigned long)k,(unsigned long)n);
     }
     return gemm_scalar(A,B,C,m,k,n);
 }

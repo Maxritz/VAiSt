@@ -21,7 +21,7 @@ int main()
     assert(vaist::abi().major == VAIST_ABI_MAJOR);
     assert(!vaist::version().empty());
 
-    vaist::Runtime runtime(VAIST_BACKEND_CPU);
+    vaist::Runtime runtime(vaist::Runtime::CPU);
     assert(runtime.get() != nullptr);
 
     vaist::Tensor tensor;

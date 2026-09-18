@@ -3,6 +3,9 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdio.h>
+#ifndef DBG_TRACE
+#define DBG_TRACE(...) do { fprintf(stderr, "[T] %s:%d %s: ", __FILE__, __LINE__, __func__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
+#endif
 #if defined(_WIN32)
 #include <windows.h>
 #else
@@ -80,25 +83,44 @@ static void runtime_close(void*h){
  *
  * The child is this same executable, launched with VAIST_VK_PROBE=1 in its
  * environment; the test binary's main() honours that as a probe-only entry. */
+/* Probe verdict is machine state: spawn at most one child per process. Every
+ * spawn walks driver-hooked process creation, so repeated spawns multiply
+ * exposure to faulty ICD hooks. (Concurrent first calls may race one extra
+ * spawn; harmless — same verdict.) */
+static int g_probe_done=0;
+static int g_probe_ok=0;
 static int vaist_vk_device_probe_child(void){
     wchar_t wself[MAX_PATH];
     wchar_t cmd[MAX_PATH*2];
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     DWORD code=1;
-    if(!GetModuleFileNameW(NULL,wself,MAX_PATH)) return 0;
+    UINT prevMode;
+    DWORD nself;
+    DBG_TRACE("probe-child enter");
+    nself=GetModuleFileNameW(NULL,wself,MAX_PATH);
+    if(nself==0||nself>=MAX_PATH){DBG_TRACE("probe-child path=self-name-bad len=%lu -> 0",(unsigned long)nself);return 0;}
     /* Pass the probe flag as a COMMAND-LINE ARGUMENT (SetEnvironmentVariableA does
      * NOT propagate to CreateProcessW's inherited env block on Windows, so an
      * env var would be invisible to the child and every child would re-spawn →
      * runaway recursion). The child's main() reads argv for the flag. */
-    _snwprintf_s(cmd,sizeof(cmd),_TRUNCATE,L"%ls VAIST_VK_PROBE=1",wself);
+    _snwprintf_s(cmd,(sizeof(cmd)/sizeof(cmd[0])),_TRUNCATE,L"%ls VAIST_VK_PROBE=1",wself);
+    DBG_TRACE("probe-child cmd-built");
     memset(&si,0,sizeof(si)); si.cb=sizeof(si);
     memset(&pi,0,sizeof(pi));
-    if(!CreateProcessW(wself,cmd,NULL,NULL,FALSE,0,NULL,NULL,&si,&pi)) return 0;
+    DBG_TRACE("probe-child spawning");
+    /* The disposable probe child inherits the error mode: suppress system
+     * crash dialogs there (a driver fault must surface only as an exit
+     * code). Restored in the parent immediately after the spawn. */
+    prevMode = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    if(!CreateProcessW(wself,cmd,NULL,NULL,FALSE,0,NULL,NULL,&si,&pi)){SetErrorMode(prevMode);DBG_TRACE("probe-child path=spawn-fail err=%lu -> 0",(unsigned long)GetLastError());return 0;}
+    SetErrorMode(prevMode);
+    DBG_TRACE("probe-child spawned, waiting");
     CloseHandle(pi.hThread);
     WaitForSingleObject(pi.hProcess,15000);
     if(!GetExitCodeProcess(pi.hProcess,&code)) code=1;
     CloseHandle(pi.hProcess);
+    DBG_TRACE("probe-child exit-code=%lu -> %d",(unsigned long)code,(code==0)?1:0);
     return (code==0)?1:0;
 }
 #endif
@@ -109,30 +131,48 @@ VAIST_API VaistStatus vaist_runtime_create(VaistBackend requested, VaistRuntime 
     *out=NULL;
     if(requested!=VAIST_BACKEND_AUTO&&requested!=VAIST_BACKEND_CPU&&requested!=VAIST_BACKEND_VULKAN)
         return VAIST_INVALID_ARGUMENT;
+    if(requested==VAIST_BACKEND_CPU){
+        /* CPU backend never touches Vulkan: do not load the graphics driver
+         * into this process (a faulty ICD faults the whole process from its
+         * own threads) and skip the child-process probe entirely. */
+        DBG_TRACE("path=cpu-no-vk -> skip loader+probe");
+    } else {
+#if VAIST_HAVE_VK_HDR && defined(_WIN32)
+    /* Probe FIRST in a disposable child (which loads the driver itself);
+     * this process touches the ICD only after the child proves a usable
+     * device — a faulty driver can then never fault us at load time.
+     * Skip the spawn when WE are the probe child (flag on the command
+     * line is reliable across the DLL/exe boundary); the vk_state/device
+     * attempt below then reports viability via the exit code. */
+    { wchar_t *cl=GetCommandLineW();
+      int probe=cl? (wcsstr(cl,L"VAIST_VK_PROBE=1")!=NULL) : 0;
+      DBG_TRACE("probe-check probe=%d",probe);
+      if(!probe){
+          if(!g_probe_done){ g_probe_ok=vaist_vk_device_probe_child(); g_probe_done=1; }
+          else { DBG_TRACE("probe-cached ok=%d",g_probe_ok); }
+          has=g_probe_ok?1u:0u;
+      } else {
+          has=1u;
+      } }
+    DBG_TRACE("probe-done has=%u",(unsigned)has);
+    if(has){
 #if defined(_WIN32)
     h=runtime_load_vk("vulkan-1.dll");
 #else
     h=runtime_load_vk("libvulkan.so.1");
 #endif
     has = h ? 1u : 0u;
-#if VAIST_HAVE_VK_HDR && defined(_WIN32)
-    /* Gate "Vulkan available" on a real, creatable logical device. The sandbox
-     * loader enumerates a phantom physical device; only a child-process
-     * vkCreateDevice probe can tell real GPUs from stubs without crashing the
-     * parent (the probe is disabled inside the probe child itself). */
-    if(has){
-        /* Skip the child-probe spawn when WE are the probe child (the parent
-         * passes the flag on the command line; reading it from the process
-         * command line is reliable across the DLL/exe boundary). */
-        wchar_t *cl=GetCommandLineW();
-        int probe=cl? (wcsstr(cl,L"VAIST_VK_PROBE=1")!=NULL) : 0;
-        if(!probe){
-            if(!vaist_vk_device_probe_child()){
-                has=0u;
-            }
-        }
     }
+#else
+#if defined(_WIN32)
+    h=runtime_load_vk("vulkan-1.dll");
+#else
+    h=runtime_load_vk("libvulkan.so.1");
 #endif
+    has = h ? 1u : 0u;
+#endif
+    DBG_TRACE("runtime_create requested=%d loader=%p has=%u",(int)requested,h,(unsigned)has);
+    }
     if(requested==VAIST_BACKEND_VULKAN && !has) return VAIST_DEVICE_ERROR;
     r=(VaistRuntime*)calloc(1,sizeof(*r));
     if(!r){ runtime_close(h); return VAIST_OUT_OF_MEMORY; }
@@ -282,17 +322,34 @@ static int vaist_ensure_device(VaistRuntime*r){
 static void vaist_runtime_destroy_vk(VaistRuntime*r){
     (void)r;
 #if VAIST_HAVE_VK_HDR
+    DBG_TRACE("enter device=%p instance=%p gipa=%p loader=%p",(void*)r->device,(void*)r->instance,(void*)r->gipa,r->loader);
     if(r->device){
-        PFN_vkDestroyDevice ddev=(PFN_vkDestroyDevice)(void*)(r->gipa?(void*)r->gipa(r->instance,"vkDestroyDevice"):NULL);
-        if(!ddev) ddev=(PFN_vkDestroyDevice)runtime_sym(r->loader,"vkDestroyDevice");
-        if(ddev) ddev(r->device,NULL);
+        PFN_vkDestroyDevice ddev=NULL;
+        if(r->gipa && r->instance)
+            ddev=(PFN_vkDestroyDevice)(void*)r->gipa(r->instance,"vkDestroyDevice");
+        else
+            DBG_TRACE("path=device-no-gipa -> loader-sym fallback");
+        if(!ddev)
+            ddev=(PFN_vkDestroyDevice)runtime_sym(r->loader,"vkDestroyDevice");
+        if(ddev)
+            ddev(r->device,NULL);
         r->device=VK_NULL_HANDLE;
+    } else {
+        DBG_TRACE("path=no-device -> skip");
     }
     if(r->instance){
-        PFN_vkDestroyInstance dinst=(PFN_vkDestroyInstance)(void*)(r->gipa?(void*)r->gipa(r->instance,"vkDestroyInstance"):NULL);
-        if(!dinst) dinst=(PFN_vkDestroyInstance)runtime_sym(r->loader,"vkDestroyInstance");
-        if(dinst) dinst(r->instance,NULL);
+        PFN_vkDestroyInstance dinst=NULL;
+        if(r->gipa && r->instance)
+            dinst=(PFN_vkDestroyInstance)(void*)r->gipa(r->instance,"vkDestroyInstance");
+        else
+            DBG_TRACE("path=instance-no-gipa -> loader-sym fallback");
+        if(!dinst)
+            dinst=(PFN_vkDestroyInstance)runtime_sym(r->loader,"vkDestroyInstance");
+        if(dinst)
+            dinst(r->instance,NULL);
         r->instance=VK_NULL_HANDLE;
+    } else {
+        DBG_TRACE("path=no-instance -> skip");
     }
     r->vk_ready=0; r->vk_8bit=0;
 #endif
