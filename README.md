@@ -48,9 +48,9 @@ VAiSt fixes this by starting from first principles:
   (`VK_KHR_cooperative_matrix`). The runtime picks the best tier your GPU
   supports and falls back gracefully.
 
-- **Shared shader sources.** 14 of the shader sources in `shaders/` compile to
+- **Shared shader sources.** 16 of the shader sources in `shaders/` compile to
   SPIR-V at build time via `glslangValidator` (when the Vulkan SDK is present),
-  producing 16 SPIR-V blobs total (13 compiled sources + 3 pre-existing blobs
+  producing 27 SPIR-V blobs total (24 compiled sources + 3 pre-existing blobs
   with no `.comp` source). These are folded into a generated C header
   (`vaist_blas_spv.h`) consumed by `vaist_blas.c` and `vaist_attn.c` under the
   `VAIST_HAVE_VK_HDR` flag, keeping the libraries self-contained.
@@ -68,9 +68,9 @@ VAiSt
 │   ├── vkblas/           BLAS API (hipBLAS-compatible naming)
 │   ├── vkfft/            FFT API (rocFFT-compatible naming)
 │   ├── vkrand/           RNG + sampling API (rocrand-compatible naming)
-│   ├── vkmath/           Elementwise ops, reductions, activations
-│   ├── vkquant/          Quantization + dequantization (ggml block formats)
-│   ├── vkmodel/          Model loaders (GGUF, safetensors, OpenVINO IR)
+│   ├── vkquant/          Dequant + forward-quantize shaders (Q4_0/Q8_0/NVFP4/T2_0)
+│   ├── vkmodel/          Model loaders (GGUF native, safetensors, OpenVINO IR)
+│   │                     + SSD-offload streaming (mmap + LRU expert prefetch)
 │   ├── vkruntime/        Device/queue/memory/pool runtime (hipRuntime-equivalent)
 │   ├── vkkv/             Cross-model KV-cache ridge transfer
 │   └── vkdist/           Distributed compute over TCP
@@ -83,7 +83,6 @@ VAiSt
 │   ├── vkblas/           GEMM, qgemm, moe_route, conv (rb2) baseline tier
 │   ├── vkblas_l1l2/      L1/L2 BLAS vector/matrix ops
 │   ├── vkmath/           Elementwise, reductions, activations, casts
-│   ├── vkquant/          Dequant + forward-quantize shaders
 │   ├── vkrand/           PRNG + distribution sampling
 │   ├── vkfft/            Radix-2 FFT
 │   ├── vkkv/             KV cache ridge transfer
@@ -275,9 +274,10 @@ Types follow the same scheme: `s` = f32, `d` = f64, `h` = f16, `bf` = bf16,
 Tile dimensions, unroll factors, and wave widths are SPIR-V specialization
 constants (`constant_id`), not pre-compiled `#define` variants. One SPIR-V
 binary per shader source can be reconfigured at pipeline creation time without
-recompilation. The 14 shader sources in `shaders/{lib}/baseline/` compile to
-16 SPIR-V blobs (13 compiled + 3 pre-existing); specialization varies tile/wave
-at pipeline-creation time, not by pre-compiled variants.
+recompilation. The 24 compiled `.comp` sources (in `shaders/{lib}/baseline/`) plus
+  3 pre-existing SPIR-V blobs without sources yield 27 total SPIR-V blobs;
+  specialization varies tile/wave at pipeline-creation time, not by pre-compiled
+  variants.
 
 ---
 
