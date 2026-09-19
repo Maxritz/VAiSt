@@ -44,6 +44,9 @@ typedef struct VaistDeviceCaps {
     /* Cooperative matrices; treated as optional (RDNA2/3 unreliable in practice). */
     uint32_t cooperative_matrix_supported;
     uint32_t cooperative_matrix_accelerated;
+    /* AMD architecture classification (for workgroup tuning, coopmat disable). */
+    uint32_t amd_rdna_gen;      /* 0=none, 1=RDNA1, 2=RDNA2, 3=RDNA3, 4=RDNA4 */
+    uint32_t is_uma;            /* 1 if unified memory (APU), 0 if discrete */
 } VaistDeviceCaps;
 
 VAIST_API VaistStatus vaist_runtime_create(VaistBackend requested, VaistRuntime **out);

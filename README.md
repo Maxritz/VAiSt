@@ -79,7 +79,7 @@ VAiSt
 │   └── {ai,attn,blas,compute,core,distributed,engine,graph,linalg,llm,
 │       model,nn,quant,runtime,tensor}/   15-component VAiSt c99/c++/python layer
 ├── shaders/
-│   ├── vkattn/           Attention (flash-decode, future MHA/MLA variants)
+│   ├── vkattn/           Attention (flash-decode, speculative-verify, hierarchical sparse)
 │   ├── vkblas/           GEMM, qgemm, moe_route, conv (rb2) baseline tier
 │   ├── vkblas_l1l2/      L1/L2 BLAS vector/matrix ops
 │   ├── vkmath/           Elementwise, reductions, activations, casts
@@ -134,6 +134,8 @@ Vulkan entry points through `runtime_sym`/`inst_proc` (`LoadLibraryA` +
 | `vaist_attn_destroy(ctx)` | Tear down |
 | `vaist_attn_flash_decode(ctx, q, k_cache, v_cache, block_tables, seqlen, out)` | Dispatch paged-attention flash decode |
 | `vaist_attn_spec_verify(ctx, q, k_cache, v_cache, block_tables, draft_tokens, seqlen, n_active, out, verify_mask, spec_depth)` | Speculative decode verify attention (SpecForge pattern) |
+| `vaist_attn_sparse_hierarchical(ctx, q, k_cache, v_cache, block_tables, seqlen, top_k_blocks, selected_blocks, out)` | Hierarchical sparse attention (CSA2/HISA pattern). **USAGE: Not auto-dispatched — caller must invoke from model attention layer. Requires cfg.sparse_ratio > 0.** |
+| `vaist_attn_ced(ctx, q, k_cache, v_cache, block_tables, seqlen, encoder_output, is_encoder_layer, out)` | Causal Encoder-Decoder attention (CED prefill). **USAGE: Caller must wire encoder_output from lower layers.** |
 
 The `attn_flash_decode.comp` compute shader:
 - Binds 5 SSBOs: `q` (input query, f32), `k_cache` + `v_cache` (GPU buffers, fp16),
@@ -169,6 +171,39 @@ Quantized GEMM shaders (`qgemm_nvfp4.comp`, `qgemm_t2_0.comp` in `shaders/vkblas
 - Q8_0: 36 bytes per block of 32 (fp16 scale + 16 int4 weights)
 - On no Vulkan device (sandbox CPU-only), returns `VAIST_DEVICE_ERROR` so the
   caller falls back to CPU dequant + GEMM.
+
+### VAiSt LLM (`vaist_llm`)
+
+| Function | Description |
+|----------|-------------|
+| `vaist_kv_paged_create(rt, &cfg, &kvc)` | Create paged KV cache over GPU buffer or host fallback. Config supports tiered KV (`local_kv_dtype`, `global_kv_dtype`, `local_window`, `global_sparse_ratio`) for DeepSeek-V4.1-Flash. **USAGE: Config only — caller must implement GPU dispatch for tiered dtype selection.** |
+| `vaist_kv_paged_destroy(kvc)` | Tear down |
+| `vaist_kv_paged_alloc_block(kvc, n, block_ids)` | Allocate N free blocks |
+| `vaist_kv_paged_free_block(kvc, block_id)` | Return block to pool |
+| `vaist_kv_paged_write_tensor(...)` | Write K/V tensor data into a block |
+| `vaist_kv_paged_gpu_buffer(kvc, layer, &handle)` | Get VkBuffer handle |
+| `vaist_kv_cache_view_create(kvc, layer, block_ids, count, &view)` | Cross-layer KV sharing (YOCO pattern) — **USAGE: Metadata view only; model layer must redirect KV reads in attention forward.** |
+| `vaist_kv_cache_view_destroy(view)` | Destroy view (does not free parent data) |
+| `vaist_kv_set_replay_marker(kvc, token_pos)` | Bounded replay marker (SWA Bounded Replay) — **USAGE: Host-side bookkeeping only; model layer must check before caching/computing.** |
+| `vaist_kv_get_replay_marker(kvc, token_pos, &out_pos)` | Nearest replay marker ≤ token_pos |
+
+### VAiSt Quantization (`vaist_quant`)
+
+| Function | Description |
+|----------|-------------|
+| `vaist_quantize_f32(q, src, n, dst, cap, &used)` | Quantize f32 array (Q8_0/Q4_0/Q4_1/Q8_1) |
+| `vaist_dequantize_f32(q, src, bytes, dst, n)` | Dequantize to f32 |
+| `vaist_quant_block_bytes(q)` | Bytes per quantization block |
+| `vaist_quant_block_size(q)` | Elements per block |
+| `vaist_pack_ternary(src, n, signs, &scale)` | MatMul-free ternary encoding |
+| `vaist_pack_binary(src, n, bits, &scale)` | MatMul-free binary encoding |
+| `vaist_fp8_e4m3_encode(f32)` / `vaist_fp8_e4m3_decode(v)` | FP8 E4M3 scalar codec |
+| `vaist_fp8_e5m2_encode(f32)` / `vaist_fp8_e5m2_decode(v)` | FP8 E5M2 scalar codec |
+| `vaist_quantize_fp8(src, n, dst, dt)` | Batch FP8 quantize (dt=8 E4M3, dt=9 E5M2) |
+
+**USAGE: These are scalar/host-side codec utilities. They do NOT auto-integrate with**
+**model weight loading or GPU kernels — the caller must populate GPU buffers and**
+**dispatch dequant+compute shaders. See `vaist-blas-spv.h` for shader-backed quantization.**
 
 ### Model Streaming (`vaist_model` + `vaist_model_streaming`)
 
@@ -233,6 +268,22 @@ physical device whose `vkCreateDevice` raises an uncatchable
 - `build-vk-on/` (MSVC Release) is the `VAIST_ENABLE_VULKAN=ON` target against
   the sandbox Vulkan SDK 1.4.357.0; `build/` is the default, no-Vulkan build
   that runs the CPU fallback.
+
+### AMD RDNA performance fix
+
+Patches borrowed from llama.cpp's `vulkan-amd-rdna4-perf-fix.patch` (RX 9070 XT):
+
+- **Architecture detection**: `probe_device()` classifies AMD GPUs as RDNA1–RDNA4
+  via `deviceID` ranges and API version. `VaistDeviceCaps.amd_rdna_gen` and
+  `is_uma` are exposed to the compute layer.
+- **Force device-local memory for discrete AMD GPUs**: the memory allocator
+  (`vkr_pick_memory_type`) already prefers `DEVICE_LOCAL | !HOST_VISIBLE` —
+  this avoids the proprietary AMD driver's slow host-visible VRAM path (5 t/s →
+  89 t/s on Qwen3-8B-Q4_K_M).
+- **RDNA4 disables KHR_cooperative_matrix**: RDNA4 uses WMMA, not true coopmat.
+  `cooperative_matrix_supported` stays `VK_FALSE` for all AMD devices.
+- **Workgroup size tuning**: larger workgroups (DMMV_WG_SIZE_LARGE) when
+  `M ≤ 8192 && K ≥ 1024` improve occupancy on RDNA2/3/4 during decode.
 
 ---
 

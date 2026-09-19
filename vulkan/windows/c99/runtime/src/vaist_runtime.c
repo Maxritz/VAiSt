@@ -419,6 +419,25 @@ static void probe_device(VaistRuntime*r){
             caps->integer_dot_product_4bit_supported = 0;
             caps->integer_dot_product_4bit_accelerated = 0;
             caps->cooperative_matrix_supported = 0; /* not queried: unreliable on RDNA2/3 */
+            /* AMD RDNA architecture detection (for workgroup tuning + coopmat disable).
+             * See https://github.com/Maxritz/VAiSt — patch: vulkan-amd-rdna4-perf-fix */
+            caps->is_uma = (p2.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) ? 1u : 0u;
+            if (caps->vendor_id == 0x1002) {  /* VK_VENDOR_ID_AMD */
+                /* Vulkan 1.4 or device ID 0x7550 (RX 9070 series) → RDNA4 */
+                if (p2.properties.apiVersion >= VK_API_VERSION_1_4 ||
+                    p2.properties.deviceID == 0x7550) {
+                    caps->amd_rdna_gen = 4;
+                } else {
+                    /* Wavefront size from AMD shader core props: 32 = RDNA1/2/3,
+                     * 64 = RDNA3 (wave32 mode). Use device ID ranges for gen classification. */
+                    if (p2.properties.deviceID >= 0x73BF && p2.properties.deviceID <= 0x747E)
+                        caps->amd_rdna_gen = 2; /* Navi 2x-3x */
+                    else if (p2.properties.deviceID >= 0x7480 && p2.properties.deviceID <= 0x74FF)
+                        caps->amd_rdna_gen = 3; /* Navi 3x */
+                    else
+                        caps->amd_rdna_gen = 1; /* RDNA1: Navi 1x */
+                }
+            }
         }
     }
     r->have_caps=1;

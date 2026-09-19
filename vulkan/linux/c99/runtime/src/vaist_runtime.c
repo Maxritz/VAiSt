@@ -419,6 +419,21 @@ static void probe_device(VaistRuntime*r){
             caps->integer_dot_product_4bit_supported = 0;
             caps->integer_dot_product_4bit_accelerated = 0;
             caps->cooperative_matrix_supported = 0; /* not queried: unreliable on RDNA2/3 */
+            /* AMD RDNA architecture detection (for workgroup tuning + coopmat disable). */
+            caps->is_uma = (p2.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) ? 1u : 0u;
+            if (caps->vendor_id == 0x1002) {  /* VK_VENDOR_ID_AMD */
+                if (p2.properties.apiVersion >= VK_API_VERSION_1_4 ||
+                    p2.properties.deviceID == 0x7550) {
+                    caps->amd_rdna_gen = 4;
+                } else {
+                    if (p2.properties.deviceID >= 0x73BF && p2.properties.deviceID <= 0x747E)
+                        caps->amd_rdna_gen = 2;
+                    else if (p2.properties.deviceID >= 0x7480 && p2.properties.deviceID <= 0x74FF)
+                        caps->amd_rdna_gen = 3;
+                    else
+                        caps->amd_rdna_gen = 1;
+                }
+            }
         }
     }
     r->have_caps=1;
