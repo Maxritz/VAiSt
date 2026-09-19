@@ -1,6 +1,9 @@
 #include "vaist_npu.h"
 #include "vaist_core.h"
 #include <cstdio>
+#if defined(__GNUC__)
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#endif
 static int check_gemm(const char*tag, int use_sparse) {
     // A(1x4)={1,2,0,4} * B(4x1)={1,0,3,1} -> 1*1+2*0+0*3+4*1=5
     int8_t A[4] = {1, 2, 0, 4};

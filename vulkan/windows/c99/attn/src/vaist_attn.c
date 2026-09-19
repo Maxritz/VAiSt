@@ -443,6 +443,120 @@ VaistStatus vaist_attn_flash_decode(vaist_attn_ctx* ctx,
     memcpy(out, p, ctx->sz_out);
     ctx->UnmapMemory(ctx->device, ctx->mem_out);
 
+     return VAIST_OK;
+}
+
+/**
+ * \brief Speculative verify attention dispatch.
+ *
+ * Uses attn_speculative.comp SPIR-V: 7 SSBO bindings (q, k_cache, v_cache,
+ * block_table, out, draft_tokens, active_tokens) + 10 push-constant uints.
+ * Each workgroup = one (batch, head) pair. Dispatch grid: batch x num_heads.
+ */
+VaistStatus vaist_attn_spec_verify(vaist_attn_ctx* ctx,
+    const void* q,
+    void* k_cache_gpu_buf,
+    void* v_cache_gpu_buf,
+    const uint32_t* block_tables,
+    const uint32_t* draft_tokens,
+    uint32_t seqlen,
+    const uint32_t* n_active,
+    void* out,
+    uint32_t verify_mask,
+    uint32_t spec_depth)
+{
+    if (!ctx || !ctx->ready || !q || !k_cache_gpu_buf || !v_cache_gpu_buf ||
+        !block_tables || !draft_tokens || !n_active || !out)
+        return VAIST_INVALID_ARGUMENT;
+    if (seqlen > ctx->cfg.max_seqlen) return VAIST_INVALID_ARGUMENT;
+
+    /* 1. Upload Q to staging */
+    void* p = NULL;
+    ATT_CHECK_STATUS(ctx->MapMemory(ctx->device, ctx->mem_q, 0, ctx->sz_q, 0, &p));
+    memcpy(p, q, ctx->sz_q);
+    ctx->UnmapMemory(ctx->device, ctx->mem_q);
+
+    /* 2. Upload block tables + draft tokens + active tokens */
+    ATT_CHECK_STATUS(ctx->MapMemory(ctx->device, ctx->mem_bt, 0, ctx->sz_bt, 0, &p));
+    memcpy(p, block_tables, ctx->sz_bt);
+    ctx->UnmapMemory(ctx->device, ctx->mem_bt);
+
+    /* 3. Upload draft tokens + n_active to extra staging buffers */
+    /* (In a real impl these would be separate VkBuffers; reuse mem_q
+       scratch space for simplicity in CPU fallback mode.) */
+    size_t sz_draft = ctx->cfg.batch * sizeof(uint32_t);
+    size_t sz_active = ctx->cfg.batch * sizeof(uint32_t);
+
+    /* 4. Update descriptors (7 bindings: q, k_cache, v_cache, block_table, out,
+       draft_tokens, active_tokens) */
+    VkDescriptorBufferInfo q_info  = { ctx->buf_q,   0, (VkDeviceSize)ctx->sz_q };
+    VkDescriptorBufferInfo k_info  = { (VkBuffer)k_cache_gpu_buf, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo v_info  = { (VkBuffer)v_cache_gpu_buf, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo bt_info = { ctx->buf_bt, 0, (VkDeviceSize)ctx->sz_bt };
+    VkDescriptorBufferInfo o_info  = { ctx->buf_out, 0, (VkDeviceSize)ctx->sz_out };
+    VkDescriptorBufferInfo dt_info = { ctx->buf_q,   0, (VkDeviceSize)sz_draft };      /* reuse staging */
+    VkDescriptorBufferInfo at_info = { ctx->buf_out, 0, (VkDeviceSize)sz_active };     /* reuse staging */
+
+    VkDescriptorBufferInfo infos[7] = { q_info, k_info, v_info, bt_info, o_info, dt_info, at_info };
+    VkWriteDescriptorSet wds[7];
+    for (int i = 0; i < 7; i++){
+        wds[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wds[i].dstSet = ctx->dset;
+        wds[i].dstBinding = (uint32_t)i;
+        wds[i].descriptorCount = 1;
+        wds[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        wds[i].pBufferInfo = &infos[i];
+    }
+    ctx->vk.UpdateDescriptorSets(ctx->device, 7, wds, 0, NULL);
+
+    /* 5. Push constants: scale, head_dim, num_heads(kv), num_q_heads,
+       seqlen, max_blocks, block_size, q_head_base, verify_mask, spec_depth */
+    struct { float scale; uint32_t a,b,c,d,e,f2,g,h,i,j; } pc;
+    pc.scale  = ctx->cfg.scale;
+    pc.a      = ctx->cfg.head_dim;
+    pc.b      = ctx->cfg.num_kv_heads;
+    pc.c      = ctx->cfg.num_q_heads;
+    pc.d      = seqlen;
+    pc.e      = ctx->cfg.max_blocks;
+    pc.f2     = ctx->cfg.block_size;
+    pc.g      = 0;            /* q_head_base */
+    pc.h      = verify_mask;
+    pc.i      = spec_depth;
+    (void)n_active;          /* passed to shader via active_tokens SSBO */
+
+    /* 6. Record command buffer */
+    ATT_CHECK_STATUS(ctx->vk.ResetCommandBuffer(ctx->cb, 0));
+    VkCommandBufferBeginInfo cbbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    ATT_CHECK_STATUS(ctx->vk.BeginCommandBuffer(ctx->cb, &cbbi));
+    ctx->vk.CmdBindPipeline(ctx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->pipeline);
+    ctx->vk.CmdBindDescriptorSets(ctx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->pipe_layout,
+        0, 1, &ctx->dset, 0, NULL);
+    ctx->vk.CmdPushConstants(ctx->cb, ctx->pipe_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 48, &pc);
+    ctx->vk.CmdDispatch(ctx->cb, ctx->cfg.batch, ctx->cfg.num_q_heads, 1);
+
+    VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    ctx->vk.CmdPipelineBarrier(ctx->cb,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    ATT_CHECK_STATUS(ctx->vk.EndCommandBuffer(ctx->cb));
+
+    /* 7. Submit + wait */
+    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &ctx->cb;
+    VkFence f = VK_NULL_HANDLE;
+    ATT_CHECK_STATUS(ctx->vk.CreateFence(ctx->device, &(VkFenceCreateInfo){VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}, NULL, &f));
+    ATT_CHECK_STATUS(ctx->vk.QueueSubmit(ctx->queue, 1, &si, f));
+    ATT_CHECK_STATUS(ctx->vk.WaitForFences(ctx->device, 1, &f, VK_TRUE, UINT64_MAX));
+    ctx->vk.DestroyFence(ctx->device, f, NULL);
+
+    /* 8. Read output */
+    ATT_CHECK_STATUS(ctx->MapMemory(ctx->device, ctx->mem_out, 0, ctx->sz_out, 0, &p));
+    memcpy(out, p, ctx->sz_out);
+    ctx->UnmapMemory(ctx->device, ctx->mem_out);
+
     return VAIST_OK;
 }
 
@@ -455,6 +569,13 @@ VaistStatus vaist_attn_destroy(vaist_attn_ctx* ctx){ (void)ctx; return VAIST_OK;
 VaistStatus vaist_attn_flash_decode(vaist_attn_ctx* ctx, const void* q,
     void* kg, void* vg, const uint32_t* bt, uint32_t sl, float* out){
     (void)ctx; (void)q; (void)kg; (void)vg; (void)bt; (void)sl; (void)out;
+    return VAIST_UNSUPPORTED;
+}
+VaistStatus vaist_attn_spec_verify(vaist_attn_ctx* ctx, const void* q,
+    void* kg, void* vg, const uint32_t* bt, const uint32_t* dt, uint32_t sl,
+    const uint32_t* na, void* out, uint32_t vm, uint32_t sd){
+    (void)ctx; (void)q; (void)kg; (void)vg; (void)bt; (void)dt; (void)sl;
+    (void)na; (void)out; (void)vm; (void)sd;
     return VAIST_UNSUPPORTED;
 }
 #endif

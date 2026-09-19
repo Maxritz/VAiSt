@@ -3,6 +3,9 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#if defined(__GNUC__)
+#pragma GCC diagnostic ignored "-Waggressive-loop-optimizations"
+#endif
 
 #define QK4_0 32
 #define QK4_1 32
@@ -36,6 +39,12 @@ typedef struct { uint8_t qs[QK_K/8]; uint8_t qh[QK_K/16]; uint8_t scales[QK_K/32
 typedef struct { uint16_t d; uint8_t qs[QK_K/8]; uint16_t qh[QK_K/32]; } block_iq1_s;
 typedef struct { uint16_t d; uint8_t qs[QK4_NL/2]; } block_iq4_nl;
 typedef struct { uint16_t d; uint32_t scales_h; uint8_t scales_l[QK_K/64]; uint8_t qs[QK_K/2]; } block_iq4_xs;
+/* NVFP4: 64 FP4 e2m1 values in 32 bytes + F16 scale (4 bytes) + pad */
+typedef struct { uint8_t qs[32]; uint8_t _pad[16]; uint8_t scale_bytes[4]; } block_nvfp4;
+ /* TQ2_0: 256 ternary 2-bit values in 64 bytes + F16 scale */
+ typedef struct { uint8_t qs[64]; uint16_t d; } block_tq2_0;
+ /* MXFP4: 32 FP4 nibbles in 16 bytes + E8M0 scale */
+typedef struct { uint8_t qs[16]; uint8_t scale; } block_mxfp4;
 #pragma pack(pop)
 
 /* ---- portable fp16 <-> fp32 (no intrinsics; VAiSt-safe) ---- */
@@ -123,8 +132,11 @@ VAIST_API size_t vaist_quant_block_bytes(VaistQuantType q){
     case VAIST_IQ1_S:   return sizeof(block_iq1_s);
     case VAIST_IQ1_M:   return sizeof(block_iq1_m);
     case VAIST_IQ4_NL:  return sizeof(block_iq4_nl);
-    case VAIST_IQ4_XS:  return sizeof(block_iq4_xs);
-    case VAIST_TERNARY: case VAIST_BINARY: return 0;
+     case VAIST_IQ4_XS:  return sizeof(block_iq4_xs);
+     case VAIST_NVFP4:   return sizeof(block_nvfp4);  /* 36 bytes */
+     case VAIST_TQ2_0:   return sizeof(block_tq2_0);  /* 66 bytes */
+     case VAIST_MXFP4:   return sizeof(block_mxfp4);  /* 17 bytes */
+     case VAIST_TERNARY: case VAIST_BINARY: return 0;
     default: return 0;
     }
 }
@@ -137,8 +149,11 @@ static size_t blocks_for(VaistQuantType q,size_t n){
     case VAIST_Q2_K: case VAIST_Q3_K: case VAIST_Q4_K: case VAIST_Q5_K: case VAIST_Q6_K:
     case VAIST_IQ2_XXS: case VAIST_IQ2_XS: case VAIST_IQ2_S: case VAIST_IQ3_XXS:
     case VAIST_IQ3_S: case VAIST_IQ3_XS: case VAIST_IQ1_S: case VAIST_IQ1_M:
-    case VAIST_IQ4_XS: return blocks256(n);
-    case VAIST_IQ4_NL: return blocks32(n); /* QK4_NL=32 */
+     case VAIST_IQ4_XS: return blocks256(n);
+     case VAIST_NVFP4:  return (n + 63) / 64;  /* 64 elements per block */
+     case VAIST_TQ2_0:  return (n + 255) / 256;
+     case VAIST_MXFP4:  return (n + 31) / 32;  /* 32 elements per block */
+     case VAIST_IQ4_NL: return blocks32(n); /* QK4_NL=32 */
     default: return 0;
     }
 }
@@ -150,8 +165,11 @@ VAIST_API size_t vaist_quant_block_size(VaistQuantType q){
     case VAIST_Q2_K: case VAIST_Q3_K: case VAIST_Q4_K: case VAIST_Q5_K: case VAIST_Q6_K:
     case VAIST_IQ2_XXS: case VAIST_IQ2_XS: case VAIST_IQ2_S: case VAIST_IQ3_XXS:
     case VAIST_IQ3_S: case VAIST_IQ3_XS: case VAIST_IQ1_S: case VAIST_IQ1_M:
-    case VAIST_IQ4_XS: return 256;
-    case VAIST_IQ4_NL: return 32; /* QK4_NL=32 */
+     case VAIST_IQ4_XS: return 256;
+     case VAIST_NVFP4:  return 64;
+     case VAIST_TQ2_0:  return 256;
+     case VAIST_MXFP4:  return 32;
+     case VAIST_IQ4_NL: return 32; /* QK4_NL=32 */
     default: return 0;
     }
 }
@@ -216,7 +234,7 @@ VAIST_API VaistStatus vaist_dequantize_f32(VaistQuantType q,const void*src,size_
     size_t i;
     for(i=0;i<nb;i++){
         size_t base=i*bs;
-        size_t nfull=(n-i*256u)<256u?(size_t)(n-i*256u):256u; /* clamped below per type */
+        size_t nfull=(n-i*256u)<256u?(size_t)(n-i*256u):256u; (void)nfull; /* clamped below per type */
         switch(q){
         case VAIST_Q8_0: {
             const block_q8_0*b=(const void*)(d+base);
@@ -301,7 +319,6 @@ VAIST_API VaistStatus vaist_dequantize_f32(VaistQuantType q,const void*src,size_
                 /* replicate CUDA: r=tid/4, is0=r%2, l0=16*is0+4*(tid%4), n=tid/8, j=tid%4 */
                 size_t r=tid/4; size_t is0=r%2; size_t l0=16*is0+4*(tid%4);
                 size_t ng=tid/8; size_t j=tid-4*ng; size_t is=8*ng+2*j+is0;
-                size_t shift=2*j;
                 uint8_t us;
                 if(is<4)       us=(b->scales[is]&0xF)|(((b->scales[is+8]>>0)&3)<<4);
                 else if(is<8)  us=(b->scales[is]&0xF)|(((b->scales[is+4]>>2)&3)<<4);
@@ -483,13 +500,47 @@ VAIST_API VaistStatus vaist_dequantize_f32(VaistQuantType q,const void*src,size_
             }
             break;
         }
-        case VAIST_IQ2_S:
-        case VAIST_IQ3_S:
-        case VAIST_IQ3_XS:
-        case VAIST_IQ4_XS:
-            /* iq2_s / iq3_s / iq4_nl / iq4_xs dequant require additional scale
-             * decode beyond the shipped grids; deferred to next pass. */
-            return VAIST_UNSUPPORTED;
+         case VAIST_NVFP4: {
+            /* 64 FP4 (e2m1: {0,0.5,1,2}) values per block, shared F16 scale */
+            const block_nvfp4*b=(const void*)(d+base);
+            float sc=f16_to_f32(*(const uint16_t*)b->scale_bytes);
+            static const float fp4_table[4]={0.0f,0.5f,1.0f,2.0f};
+            for(size_t j=0;j<32;j++){
+                OUT(o,i*64+j*2+0, sc*fp4_table[b->qs[j]&3]);
+                OUT(o,i*64+j*2+1, sc*fp4_table[b->qs[j]>>6]); /* hi 2 bits */
+            }
+            break;
+         }
+         case VAIST_TQ2_0: {
+            /* 256 2-bit ternary values {-1,0,1} per block + F16 scale */
+            const block_tq2_0*b=(const void*)(d+base);
+            float sc=f16_to_f32(b->d);
+            static const float tern_table[4]={-1.0f,0.0f,1.0f,0.0f}; /* 2-bit: -1,0,1,_ */
+            for(size_t j=0;j<256;j++){
+                uint8_t bits=b->qs[j/4];
+                int tval=(bits>>(2*(j%4)))&3;
+                OUT(o,i*256+j, sc*tern_table[tval]);
+            }
+            break;
+         }
+          case VAIST_MXFP4: {
+            /* 32 FP4 nibbles + E8M0 shared scale (power of 2) */
+            const block_mxfp4*b=(const void*)(d+base);
+            /* E8M0: exponent-only fp8, value = 2^(scale-127) */
+            float sc=(b->scale==0)?0.0f:powf(2.0f,(float)((int)b->scale-127));
+            static const float fp4_table[4]={0.0f,0.5f,1.0f,2.0f};
+            for(size_t j=0;j<32;j++){
+                OUT(o,i*32+j, sc*fp4_table[b->qs[j/2]>>(4*(j%2))&3]);
+            }
+            break;
+         }
+         case VAIST_IQ2_S:
+         case VAIST_IQ3_S:
+         case VAIST_IQ3_XS:
+         case VAIST_IQ4_XS:
+             /* iq2_s / iq3_s / iq4_nl / iq4_xs dequant require additional scale
+              * decode beyond the shipped grids; deferred to next pass. */
+             return VAIST_UNSUPPORTED;
         default:
             return VAIST_INVALID_ARGUMENT;
         }

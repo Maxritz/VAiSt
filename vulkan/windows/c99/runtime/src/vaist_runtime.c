@@ -3,6 +3,9 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdio.h>
+#if defined(__GNUC__)
+#pragma GCC diagnostic ignored "-Wunused-function"
+#endif
 #ifndef DBG_TRACE
 #define DBG_TRACE(...) do { fprintf(stderr, "[T] %s:%d %s: ", __FILE__, __LINE__, __func__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
 #endif

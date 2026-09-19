@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: vaist-optim
+Version: 0.1.0
+Summary: Vulkan shader/kernels optimizer for VAiSt — tile tuner, SPIR-V analyzer, roofline profiler
+Requires-Python: >=3.10
+Requires-Dist: numpy>=1.24
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"

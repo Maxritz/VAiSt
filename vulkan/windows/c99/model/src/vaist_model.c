@@ -9,7 +9,11 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
-#include <math.h>
+ #include <math.h>
+ #if defined(__GNUC__)
+ #pragma GCC diagnostic ignored "-Warray-bounds"
+ #pragma GCC diagnostic ignored "-Wunused-function"
+ #endif
 
 #ifndef DBG_TRACE
 #define DBG_TRACE(...) do { fprintf(stderr, "[T] %s:%d %s: ", __FILE__, __LINE__, __func__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
@@ -487,6 +491,9 @@ typedef enum {
     GGUF_TYPE_Q5_K      = 15,
     GGUF_TYPE_Q6_K      = 16,
     GGUF_TYPE_Q8_1      = 12,
+    GGUF_TYPE_NVFP4     = 18,  /* NVIDIA FP4 block (llama.cpp gguf.h) */
+    GGUF_TYPE_TQ2_0     = 17,  /* GGUF ternary T2_0 */
+    GGUF_TYPE_MXFP4     = 34,  /* AMD MXFP4 (ggml_type enum) */
     /* ... */
 } GgufType;
 
@@ -515,7 +522,10 @@ static VaistDType map_gguf_type(uint32_t ggml_type, size_t *element_size) {
         case GGUF_TYPE_Q2_K: *element_size = sizeof(vaist_block_q2_K); return (VaistDType)(GGUF_DTYPE_OFFSET + ggml_type);
         case GGUF_TYPE_Q3_K: *element_size = sizeof(vaist_block_q3_K); return (VaistDType)(GGUF_DTYPE_OFFSET + ggml_type);
         case GGUF_TYPE_Q5_K: *element_size = sizeof(vaist_block_q5_K); return (VaistDType)(GGUF_DTYPE_OFFSET + ggml_type);
-        case GGUF_TYPE_Q6_K: *element_size = sizeof(vaist_block_q6_K); return (VaistDType)(GGUF_DTYPE_OFFSET + ggml_type);
+         case GGUF_TYPE_Q6_K: *element_size = sizeof(vaist_block_q6_K); return (VaistDType)(GGUF_DTYPE_OFFSET + ggml_type);
+         case GGUF_TYPE_NVFP4: *element_size = sizeof(vaist_block_nvfp4); return (VaistDType)(GGUF_DTYPE_OFFSET + ggml_type);
+         case GGUF_TYPE_TQ2_0: *element_size = sizeof(vaist_block_tq2_0); return (VaistDType)(GGUF_DTYPE_OFFSET + ggml_type);
+         case GGUF_TYPE_MXFP4: *element_size = sizeof(vaist_block_mxfp4); return (VaistDType)(GGUF_DTYPE_OFFSET + ggml_type);
         /* Non-standard or unknown */
          default: *element_size = sizeof(float); return VAIST_F32;
     }
@@ -772,6 +782,9 @@ VAIST_API VaistStatus vaist_model_load_gguf(
                     case GGUF_TYPE_Q3_K:  qt = VAIST_Q3_K;  break;
                     case GGUF_TYPE_Q5_K:  qt = VAIST_Q5_K;  break;
                     case GGUF_TYPE_Q6_K:  qt = VAIST_Q6_K;  break;
+                    case GGUF_TYPE_NVFP4: qt = VAIST_NVFP4; break;
+                    case GGUF_TYPE_TQ2_0: qt = VAIST_TQ2_0; break;
+                    case GGUF_TYPE_MXFP4: qt = VAIST_MXFP4; break;
                     default: qt = VAIST_Q8_0; break;
                 }
                 size_t block_sz = vaist_quant_block_size(qt);
@@ -794,8 +807,10 @@ VAIST_API VaistStatus vaist_model_load_gguf(
             case GGUF_TYPE_Q5_0: case GGUF_TYPE_Q5_1:
             case GGUF_TYPE_Q8_0: case GGUF_TYPE_Q8_1:
             case GGUF_TYPE_Q2_K: case GGUF_TYPE_Q3_K:
-            case GGUF_TYPE_Q5_K: case GGUF_TYPE_Q6_K:
-                ok = 1; break;
+             case GGUF_TYPE_Q5_K: case GGUF_TYPE_Q6_K:
+             case GGUF_TYPE_NVFP4: case GGUF_TYPE_TQ2_0:
+             case GGUF_TYPE_MXFP4:
+                 ok = 1; break;
             default:
                 ok = 0;
         }

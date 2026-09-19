@@ -1,0 +1,171 @@
+// vaist_attn: speculative-decoding draft/verify attention kernel.
+//
+// Two-phase speculative decode (following SpecForge's pattern):
+//   1. Draft model generates B candidate tokens (batching across batch).
+//   2. Target model verifies: for each candidate, run flash-decode attention
+//      over the KV cache, then element-wise compare against draft logits.
+//      Accepted tokens are marked; rejected positions trigger a resample.
+//
+// This shader computes the *verify-attention* phase: given Q (from accepted
+// positions of the target), the full KV cache, and draft token IDs, produce
+// the attention output for comparison.
+//
+// Layout: workgroup = one (batch, head) pair. Threads compute QK^T scores
+// against the relevant KV window, softmax, then weighted V read.
+// Shared memory holds scores + softmax per position (seqlen <= max_seqlen).
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// --- Buffers ---
+layout(std430, set = 0, binding = 0) readonly buffer QB  { uint q[]; };            // fp16 queries packed as uint
+layout(std430, set = 0, binding = 1) readonly buffer KB  { uvec2 k_cache[]; };    // paged fp16 K cache
+layout(std430, set = 0, binding = 2) readonly buffer VB  { uvec2 v_cache[]; };    // paged fp16 V cache
+layout(std430, set = 0, binding = 3) readonly buffer BT  { uint block_table[]; };  // [batch * max_blocks] page indices
+layout(std430, set = 0, binding = 4) writeonly buffer OB { uint out_buf[]; };     // fp16 outputs packed as uint
+layout(std430, set = 0, binding = 5) readonly buffer DR  { uint draft_tokens[]; };  // [batch] draft token IDs
+layout(std430, set = 0, binding = 6) readonly buffer AT  { uint active_tokens[]; }; // [batch] verified token count per sequence
+
+// --- Push constants (8 x uint32 + 1 float = 36 bytes, padded to 40) ---
+layout(push_constant) uniform PC {
+    float scale;          // 1/sqrt(head_dim)
+    uint  head_dim;       // e.g. 64
+    uint  num_heads;      // KV heads
+    uint  num_q_heads;    // query heads
+    uint  seqlen;         // context tokens
+    uint  max_blocks;     // blocks per sequence
+    uint  block_size;     // tokens per page
+    uint  q_head_base;    // base query head for this dispatch
+    uint  verify_mask;    // bitmask of positions to verify
+    uint  spec_depth;     // draft decode depth
+};
+
+float f16_to_f32(uint hf) {
+    uint s = (hf >> 15) & 1u;
+    uint e = (hf >> 10) & 0x1Fu;
+    uint m = hf & 0x3FFu;
+    if (e == 0u) return (s != 0u ? -1.0 : 1.0) * pow(2.0, -14.0) * (float(m) / 1024.0);
+    if (e == 31u) return (m != 0u) ? uintBitsToFloat(0x7f800000u | (s << 31)) : uintBitsToFloat((s << 31) | 0x7f800000u);
+    return (s != 0u ? -1.0 : 1.0) * pow(2.0, float(e) - 15.0) * (1.0 + float(m) / 1024.0);
+}
+
+uint f32_to_f16(float f) {
+    uint bits = floatBitsToUint(f);
+    uint sign = (bits >> 31) & 1u;
+    uint exp  = (bits >> 23) & 0xFFu;
+    uint mant = bits & 0x7FFFFFu;
+    if (exp > 142) exp = 142;
+    if (exp < 112) exp = 112;
+    uint f16_exp = exp - 112;
+    uint f16_mant = mant >> 13;
+    return (sign << 15) | (f16_exp << 10) | f16_mant;
+}
+
+shared float smem_scores[2048];
+shared float smem_softmax[2048];
+
+void main() {
+    uint tid = gl_LocalInvocationIndex;
+    uint batch_idx = gl_WorkGroupID.x;
+    uint head_idx  = gl_WorkGroupID.y;
+
+    uint n_active = active_tokens[batch_idx];
+    if (n_active == 0u || head_idx >= num_q_heads) {
+        return;
+    }
+
+    uint kv_h = head_idx * num_heads / num_q_heads;
+    if (kv_h >= num_heads) kv_h = num_heads - 1;
+
+    uint head_off = (batch_idx * num_q_heads + head_idx) * (head_dim / 2u);
+    uint blk_stride = block_size * (head_dim / 4u);
+
+    // Phase 1: Compute QK^T attention scores.
+    // Only positions where verify_mask bit is set are computed (SpecForge skip pattern).
+    if (tid < seqlen) {
+        if ((verify_mask & (1u << (tid % 32u))) != 0u) {
+            uint blk_idx = block_table[batch_idx * max_blocks + (tid / block_size)];
+            uint tok_in_blk = tid % block_size;
+            uint blk_off = blk_idx * blk_stride + tok_in_blk * (head_dim / 4u);
+
+            float qk = 0.0;
+            for (uint d = 0u; d < head_dim; d += 4u) {
+                uvec2 kv = k_cache[blk_off + d / 4u];
+                float kf0 = f16_to_f32((kv.x >> 16) & 0xFFFFu);
+                float kf1 = f16_to_f32(kv.x & 0xFFFFu);
+                float kf2 = f16_to_f32((kv.y >> 16) & 0xFFFFu);
+                float kf3 = f16_to_f32(kv.y & 0xFFFFu);
+                uint qoff = head_off + d / 2u;
+                float qf0 = f16_to_f32((q[qoff] >> 16) & 0xFFFFu);
+                float qf1 = f16_to_f32(q[qoff] & 0xFFFFu);
+                float qf2 = f16_to_f32((q[qoff + 1u] >> 16) & 0xFFFFu);
+                float qf3 = f16_to_f32(q[qoff + 1u] & 0xFFFFu);
+                qk += qf0*kf0 + qf1*kf1 + qf2*kf2 + qf3*kf3;
+            }
+            smem_scores[tid] = qk * scale;
+        } else {
+            smem_scores[tid] = -1e30;
+        }
+    }
+    barrier();
+
+    // Phase 2: Max reduction — parallel scan within subgroup, then serialize.
+    // Following ThunderKittens' warpgroup reduce pattern (manual reduction).
+    if (tid < seqlen) {
+        float mx = smem_scores[tid];
+        // Intra-warp reduction (manual, no GL_EXT_shader_subgroup assumed)
+        if (tid < 32u) {
+            for (uint i = 1u; i < 32u; i++) {
+                uint peer = tid + i;
+                if (peer < seqlen) {
+                    mx = max(mx, smem_scores[peer]);
+                }
+            }
+            // Broadcast tid=0's result to all via shared memory
+            if (tid == 0u) {
+                smem_scores[0] = mx;
+                smem_softmax[0] = mx;
+            }
+        }
+    }
+    barrier();
+    float mx = smem_softmax[0];
+
+    // Phase 3: Softmax (exp + sum)
+    if (tid < seqlen) {
+        smem_softmax[tid] = exp(smem_scores[tid] - mx);
+    }
+    barrier();
+    if (tid == 0u) {
+        float sum = 0.0;
+        for (uint i = 0u; i < seqlen; i++) sum += smem_softmax[i];
+        smem_scores[seqlen] = (sum > 0.0) ? (1.0 / sum) : 0.0;
+    }
+    barrier();
+    float inv_sum = smem_scores[seqlen];
+
+    // Phase 4: Weighted sum over V for output elements.
+    // Each thread computes head_dim/2 output uints (each uint = 2 fp16).
+    if (tid < head_dim / 2u) {
+        float acc0 = 0.0;
+        float acc1 = 0.0;
+        for (uint t = 0u; t < seqlen; t++) {
+            uint blk_idx = block_table[batch_idx * max_blocks + (t / block_size)];
+            uint tok_in_blk = t % block_size;
+            uint blk_off = blk_idx * blk_stride + tok_in_blk * (head_dim / 4u);
+            uint d4 = tid / 2u;
+            uvec2 ve = v_cache[blk_off + d4];
+            float vf0, vf1;
+            if (tid % 2u == 0u) {
+                vf0 = f16_to_f32((ve.x >> 16) & 0xFFFFu);
+                vf1 = f16_to_f32(ve.x & 0xFFFFu);
+            } else {
+                vf0 = f16_to_f32((ve.y >> 16) & 0xFFFFu);
+                vf1 = f16_to_f32(ve.y & 0xFFFFu);
+            }
+            acc0 += smem_softmax[t] * inv_sum * vf0;
+            acc1 += smem_softmax[t] * inv_sum * vf1;
+        }
+        out_buf[head_off + tid] = (f32_to_f16(acc0) << 16) | (f32_to_f16(acc1) & 0xFFFFu);
+    }
+}

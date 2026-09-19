@@ -13,6 +13,8 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
+#include <string>
 #include <string>
 #include <string_view>
 #include <unordered_map>

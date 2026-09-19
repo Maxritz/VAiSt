@@ -16,9 +16,12 @@
 #include <mutex>
 #include <random>
 #include <sstream>
-#include <system_error>
-
-#pragma comment(lib, "ws2_32.lib")
+ #include <system_error>
+ #if defined(__GNUC__)
+ #pragma GCC diagnostic ignored "-Wunknown-pragmas"
+ #endif
+ 
+ #pragma comment(lib, "ws2_32.lib")
 
 namespace vaist {
 

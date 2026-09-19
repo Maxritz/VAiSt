@@ -1,6 +1,9 @@
-#include "vaist_core.h"
-#include <stdio.h>
-#include <string.h>
+ #include "vaist_core.h"
+ #include <stdio.h>
+ #include <string.h>
+ #if defined(__GNUC__)
+ #pragma GCC diagnostic ignored "-Wattributes"
+ #endif
 #if defined(_WIN32)
 #define VAIST_THREAD_LOCAL __declspec(thread)
 #else

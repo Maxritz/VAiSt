@@ -36,8 +36,11 @@ typedef enum VaistQuantType {
     VAIST_IQ1_M=19,
     VAIST_IQ4_NL=20,  /* QK4_NL=32, q4_0-style nonlinearity-aware */
     VAIST_IQ4_XS=21,
-    VAIST_Q8_1=22,    /* q8_1: 8-bit with delta+sum (activation layout in FreeToken mmq) */
-    VAIST_Q_COUNT=23,
+     VAIST_Q8_1=22,    /* q8_1: 8-bit with delta+sum (activation layout in FreeToken mmq) */
+     VAIST_NVFP4=23,   /* NVIDIA FP4 block: 36 B/block of 64 (E2M1 ×32 + E4M3 scale ×1) */
+     VAIST_TQ2_0=24,   /* GGUF Ternary T2_0: 66 B/block of 256 (2-bit packed + FP16 scale) */
+     VAIST_MXFP4=25,   /* AMD MXFP4: 17 B/block of 32 (4-bit + E8M0 scale) */
+     VAIST_Q_COUNT=26,
 } VaistQuantType;
 
 #define VAIST_QK4_0 32
@@ -66,7 +69,13 @@ typedef struct { uint16_t d; uint8_t qs[VAIST_QK_K/4]; uint8_t qh[VAIST_QK_K/32]
 typedef struct { uint8_t qs[VAIST_QK_K/8]; uint8_t qh[VAIST_QK_K/16]; uint8_t scales[VAIST_QK_K/32]; } vaist_block_iq1_m;
 typedef struct { uint16_t d; uint8_t qs[VAIST_QK_K/8]; uint16_t qh[VAIST_QK_K/32]; } vaist_block_iq1_s;
 typedef struct { uint16_t d; uint8_t qs[VAIST_QK4_0/2]; } vaist_block_iq4_nl;
-typedef struct { uint16_t d; uint32_t scales_h; uint8_t scales_l[VAIST_QK_K/64]; uint8_t qs[VAIST_QK_K/2]; } vaist_block_iq4_xs;
+typedef struct { uint16_t d; uint32_t qs; uint8_t scales_l[VAIST_QK_K/64]; uint8_t qs_extra[VAIST_QK_K/8 - 5]; } vaist_block_iq4_xs;
+/* NVIDIA NVFP4: 64 elements in 36 bytes — 32 FP4 nibbles (16 bytes) + 1 E4M3 scale (4 bytes) + padding */
+typedef struct { uint8_t qs[32]; uint8_t _pad[16]; uint8_t scale_bytes[4]; } vaist_block_nvfp4;
+/* GGUF TQ2_0: 256 elements in 66 bytes — 64 bytes 2-bit packed (256×2bits) + F16 scale */
+typedef struct { uint8_t qs[64]; uint16_t d; } vaist_block_tq2_0;
+/* AMD MXFP4: 32 elements in 17 bytes — 16 FP4 nibbles + 1 E8M0 scale byte */
+typedef struct { uint8_t qs[16]; uint8_t scale; } vaist_block_mxfp4;
 #pragma pack(pop)
 
 VAIST_API VaistStatus vaist_quantize_f32(VaistQuantType q,const float*src,size_t n,void*dst,size_t cap,size_t*used);

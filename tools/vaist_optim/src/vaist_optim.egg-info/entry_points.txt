@@ -1,0 +1,2 @@
+[console_scripts]
+vaist-optim = vaist_optim.cli:main

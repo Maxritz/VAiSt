@@ -45,6 +45,35 @@ VAIST_API VaistStatus vaist_attn_flash_decode(vaist_attn_ctx* ctx,
     uint32_t seqlen,
     float* out);
 
+/**
+ * \brief Speculative-decoding verify attention.
+ *
+ * SpecForge pattern: draft model proposes B candidate tokens, then target
+ * model verifies via attention. This shader computes the verify-phase
+ * attention output for accepted positions only.
+ *
+ * q:              [batch * num_q_heads * head_dim] fp16 queries
+ * k_cache/v_cache: paged fp16 KV cache (device buffers)
+ * block_tables:    page indices into KV cache
+ * draft_tokens:    [batch] draft model token IDs (for position masking)
+ * seqlen:          context length
+ * n_active:        [batch] verified token count per sequence
+ * out:             [batch * num_q_heads * head_dim] fp16 outputs
+ * verify_mask:     bitmask of positions to compute (0=skip, 1=verify)
+ * spec_depth:      draft decode depth
+ */
+VAIST_API VaistStatus vaist_attn_spec_verify(vaist_attn_ctx* ctx,
+    const void* q,
+    void* k_cache_gpu_buf,
+    void* v_cache_gpu_buf,
+    const uint32_t* block_tables,
+    const uint32_t* draft_tokens,
+    uint32_t seqlen,
+    const uint32_t* n_active,
+    void* out,
+    uint32_t verify_mask,
+    uint32_t spec_depth);
+
 #ifdef __cplusplus
 }
 #endif

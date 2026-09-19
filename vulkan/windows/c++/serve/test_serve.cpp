@@ -22,6 +22,9 @@
 #include <vector>
 #include <thread>
 #include <chrono>
+#if defined(__GNUC__)
+#pragma GCC diagnostic ignored "-Wunknown-pragmas"
+#endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
