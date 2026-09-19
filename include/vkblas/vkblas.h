@@ -822,10 +822,43 @@ VkResult vkblas_qgemm_nvfp4_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
                                 const float* beta, VkBuffer y, int32_t ldy);
 
 VkResult vkblas_qgemm_t2_0_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
-                                int32_t m, int32_t n, int32_t k,
-                                const float* alpha, VkBuffer Wq, int32_t ldw,
-                                VkBuffer x, int32_t ldx,
-                                const float* beta, VkBuffer y, int32_t ldy);
+                                 int32_t m, int32_t n, int32_t k,
+                                 const float* alpha, VkBuffer Wq, int32_t ldw,
+                                 VkBuffer x, int32_t ldx,
+                                 const float* beta, VkBuffer y, int32_t ldy);
+
+/**
+ * \brief Speculative-decoding verification attention kernel.
+ *
+ * Runs the verify-phase attention for draft/verify decoding (SpecForge pattern):
+ * for each candidate token, computes flash-decode attention over the KV cache
+ * and produces attention-weighted outputs for elementwise comparison against
+ * draft logits. The elementwise acceptance test runs as a separate kernel.
+ *
+ * \param ctx           Valid VkBLASContext.
+ * \param cmd           Command buffer (uses internal buffer in simplified impl).
+ * \param batch         Batch size.
+ * \param num_heads     Number of query heads.
+ * \param head_dim      Head dimension.
+ * \param seqlen        Context sequence length.
+ * \param q_gpu         [batch * num_heads * head_dim] fp16 queries (device buffer).
+ * \param k_cache       Paged fp16 K-cache (device buffer).
+ * \param v_cache       Paged fp16 V-cache (device buffer).
+ * \param block_table   [batch * max_blocks] page indices.
+ * \param draft_tokens  [batch] draft token IDs.
+ * \param active_tokens [batch] verified token count per sequence.
+ * \param out           [batch * num_heads * head_dim] fp16 outputs.
+ * \param verify_mask   Bitmask of positions to compute (0=skip, 1=verify).
+ * \param spec_depth    Draft decode depth (how many candidates).
+ * \param scale         Attention scale (1/sqrt(head_dim)).
+ */
+VkResult vkblas_gemm_spec_verify_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+    int32_t batch, int32_t num_heads, int32_t head_dim,
+    int32_t seqlen,
+    VkBuffer q_gpu, VkBuffer k_cache, VkBuffer v_cache,
+    VkBuffer block_table, VkBuffer draft_tokens,
+    VkBuffer active_tokens, VkBuffer out,
+    uint32_t verify_mask, uint32_t spec_depth, float scale);
 
 /**
  * \brief Fused quantized-GEMM weight formats (argument to
