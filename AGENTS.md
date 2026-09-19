@@ -60,6 +60,21 @@ VKRuntime  (memory, device, pipeline, descriptor management)
 - Build with CMake; run `test_vkblas`, `test_vkfft`, `test_vkrand` test harnesses
 - All tests must pass before changes merge to main
 
+### Tools
+
+| Tool | Location | Purpose |
+|------|----------|---------|
+| `vaist-optim` | `tools/vaist_optim/` | SPIR-V analysis, GEMM/attention tile tuning, roofline profiling, shader cache (LRU, disk-backed) |
+
+CLI usage:
+```bash
+vaist-optim analyze shader.spv          # analyze a SPIR-V binary
+vaist-optim tune-gemm shader.spv --m 1024 --n 4096 --k 8192
+vaist-optim tune-attn shader.spv --seq 2048 --heads 32 --dim 128
+vaist-optim roofline --ms 0.5 --flops 2.6e9 --bytes-rd 1.0e7 --bytes-wr 2.0e6
+vaist-optim cache-stats --cache-dir ./shader_cache  # inspect LRU cache
+```
+
 ### Coverage Audit (validated by harness `ctest -C Release`)
 
 Last gate run status (authoritative, from `ctest -C Release` summary):
