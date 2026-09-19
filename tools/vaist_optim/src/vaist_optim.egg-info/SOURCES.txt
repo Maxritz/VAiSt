@@ -1,5 +1,6 @@
 pyproject.toml
 src/vaist_optim/__init__.py
+src/vaist_optim/cache.py
 src/vaist_optim/cli.py
 src/vaist_optim/config.py
 src/vaist_optim/profiler.py

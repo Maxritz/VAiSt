@@ -3,15 +3,17 @@
 
 Usage:
   vaist-optim analyze <shader.spv>
-  vaist-optim tune-gemm <shader.spv> --m 1024 --n 4096 --k 8192
+  vaist-optim tune-gemm <shader.spv> --m 1024 --n 4096 --k 8192 [--cache-dir ./shader_cache]
   vaist-optim tune-attn <shader.spv> --seq 2048 --heads 32 --dim 128
   vaist-optim roofline --ms 0.5 --flops 2.6e9 --bytes-rd 1.0e7 --bytes-wr 2.0e6
+  vaist-optim cache-stats [--cache-dir ./shader_cache]
 """
 from __future__ import annotations
 
 import argparse
 import sys
 
+from .cache import ShaderCache
 from .config import DeviceCaps
 from .profiler import RooflineProfiler
 from .spirv import analyze_shader
@@ -35,7 +37,7 @@ def cmd_analyze(spirv_path: str) -> int:
     return 0
 
 
-def cmd_tune_gemm(spirv_path: str, m: int, n: int, k: int) -> int:
+def cmd_tune_gemm(spirv_path: str, m: int, n: int, k: int, cache_dir: str | None = None) -> int:
     caps = DeviceCaps(65536, (1024, 1024, 64), (1024, 1024, 64), 1024, 32, "gfx1201")
     result = tune_gemm_tile(spirv_path, caps, m, n, k)
     print(f"=== GEMM Tile Tuning ({m}x{n}x{k}) ===")
@@ -43,6 +45,9 @@ def cmd_tune_gemm(spirv_path: str, m: int, n: int, k: int) -> int:
     print(f"  Estimated ms:     {result.estimated_ms:.3f}")
     print(f"  Bound:            {result.bound_type}")
     print(f"  Notes:            {result.notes}")
+    if cache_dir:
+        cache = ShaderCache(cache_dir)
+        print(f"  Cache stats:      {cache.stats()}")
     return 0
 
 
@@ -85,7 +90,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--m", type=int, required=True)
     p.add_argument("--n", type=int, required=True)
     p.add_argument("--k", type=int, required=True)
-    p.set_defaults(func=lambda a: cmd_tune_gemm(a.shader, a.m, a.n, a.k))
+    p.add_argument("--cache-dir", default=None)
+    p.set_defaults(func=lambda a: cmd_tune_gemm(a.shader, a.m, a.n, a.k, a.cache_dir))
 
     p = sub.add_parser("tune-attn")
     p.add_argument("shader")
@@ -101,8 +107,22 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--bytes-wr", type=float, required=True)
     p.set_defaults(func=lambda a: cmd_roofline(a.ms, a.flops, a.bytes_rd, a.bytes_wr))
 
+    p = sub.add_parser("cache-stats")
+    p.add_argument("--cache-dir", default="./shader_cache")
+    p.set_defaults(func=lambda a: cmd_cache_stats(a.cache_dir))
+
     args = parser.parse_args(argv)
     return args.func(args)
+
+
+def cmd_cache_stats(cache_dir: str) -> int:
+     cache = ShaderCache(cache_dir)
+     stats = cache.stats()
+     print(f"=== Shader Cache Stats ===")
+     print(f"  Entries:     {stats['entries']}/{stats['max_entries']}")
+     print(f"  Bytes:       {stats['total_bytes']}/{stats['max_bytes']} ({stats['utilization']:.1%})")
+     print(f"  Dir:         {cache_dir}")
+     return 0
 
 
 if __name__ == "__main__":
