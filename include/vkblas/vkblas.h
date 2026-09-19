@@ -815,6 +815,18 @@ VkResult vkblas_qgemm_iq4xs_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
                                 VkBuffer x, int32_t ldx,
                                 const float* beta, VkBuffer y, int32_t ldy);
 
+VkResult vkblas_qgemm_nvfp4_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                                int32_t m, int32_t n, int32_t k,
+                                const float* alpha, VkBuffer Wq, int32_t ldw,
+                                VkBuffer x, int32_t ldx,
+                                const float* beta, VkBuffer y, int32_t ldy);
+
+VkResult vkblas_qgemm_t2_0_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                                int32_t m, int32_t n, int32_t k,
+                                const float* alpha, VkBuffer Wq, int32_t ldw,
+                                VkBuffer x, int32_t ldx,
+                                const float* beta, VkBuffer y, int32_t ldy);
+
 /**
  * \brief Fused quantized-GEMM weight formats (argument to
  *        vkblas_qgemm_get_tier).
@@ -829,7 +841,9 @@ typedef enum VkBLASQGemmFormat_t {
     VKBLAS_QGEMM_Q5K   = 8,  /**< Q5_K weights (ggml, 176 B/block of 256) */
     VKBLAS_QGEMM_Q6K   = 9,  /**< Q6_K weights (ggml, 210 B/block of 256) */
     VKBLAS_QGEMM_Q3K   = 10, /**< Q3_K weights (ggml, 110 B/block of 256) */
-    VKBLAS_QGEMM_IQ4XS = 11, /**< IQ4_XS weights (ggml, 136 B/block of 256) */
+     VKBLAS_QGEMM_IQ4XS = 11, /**< IQ4_XS weights (ggml, 136 B/block of 256) */
+     VKBLAS_QGEMM_NVFP4 = 12, /**< NVIDIA FP4 block (36 B/block of 64) */
+     VKBLAS_QGEMM_T2_0  = 13, /**< Ternary 2-bit (66 B/block of 256) */
 } VkBLASQGemmFormat_t;
 
 /**

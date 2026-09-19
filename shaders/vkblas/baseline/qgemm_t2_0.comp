@@ -1,0 +1,136 @@
+#version 450
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+
+// Ternary GEMM (TQ2_0 format): y = alpha * (dequant_tq2_0(W) * x) + beta * y
+//
+// TQ2_0 block layout (66 bytes, 256 elements):
+//   - 64 bytes: 256 × 2-bit ternary values packed 4-per-byte (MSB-first)
+//     Values: 0b00=0, 0b01=+1, 0b10=-1, 0b11=+1 (sign bit + magnitude)
+//   - 2 bytes:  FP16 scale (same scale applies to all 256 elements in block)
+//
+// W is M rows x K cols, packed as K/256 blocks per row.
+// K must be a multiple of 256.
+
+layout(constant_id = 0) const uint TILE_M = 16;
+layout(constant_id = 1) const uint TILE_N = 16;
+layout(constant_id = 2) const uint TILE_K = 256;
+
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    float alpha;
+    float beta;
+    uint  lda;       // bytes per weight row = (k/256) * 66
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  _pad2;
+    uint  _pad3;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufW { uint8_t data_W[]; };
+layout(set = 0, binding = 1) restrict readonly buffer BufX { float data_X[]; };
+layout(set = 0, binding = 2) restrict readonly buffer BufY { float data_Y[]; };
+layout(set = 0, binding = 3) writeonly  buffer BufZ { float data_Z[]; };
+
+shared float As[TILE_M * TILE_K];
+shared float Bs[TILE_K * TILE_N];
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    uint row = gl_LocalInvocationID.x;
+    uint col = gl_LocalInvocationID.y;
+
+    uint grRow = gl_WorkGroupID.x;
+    uint grCol = gl_WorkGroupID.y;
+
+    uint globalRow = grRow * TILE_M + row;
+    uint globalCol = grCol * TILE_N + col;
+
+    float acc = 0.0;
+    uint numTiles = (pc.k + TILE_K - 1u) / TILE_K;
+
+    for (uint t = 0u; t < numTiles; ++t) {
+        uint kk_base = t * TILE_K;
+
+        // Load W tile, dequantizing TQ2_0
+        if (col < 16u) {
+            uint aRow = globalRow;
+            uint tid  = col * 16u + row;  // 0..255
+
+            float val = 0.0;
+            if (aRow < pc.m && tid < TILE_K) {
+                uint block_idx = tid / 256u;
+                uint lane      = tid & 255u;
+                uint block_off = aRow * pc.lda + block_idx * 66u;
+
+                // Load FP16 scale (last 2 bytes of the 66-byte block)
+                uint s_bits = uint(data_W[block_off + 64u])
+                            | (uint(data_W[block_off + 65u]) << 8u);
+                // fp16 → fp32 (simplified, no inf/nan handling needed for scales)
+                uint sign = (s_bits >> 15) & 1u;
+                uint exp  = (s_bits >> 10) & 0x1Fu;
+                uint man  = s_bits & 0x3FFu;
+                float scale;
+                if (exp == 0u) {
+                    scale = ldexp(float(man) / 1024.0, -14);
+                } else {
+                    scale = ldexp((1.0 + float(man) / 1024.0), int(exp) - 15);
+                }
+                if (sign == 1u) scale = -scale;
+
+                // Decode 2-bit ternary from packed byte
+                uint byte_idx  = block_off + (lane >> 2);   // lane / 4
+                uint bitpos    = (lane & 3u) * 2u;           // (lane % 4) * 2
+                uint packed    = uint(data_W[byte_idx]);
+                uint code      = (packed >> bitpos) & 0x3u;
+
+                // TQ2_0: 0b00=0, 0b01=+scale, 0b10=-scale, 0b11=+scale
+                float qval;
+                if      (code == 0u) qval = 0.0;
+                else if (code == 1u) qval =  scale;
+                else if (code == 2u) qval = -scale;
+                else                 qval =  scale;
+
+                As[tid] = qval;
+            }
+        }
+
+        // Load X tile
+        for (uint b_row = row; b_row < TILE_K; b_row += 16u) {
+            uint bRow = kk_base + b_row;
+            bool in_bounds = (bRow < pc.k) && (globalCol < pc.n);
+            Bs[b_row * TILE_N + col] = in_bounds ? data_X[bRow + globalCol * pc.ldb] : 0.0;
+        }
+
+        barrier();
+
+        for (uint kk = 0u; kk < TILE_K; ++kk) {
+            acc += As[row * TILE_K + kk] * Bs[kk * TILE_N + col];
+        }
+        barrier();
+    }
+
+    if (globalRow >= pc.m || globalCol >= pc.n) { return; }
+
+    float result = pc.alpha * acc;
+
+    if (pc.beta_is_zero == 0) {
+        result += pc.beta * data_Y[globalRow + globalCol * pc.ldc];
+    }
+
+    data_Z[globalRow + globalCol * pc.ldd] = result;
+}

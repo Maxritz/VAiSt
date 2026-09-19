@@ -17,11 +17,13 @@ Child of root `AGENTS.md`. Governs the public API surface under `include/vkblas/
 - `VkBLASOperation_t` mirrors `hipblasOperation_t` (NONE=0, T=1, C=2)
 - Fused quantized GEMM: `vkblas_qgemm_q8_0_f32`, `vkblas_qgemm_q4k_f32`,
   `vkblas_qgemm_q4_0_f32`, `vkblas_qgemm_q5k_f32`, `vkblas_qgemm_q6k_f32`,
-  `vkblas_qgemm_q3k_f32`, `vkblas_qgemm_iq4xs_f32`
+  `vkblas_qgemm_q3k_f32`, `vkblas_qgemm_iq4xs_f32`, `vkblas_qgemm_nvfp4_f32`,
+  `vkblas_qgemm_t2_0_f32`
   (`y = alpha*(dequant(W)*x) + beta*y`, in place), plus an fp16-output-storage
   twin of each: `vkblas_qgemm_q8_0_f16`, `vkblas_qgemm_q4k_f16`,
   `vkblas_qgemm_q4_0_f16`, `vkblas_qgemm_q5k_f16`, `vkblas_qgemm_q6k_f16`,
-  `vkblas_qgemm_q3k_f16`, `vkblas_qgemm_iq4xs_f16`
+   `vkblas_qgemm_q3k_f16`, `vkblas_qgemm_iq4xs_f16`, `vkblas_qgemm_nvfp4_f16`,
+   `vkblas_qgemm_t2_0_f16`
   (same math, f32 accumulate, y/z stored as `float16_t`). The weight layout
   contract (Q8_0: 36 B/block of 32 elems; Q4_0: 20 B/block of 32 elems; Q4_K:
   ggml 144 B/block of 256 elems; Q5_K/Q6_K/Q3_K/IQ4_XS: ggml 176/210/110/136

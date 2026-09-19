@@ -1,0 +1,159 @@
+#version 450
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+
+// NVFP4 block-quantized GEMM: y = alpha * (dequant_nvfp4(W) * x) + beta * y
+//
+// W layout: M rows x K cols, stored as K/64 super-blocks per row.
+// Each super-block = 64 elements in 36 bytes:
+//   - 32 FP4 values (16 nibbles) — E2M1 format, kvalues convention
+//   - 4-byte E4M3 scale (applies to the 64 elements)
+// Total: 36 bytes / 64 elements = 0.5625 bytes/element
+//
+// K must be a multiple of 64.
+//
+// x: f32 activation, K x N, column-major (element [k + c*pc.ldb])
+// y: f32 output, M x N, column-major (element [r + c*pc.ldd])
+
+layout(constant_id = 0) const uint TILE_M = 16;
+layout(constant_id = 1) const uint TILE_N = 16;
+layout(constant_id = 2) const uint TILE_K = 64;
+
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    float alpha;
+    float beta;
+    uint  lda;       // bytes per weight row (must be k*36/64 = k/64 * 36)
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  _pad2;
+    uint  _pad3;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufW { uint8_t data_W[]; };
+layout(set = 0, binding = 1) restrict readonly buffer BufX { float data_X[]; };
+layout(set = 0, binding = 2) restrict readonly buffer BufY { float data_Y[]; };
+layout(set = 0, binding = 3) writeonly  buffer BufZ { float data_Z[]; };
+
+shared float As[TILE_M * TILE_K];
+shared float Bs[TILE_K * TILE_N];
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// NVFP4 kvalues table: E2M1 doubled convention
+const int KVALUES[16] = int[](
+    0, 1, 2, 3, 4, 6, 8, 12,
+    0, -1, -2, -3, -4, -6, -8, -12
+);
+
+// Decode one E4M3 byte to float (with 0.5 factor per NVFP4 convention)
+float e4m3_to_fp32(uint bits) {
+    uint sign = (bits >> 7) & 1u;
+    uint exp  = (bits >> 3) & 0x1Fu;
+    uint man  = bits & 0x7u;
+
+    float val;
+    if (exp == 0u) {
+        val = float(man) * (1.0 / 1024.0);  // 2^-9 * man
+    } else {
+        val = (1.0 + float(man) / 8.0) * exp2(float(exp) - 7.0);
+    }
+    if (bits == 0u || bits == 0x7Fu) val = 0.0;
+    val *= 0.5;
+    return sign == 1u ? -val : val;
+}
+
+// Dequantize 32 FP4 nibbles + 1 E4M3 scale => 64 fp32 values
+void dequant_block(uint byte_base, out float block[64]) {
+    // Read 4-byte scale (E4M3)
+    uint scale_bits = uint(data_W[byte_base])
+                    | (uint(data_W[byte_base + 1u]) << 8u)
+                    | (uint(data_W[byte_base + 2u]) << 16u)
+                    | (uint(data_W[byte_base + 3u]) << 24u);
+    float scale = e4m3_to_fp32(scale_bits);
+
+    // Read 16 bytes of packed FP4 nibbles (32 values)
+    for (uint i = 0u; i < 32u; ++i) {
+        uint byte_idx = byte_base + 4u + (i / 2u);
+        uint byte_val = uint(data_W[byte_idx]);
+        uint nibble = (i & 1u) == 0u ? (byte_val & 0xFu) : ((byte_val >> 4u) & 0xFu);
+        int qi = KVALUES[int(nibble)];
+        block[i]      = scale * float(qi);
+        block[i + 32u] = scale * float(qi);  // same scale applies to all 64 elements
+    }
+}
+
+void main() {
+    uint row = gl_LocalInvocationID.x;
+    uint col = gl_LocalInvocationID.y;
+
+    uint grRow = gl_WorkGroupID.x;
+    uint grCol = gl_WorkGroupID.y;
+
+    uint globalRow = grRow * TILE_M + row;
+    uint globalCol = grCol * TILE_N + col;
+
+    float acc = 0.0;
+    uint numTiles = (pc.k + TILE_K - 1u) / TILE_K;
+
+    for (uint t = 0u; t < numTiles; ++t) {
+        uint kk_base = t * TILE_K;
+
+        // Load W tile (TILE_M rows x TILE_K cols), dequantizing NVFP4
+        for (uint a_col = col; a_col < TILE_K; a_col += 16u) {
+            uint aRow = globalRow;
+            uint kk = kk_base + a_col;
+            uint super = kk / 64u;         // super-block index in row
+            uint lane  = kk & 63u;         // element within super-block
+
+            float val = 0.0;
+            if (aRow < pc.m && kk < pc.k) {
+                uint sb_bytes = super * 36u;
+                uint row_base = aRow * pc.lda;
+
+                // Dequant the full 64-element super-block into shared reg
+                float block[64];
+                dequant_block(row_base + sb_bytes, block);
+                val = block[lane];
+            }
+            As[row * TILE_K + a_col] = val;
+        }
+
+        // Load X tile (TILE_K x TILE_N)
+        for (uint b_row = row; b_row < TILE_K; b_row += 16u) {
+            uint bRow = kk_base + b_row;
+            bool in_bounds = (bRow < pc.k) && (globalCol < pc.n);
+            Bs[b_row * TILE_N + col] = in_bounds ? data_X[bRow + globalCol * pc.ldb] : 0.0;
+        }
+
+        barrier();
+
+        for (uint kk = 0u; kk < TILE_K; ++kk) {
+            acc += As[row * TILE_K + kk] * Bs[kk * TILE_N + col];
+        }
+        barrier();
+    }
+
+    if (globalRow >= pc.m || globalCol >= pc.n) { return; }
+
+    float result = pc.alpha * acc;
+
+    if (pc.beta_is_zero == 0) {
+        result += pc.beta * data_Y[globalRow + globalCol * pc.ldc];
+    }
+
+    data_Z[globalRow + globalCol * pc.ldd] = result;
+}

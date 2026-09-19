@@ -34,7 +34,7 @@
 #define VKBLAS_DTYPE_QGEMM_F16_IQ4XS  38
 
 #define VKBLAS_IS_QGEMM_KERNEL(k) \
-    ((k) >= VKBLAS_DTYPE_QGEMM_Q8_0 && (k) <= VKBLAS_DTYPE_QGEMM_IQ4XS)
+         ((k) >= VKBLAS_DTYPE_QGEMM_Q8_0 && (k) <= VKBLAS_DTYPE_QGEMM_T2_0)
 #define VKBLAS_IS_QGEMM_F16_KERNEL(k) \
     ((k) >= VKBLAS_DTYPE_QGEMM_F16_Q8_0 && (k) <= VKBLAS_DTYPE_QGEMM_F16_IQ4XS)
 
@@ -284,9 +284,15 @@ static const uint32_t* vkblas_select_spirv(VkBLASContext* ctx,
         case VKBLAS_DTYPE_QGEMM_Q3K:
             *out_size = vkblas_spv_baseline_qgemm_q3k_size;
             return vkblas_spv_baseline_qgemm_q3k;
-        case VKBLAS_DTYPE_QGEMM_IQ4XS:
+         case VKBLAS_DTYPE_QGEMM_IQ4XS:
             *out_size = vkblas_spv_baseline_qgemm_iq4xs_size;
             return vkblas_spv_baseline_qgemm_iq4xs;
+        case VKBLAS_DTYPE_QGEMM_NVFP4:
+            *out_size = vkblas_spv_baseline_qgemm_nvfp4_size;
+            return vkblas_spv_baseline_qgemm_nvfp4;
+        case VKBLAS_DTYPE_QGEMM_T2_0:
+            *out_size = vkblas_spv_baseline_qgemm_t2_0_size;
+            return vkblas_spv_baseline_qgemm_t2_0;
         /* ── Extended L2/L3 BLAS ops (baseline tier only; subgroup/coopmatrix
            fall back to baseline because no specialist variants exist yet). */
         case VKBLAS_DTYPE_TRSV_F32:
@@ -1435,6 +1441,12 @@ static VkResult vkblas_qgemm_ensure_pipeline(VkBLASContext* ctx,
     case VKBLAS_DTYPE_QGEMM_IQ4XS:
         dtype = VKBLAS_DTYPE_QGEMM_IQ4XS;
         break;
+    case VKBLAS_DTYPE_QGEMM_NVFP4:
+        dtype = VKBLAS_DTYPE_QGEMM_NVFP4;
+        break;
+    case VKBLAS_DTYPE_QGEMM_T2_0:
+        dtype = VKBLAS_DTYPE_QGEMM_T2_0;
+        break;
     case VKBLAS_DTYPE_QGEMM_F16_Q8_0:
         dtype = VKBLAS_DTYPE_QGEMM_F16_Q8_0;
         break;
@@ -1605,7 +1617,7 @@ VkResult vkblas_qgemm_get_tier(VkBLASContext* ctx, VkBLASQGemmFormat_t format,
     if (!ctx || !out_tier)
         return VK_ERROR_INITIALIZATION_FAILED;
     uint32_t kernel = (uint32_t)format;
-    if (kernel < VKBLAS_DTYPE_QGEMM_Q8_0 || kernel > VKBLAS_DTYPE_QGEMM_IQ4XS)
+     if (kernel < VKBLAS_DTYPE_QGEMM_Q8_0 || kernel > VKBLAS_DTYPE_QGEMM_T2_0)
         return VK_ERROR_FEATURE_NOT_PRESENT;
     *out_tier = (uint32_t)vkblas_qgemm_resolved_tier(ctx, kernel);
     return VK_SUCCESS;
@@ -1720,6 +1732,38 @@ VkResult vkblas_qgemm_iq4xs_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
 
     return vkblas_qgemm_common(ctx, cmd, m, n, k,
                                VKBLAS_DTYPE_QGEMM_IQ4XS,
+                               alpha, Wq, ldw, x, ldx, beta, y, ldy);
+}
+
+VkResult vkblas_qgemm_nvfp4_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                               int32_t m, int32_t n, int32_t k,
+                               const float* alpha, VkBuffer Wq, int32_t ldw,
+                               VkBuffer x, int32_t ldx,
+                               const float* beta, VkBuffer y, int32_t ldy)
+{
+    if (!ctx || !cmd || !Wq || !x || !y || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m <= 0 || n <= 0 || k <= 0)
+        return VK_SUCCESS;
+
+    return vkblas_qgemm_common(ctx, cmd, m, n, k,
+                               VKBLAS_DTYPE_QGEMM_NVFP4,
+                               alpha, Wq, ldw, x, ldx, beta, y, ldy);
+}
+
+VkResult vkblas_qgemm_t2_0_f32(VkBLASContext* ctx, VkCommandBuffer cmd,
+                               int32_t m, int32_t n, int32_t k,
+                               const float* alpha, VkBuffer Wq, int32_t ldw,
+                               VkBuffer x, int32_t ldx,
+                               const float* beta, VkBuffer y, int32_t ldy)
+{
+    if (!ctx || !cmd || !Wq || !x || !y || !alpha || !beta)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    if (m <= 0 || n <= 0 || k <= 0)
+        return VK_SUCCESS;
+
+    return vkblas_qgemm_common(ctx, cmd, m, n, k,
+                               VKBLAS_DTYPE_QGEMM_T2_0,
                                alpha, Wq, ldw, x, ldx, beta, y, ldy);
 }
 

@@ -27,8 +27,10 @@
 #define VKBLAS_DTYPE_QGEMM_Q4_0 7
 #define VKBLAS_DTYPE_QGEMM_Q5K  8
 #define VKBLAS_DTYPE_QGEMM_Q6K  9
-#define VKBLAS_DTYPE_QGEMM_Q3K  10
+#define VKBLAS_DTYPE_QGEMM_Q3K   10
 #define VKBLAS_DTYPE_QGEMM_IQ4XS 11
+#define VKBLAS_DTYPE_QGEMM_NVFP4 12
+#define VKBLAS_DTYPE_QGEMM_T2_0  13
 
 /* ── BLAS L2/L3 extended-op dtype codes ─────────────────────────────────── *
  * Each extended op gets its own (f32, f16) dtype pair so the pipeline cache

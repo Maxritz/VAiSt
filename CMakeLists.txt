@@ -301,13 +301,15 @@ set(VAIST_SHADERS
   vkblas/baseline/qgemm_q4_1.comp
   vkblas/baseline/qgemm_q5_0.comp
   vkblas/baseline/qgemm_q5_1.comp
-  vkblas/baseline/qgemm_q2_K.comp
-  vkblas/baseline/qgemm_q3k.comp
-  vkblas/baseline/qgemm_q4k.comp
-  vkblas/baseline/qgemm_q5k.comp
-  vkblas/baseline/qgemm_q6k.comp
-  vkblas/baseline/qgemm_iq4xs.comp
-  vkblas/baseline/moe_route.comp)
+   vkblas/baseline/qgemm_q2_K.comp
+   vkblas/baseline/qgemm_q3k.comp
+   vkblas/baseline/qgemm_q4k.comp
+   vkblas/baseline/qgemm_q5k.comp
+   vkblas/baseline/qgemm_q6k.comp
+   vkblas/baseline/qgemm_iq4xs.comp
+   vkblas/baseline/qgemm_nvfp4.comp
+   vkblas/baseline/qgemm_t2_0.comp
+   vkblas/baseline/moe_route.comp)
 # Pre-existing SPIR-V blobs with no source .comp (half-migrated repo).
 # Their base names map to the symbol names vaist_blas.c references.
 set(VAIST_PRECOMPILED_SPV
@@ -379,8 +381,10 @@ if(VAIST_ENABLE_VULKAN AND GLSLANG_VALIDATOR AND Python3_Interpreter_FOUND)
              "vaist_spv_qgemm_q4k"      "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_q4k.comp.spv"
              "vaist_spv_qgemm_q5k"      "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_q5k.comp.spv"
              "vaist_spv_qgemm_q6k"      "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_q6k.comp.spv"
-             "vaist_spv_qgemm_iq4xs"    "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_iq4xs.comp.spv"
-             "vaist_spv_moe_route"      "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/moe_route.comp.spv"
+              "vaist_spv_qgemm_iq4xs"    "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_iq4xs.comp.spv"
+              "vaist_spv_qgemm_nvfp4"    "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_nvfp4.comp.spv"
+              "vaist_spv_qgemm_t2_0"     "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_t2_0.comp.spv"
+              "vaist_spv_moe_route"      "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/moe_route.comp.spv"
              "vaist_spv_attn_flash_decode" "${VAIST_SHADER_OUT_DIR}/vkattn/baseline/attn_flash_decode.comp.spv"
     DEPENDS ${VAIST_SPV}
     COMMENT "embed SPIR-V -> vaist_blas_spv.h" VERBATIM)
