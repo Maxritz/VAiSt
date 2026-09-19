@@ -206,7 +206,8 @@ VAIST_API VaistStatus vaist_gguf_tensor_prefetch(
     VaistStreamingCache *cache,
     const char *tensor_name,
     uint64_t byte_offset,
-    size_t raw_bytes)
+    size_t raw_bytes,
+    VaistQuantType quant_type)
 {
     if (!cache || !tensor_name) return VAIST_INVALID_ARGUMENT;
 
@@ -241,8 +242,10 @@ VAIST_API VaistStatus vaist_gguf_tensor_prefetch(
         memcpy(e->host_staging, src, raw_bytes);
     }
     strncpy(e->name, tensor_name, sizeof(e->name) - 1);
+    e->name[sizeof(e->name) - 1] = '\0';
     e->offset = byte_offset;
     e->byte_size = raw_bytes;
+    e->quant_type = quant_type;
     return VAIST_OK;
 }
 
@@ -349,18 +352,22 @@ VAIST_API VaistStatus vaist_gguf_streaming_tensor_read(
     if (!e->host_staging) return VAIST_IO_ERROR;
 
     /* Determine quant type and dequantize */
-    /* The dtype field in VaistTensorDesc stores GGUF_DTYPE_OFFSET + ggml_type */
-    VaistQuantType qt;
-    switch (e->byte_size) {
-        default:
-            /* Assume f32 passthrough if byte_size matches dst_cap * sizeof(float) */
-            if (e->byte_size == dst_cap * sizeof(float)) {
-                memcpy(dst_f32, e->host_staging, e->byte_size);
-                return VAIST_OK;
-            }
-            /* Fall through to dequant for quantized types */
-            qt = VAIST_Q4_0; /* placeholder — real impl uses desc->dtype */
-            break;
+    /* Use the stored quant type from prefetch; fallback only for legacy entries
+       that don't have quant_type set (e.g. f32 passthrough). */
+    VaistQuantType qt = e->quant_type;
+    if (qt == 0) {
+        /* Uninitialized: detect f32 passthrough */
+        if (e->byte_size == dst_cap * sizeof(float)) {
+            memcpy(dst_f32, e->host_staging, e->byte_size);
+            return VAIST_OK;
+        }
+        qt = VAIST_Q4_0; /* last resort placeholder */
+    } else if (qt == VAIST_F32) {
+        /* f32 passthrough */
+        if (e->byte_size == dst_cap * sizeof(float)) {
+            memcpy(dst_f32, e->host_staging, e->byte_size);
+            return VAIST_OK;
+        }
     }
     return vaist_dequantize_f32(qt, e->host_staging, e->byte_size, dst_f32, dst_cap);
 }

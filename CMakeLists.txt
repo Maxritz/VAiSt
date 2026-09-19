@@ -543,3 +543,22 @@ install(EXPORT VAiStTargets
   FILE VAiStTargets.cmake
   NAMESPACE VAiSt::
   DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/VAiSt")
+
+# ---------------------------------------------------------------------------
+# vaist-optim: Python shader/tile tuner tool (pip package).
+# Mirrors vLLM's setup.py pattern: install via pip during CMake configure.
+# ---------------------------------------------------------------------------
+option(VAIST_INSTALL_VAIST_OPTIM "Install vaist-optim Python package" ON)
+if(VAIST_INSTALL_VAIST_OPTIM)
+  find_program(PYTHON_EXE NAMES python3 python REQUIRED)
+  execute_process(
+    COMMAND ${PYTHON_EXE} -m pip install -e ${CMAKE_CURRENT_SOURCE_DIR}/tools/vaist_optim
+    RESULT_VARIABLE _pip_result
+    OUTPUT_QUIET ERROR_QUIET
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tools/vaist_optim)
+  if(_pip_result EQUAL 0)
+    message(STATUS "vaist-optim: installed (shader cache + tuner CLI)")
+  else()
+    message(WARNING "vaist-optim: pip install failed (offline mode?)")
+  endif()
+endif()

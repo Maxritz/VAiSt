@@ -30,6 +30,7 @@ typedef struct VaistCacheEntry {
     char     name[256];
     uint64_t offset;          /**< byte offset in the GGUF file */
     uint64_t byte_size;       /**< raw stored size */
+    VaistQuantType quant_type; /**< quantization format (f32, q4_0, nvfp4, etc.) */
     void    *gpu_ptr;         /**< device pointer (NULL if evicted) */
     float   *host_staging;    /**< pinned host staging buffer */
     uint32_t lru_prev;        /**< previous entry in LRU list (index) */
@@ -86,7 +87,8 @@ VAIST_API VaistStatus vaist_gguf_tensor_prefetch(
     VaistStreamingCache *cache,
     const char *tensor_name,
     uint64_t byte_offset,
-    size_t raw_bytes);
+    size_t raw_bytes,
+    VaistQuantType quant_type);
 
 /**
  * \brief Wait for all pending prefetch operations to complete.
