@@ -14,6 +14,7 @@
 #include "cpp/vaist_deepseek.hpp"
 #include "cpp/vaist_engine.hpp"
 #include "vaist_tokens.h"   /* vaist_tokenize, vaist_detokenize, VaistTokenizer */
+#include "vaist_nn.h"      /* vaist_nn_fused_kv_rmsnorm_f32 */
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -701,14 +702,26 @@ void Qwen3Model::attention(uint32_t layer_idx,
     /* QK norm (per-head normalization before RoPE) */
     snprintf(wname, sizeof(wname), "model.layers.%u.self_attn.q_norm.weight", layer_idx);
     const VaistTensorRef* wq_norm = state_.get_tensor(wname);
-    if (wq_norm && wq_norm->get_data()) {
+    snprintf(wname, sizeof(wname), "model.layers.%u.self_attn.k_norm.weight", layer_idx);
+    const VaistTensorRef* wk_norm = state_.get_tensor(wname);
+
+    if (wq_norm && wk_norm && wq_norm->get_data() && wk_norm->get_data()) {
+        /* Fused dual RMSNorm: Q + KV norms in one pass */
+        float* q = qkv.data();
+        float* k = qkv.data() + q_size;
+        size_t n_q_rows = batch_seq * n_heads;
+        size_t n_kv_rows = batch_seq * n_kv_heads;
+        /* Quantize Q heads */
+        vaist_nn_fused_kv_rmsnorm_f32(
+            q, wq_norm->get_data(), wk_norm->get_data(),
+            q, k,
+            n_q_rows > n_kv_rows ? n_q_rows : n_kv_rows, head_dim, 1e-6f);
+    } else if (wq_norm && wq_norm->get_data()) {
         float* q = qkv.data();
         for (uint32_t i = 0; i < batch_seq * n_heads; i++) {
             qk_norm(q + i * head_dim, wq_norm->get_data(), q + i * head_dim, head_dim, 1e-6f);
         }
     }
-    snprintf(wname, sizeof(wname), "model.layers.%u.self_attn.k_norm.weight", layer_idx);
-    const VaistTensorRef* wk_norm = state_.get_tensor(wname);
     if (wk_norm && wk_norm->get_data()) {
         float* k = qkv.data() + q_size;
         for (uint32_t i = 0; i < batch_seq * n_kv_heads; i++) {

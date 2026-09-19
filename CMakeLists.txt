@@ -208,7 +208,7 @@ foreach(D IN LISTS VAIST_MODULES)
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/vaist>)
   target_link_libraries(${CPP_TARGET} PUBLIC ${M})
   if(D STREQUAL "model")
-    target_link_libraries(${CPP_TARGET} PUBLIC vaist_blas vaist_llm vaist_tokens vaist_attn)
+    target_link_libraries(${CPP_TARGET} PUBLIC vaist_blas vaist_llm vaist_tokens vaist_attn vaist_nn)
   endif()
   if(D STREQUAL "linalg")
     target_link_libraries(${CPP_TARGET} PUBLIC vaist_blas)
@@ -291,8 +291,9 @@ set(VAIST_SHADERS
   vkmath/baseline/rmsnorm_quant.comp
   vkmath/baseline/silu_mul_f32.comp
   vkmath/baseline/add_rmsnorm_f32.comp
-  vkmath/baseline/rope_cache_fused.comp
-  vkblas/baseline/qgemm_mxfp4.comp
+   vkmath/baseline/rope_cache_fused.comp
+   vkmath/baseline/fused_kv_rmsnorm_f32.comp
+   vkblas/baseline/qgemm_mxfp4.comp
   vkblas/baseline/qgemm_mxfp8.comp
   vkblas/baseline/qgemm_q8_0.comp
   vkblas/baseline/qgemm_q4_0.comp
