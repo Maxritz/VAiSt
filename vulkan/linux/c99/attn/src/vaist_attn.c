@@ -253,13 +253,11 @@ vaist_attn_ctx* vaist_attn_create(const VaistRuntime* rt, const vaist_attn_cfg* 
             fprintf(stderr,"vaist_attn: no vkGetPhysicalDeviceMemoryProperties\n");
             goto create_fail;
         }
-        VkPhysicalDevice pd = VK_NULL_HANDLE;
-        {
-            void* _d = NULL; void* _q = NULL; uint32_t _qf = 0;
-            if (vaist_runtime_vk_state(rt, &_d, &_q, &_qf) != VAIST_OK || !_d){
-                goto create_fail;
-            }
-            pd = (VkPhysicalDevice)_d;
+        /* vk_state returns the VkDevice; memory properties need the
+         * VkPhysicalDevice — never cast between the two handle types. */
+        VkPhysicalDevice pd = (VkPhysicalDevice)vaist_runtime_vk_physdev(rt);
+        if (pd == VK_NULL_HANDLE){
+            goto create_fail;
         }
         VkPhysicalDeviceMemoryProperties mprops;
         gmem(pd, &mprops);

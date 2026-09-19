@@ -259,7 +259,7 @@ static int vaist_ensure_device(VaistRuntime*r){
         /* first queue family with compute */
         qfprop(r->physdev,&n,NULL);
         {
-            VkQueueFamilyProperties *qps=(VkQueueFamilyProperties*)malloc(n?n:1);
+            VkQueueFamilyProperties *qps=(VkQueueFamilyProperties*)malloc((n?n:1)*sizeof(*qps));
             uint32_t qf=(uint32_t)-1;
             if(!qps) return 0;
             qfprop(r->physdev,&n,qps);
@@ -269,8 +269,10 @@ static int vaist_ensure_device(VaistRuntime*r){
             r->queue_family=qf;
         }
         memprop(r->physdev,&r->memprops);
-        /* enable VK_KHR_8bit_storage on the device only if the physical device
-         * advertises it (matvec shaders need int8 storage). gemm needs nothing. */
+        /* Zero-init qi/dc: an unset pEnabledFeatures is stack garbage that
+         * AVs (or FEATURE_NOT_PRESENTs) vkCreateDevice on real drivers.
+         * 8-bit storage via the Vulkan 1.2 core struct only, no extension
+         * struct/string (matvec shaders need int8 storage; gemm needs none). */
         n=0; enumext(r->physdev,NULL,&n,NULL);
         if(n){
             VkExtensionProperties *ep=(VkExtensionProperties*)malloc(n*sizeof(*ep));
@@ -284,26 +286,23 @@ static int vaist_ensure_device(VaistRuntime*r){
         }
         {
             VkPhysicalDeviceVulkan12Features f12;
-            VkPhysicalDevice8BitStorageFeatures f8;
-            const char *exts[2];
-            uint32_t next=0;
             VkDeviceQueueCreateInfo qi;
             VkDeviceCreateInfo dc;
             VkResult res;
             memset(&f12,0,sizeof(f12)); f12.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-            memset(&f8,0,sizeof(f8)); f8.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES;
+            memset(&qi,0,sizeof(qi));
+            memset(&dc,0,sizeof(dc));
             qi.sType=VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO; qi.pNext=NULL; qi.flags=0;
             qi.queueFamilyIndex=r->queue_family; qi.queueCount=1; qi.pQueuePriorities=&pri;
             f12.shaderInt8=VK_TRUE;
-            f8.storageBuffer8BitAccess=VK_TRUE;
-            f8.uniformAndStorageBuffer8BitAccess=VK_TRUE;
-            if(r->vk_8bit){ f8.pNext=(void*)&f12; exts[next++]=VK_KHR_8BIT_STORAGE_EXTENSION_NAME; }
+            f12.storageBuffer8BitAccess=VK_TRUE;
+            f12.uniformAndStorageBuffer8BitAccess=VK_TRUE;
             dc.sType=VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-            dc.pNext=r->vk_8bit?(void*)&f8:NULL;
+            dc.pNext=r->vk_8bit?(void*)&f12:NULL;
             dc.flags=0;
             dc.queueCreateInfoCount=1; dc.pQueueCreateInfos=&qi;
             dc.enabledLayerCount=0; dc.ppEnabledLayerNames=NULL;
-            dc.enabledExtensionCount=next; dc.ppEnabledExtensionNames=next?exts:NULL;
+            dc.enabledExtensionCount=0; dc.ppEnabledExtensionNames=NULL;
             res=VK_ERROR_UNKNOWN;
             {
                 VAIST_TRY {
@@ -600,6 +599,18 @@ VAIST_API VaistStatus vaist_runtime_vk_state(const VaistRuntime*rt,
     return VAIST_UNSUPPORTED;
 #else
     return VAIST_UNSUPPORTED;
+#endif
+}
+VAIST_API void* vaist_runtime_vk_physdev(const VaistRuntime*rt){
+    if(!rt) return NULL;
+#if VAIST_HAVE_VK_HDR
+    if(!rt->vk_ready && rt->info.vulkan_available==1u){
+        vaist_ensure_device((VaistRuntime*)rt);
+    }
+    return (void*)rt->physdev;
+#else
+    (void)rt;
+    return NULL;
 #endif
 }
 VAIST_API void* vaist_runtime_vk_proc(const VaistRuntime*rt,const char*name){

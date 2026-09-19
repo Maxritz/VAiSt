@@ -74,6 +74,11 @@ VAIST_API VaistStatus vaist_stream_synchronize(VaistStream *s);
  *   GPU box or VAIST_ENABLE_Vulkan off). Handles are opaque (VkXxx_T*) so this
  *   header never transitively pulls in <vulkan/vulkan.h>.
  *
+ * vaist_runtime_vk_physdev: returns the opaque VkPhysicalDevice selected at
+ *   device-creation time (NULL when no Vulkan device). Needed for physical-
+ *   device queries (memory properties, feature checks); vk_state's device
+ *   handle is a VkDevice and must never be cast to VkPhysicalDevice.
+ *
  * vaist_runtime_vk_proc: resolves any Vulkan entrypoint from the runtime's
  *   loader handle (works for both instance and device functions), so callers
  *   need never link libvulkan directly. Returns NULL on no-loader builds.
@@ -81,6 +86,7 @@ VAIST_API VaistStatus vaist_stream_synchronize(VaistStream *s);
 VAIST_API VaistStatus vaist_buffer_gpu_handle(VaistBuffer*b,void**handle);
 VAIST_API VaistStatus vaist_runtime_vk_state(const VaistRuntime*rt,
     void**device,void**queue,uint32_t*queue_family);
+VAIST_API void* vaist_runtime_vk_physdev(const VaistRuntime*rt);
 VAIST_API void* vaist_runtime_vk_proc(const VaistRuntime*rt,const char*name);
 #ifdef __cplusplus
 }

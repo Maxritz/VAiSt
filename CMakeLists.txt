@@ -479,7 +479,7 @@ add_test(NAME blas_test COMMAND vaist_blas_test)
 # friendly: always passes without a device).
 add_executable(vaist_blas_vulkan_test tests/vaist_blas_vulkan_test.c)
 target_include_directories(vaist_blas_vulkan_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include/vaist")
-target_link_libraries(vaist_blas_vulkan_test PRIVATE vaist_blas vaist_runtime)
+target_link_libraries(vaist_blas_vulkan_test PRIVATE vaist_blas vaist_runtime vaist_attn)
 if(UNIX)
   target_link_libraries(vaist_blas_vulkan_test PRIVATE m)
 endif()

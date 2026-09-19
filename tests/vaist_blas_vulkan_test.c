@@ -8,6 +8,7 @@
 #include "vaist_blas.h"
 #include "vaist_runtime.h"
 #include "vaist_core.h"
+#include "vaist_attn.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -119,6 +120,49 @@ int main(int argc, char **argv){
         }
     done_bin:
         free(w);free(sign);free(scale);free(x);free(y);free(ref);
+    }
+
+    /* ---- Sparse attention verify (exercises vkblas_create_context + speculative shader) ---- */
+    {
+        vaist_attn_cfg cfg = {
+            .scale = 1.0f / sqrtf(64.0f),
+            .head_dim = 64,
+            .num_q_heads = 4,
+            .num_kv_heads = 4,
+            .max_seqlen = 2048,
+            .block_size = 16,
+            .max_blocks = 128,
+            .batch = 1,
+            .sparse_ratio = 0,
+            .block_stride = 16,
+        };
+        vaist_attn_ctx *actx = vaist_attn_create(rt, &cfg);
+        if (!actx) {
+            printf("(attn: no Vulkan device — skipping sparse dispatch)\n");
+        } else {
+            /* End-to-end: real K/V cache GPU buffers so spec_verify dispatches
+             * the attn_sparse_hierarchical shader (NULL K/V can only fall back). */
+            size_t kv_elems = (size_t)cfg.num_kv_heads * cfg.max_seqlen * cfg.head_dim;
+            VaistBuffer *kb = NULL, *vb = NULL;
+            void *kh = NULL, *vh = NULL;
+            VaistStatus st = VAIST_UNSUPPORTED;
+            if (vaist_buffer_create(rt, kv_elems * sizeof(float), &kb) == VAIST_OK &&
+                vaist_buffer_create(rt, kv_elems * sizeof(float), &vb) == VAIST_OK &&
+                vaist_buffer_gpu_handle(kb, &kh) == VAIST_OK && kh &&
+                vaist_buffer_gpu_handle(vb, &vh) == VAIST_OK && vh) {
+                float q[4 * 64], out[4 * 64];
+                uint32_t bt[4 * 128];
+                memset(q, 0, sizeof(q));
+                memset(bt, 0, sizeof(bt));
+                st = vaist_attn_spec_verify(actx, q, kh, vh, bt, bt,
+                    128, bt, out, 0, 0);
+            }
+            printf("sparse_dispatch: %s\n",
+                   st == VAIST_OK ? "PASS" : "cpu-fallback/skip");
+            vaist_buffer_destroy(kb);
+            vaist_buffer_destroy(vb);
+            vaist_attn_destroy(actx);
+        }
     }
 
     /* Detect whether any GPU dispatch was actually used (informational). */
