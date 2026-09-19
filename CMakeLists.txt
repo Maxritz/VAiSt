@@ -291,6 +291,7 @@ set(VAIST_SHADERS
   vkattn/baseline/attn_flash_decode.comp
   vkattn/baseline/attn_prefill.comp
   vkattn/baseline/attn_speculative.comp
+  vkattn/baseline/attn_sparse_hierarchical.comp
   vkmath/baseline/rmsnorm_quant.comp
   vkmath/baseline/silu_mul_f32.comp
   vkmath/baseline/add_rmsnorm_f32.comp
@@ -447,6 +448,14 @@ if(UNIX)
   target_link_libraries(vaist_stack_smoke PRIVATE m dl)
 endif()
 add_test(NAME stack_smoke COMMAND vaist_stack_smoke)
+
+add_executable(vaist_quant_selftest tests/quant_selftest.c)
+target_include_directories(vaist_quant_selftest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include/vaist")
+target_link_libraries(vaist_quant_selftest PRIVATE vaist_quant vaist_core)
+if(UNIX)
+  target_link_libraries(vaist_quant_selftest PRIVATE m)
+endif()
+add_test(NAME quant_selftest COMMAND vaist_quant_selftest)
 
 add_executable(vaist_linalg_test tests/linalg_test.c)
 target_include_directories(vaist_linalg_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include/vaist")

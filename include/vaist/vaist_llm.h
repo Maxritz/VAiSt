@@ -109,11 +109,24 @@ typedef struct {
     uint32_t num_kv_heads;    /**< Number of KV attention heads */
     uint32_t head_dim;        /**< Dimensionality per attention head */
     uint32_t block_size;      /**< Tokens per block (e.g. 16, 64) */
-     uint16_t kv_dtype;        /**< KV data type: VAIST_F32, VAIST_F16, or VAIST_DTYPE_Q8_0 */
+    uint16_t kv_dtype;        /**< KV data type: VAIST_F32, VAIST_F16, VAIST_F8_E4M3, VAIST_F8_E5M2 */
     uint32_t max_blocks;      /**< Total blocks available in the pool */
     uint32_t total_blocks_used; /**< Running counter of allocated blocks */
+    /* ---- Tiered KV cache (DeepSeek-V4.1-Flash pattern) ---- */
+    uint16_t local_kv_dtype;  /**< Local SWA window dtype (higher precision) */
+    uint32_t local_window;    /**< Local window size in tokens (0 = disabled) */
+    uint16_t global_kv_dtype; /**< Global cached KV dtype (lower precision) */
+    uint32_t global_sparse_ratio; /**< Global sparsity ratio (0-100), 0 = dense */
+    /**< \note USAGE: Tiered KV cache is a config-time structure only — it does
+     *  NOT automatically dispatch GPU kernels to read/write FP8/FP4 KV data.
+     *  The model layer must pass the correct dtype to KV write/read operations
+     *  based on local_window and global_sparse_ratio. Cross-layer KV sharing
+     *  (vaist_kv_cache_view_create) must be wired into the model's layer loop. */
 } VaistKVCachePagedConfig;
 #pragma pack(pop)
+
+/* --- Cross-layer KV cache sharing (YOCO pattern) --- */
+typedef struct VaistKVCacheView VaistKVCacheView;
 
 /**
  * \brief Create a paged KV cache over a GPU-resident buffer.
@@ -220,6 +233,52 @@ VAIST_API VaistStatus vaist_kv_paged_gpu_buffer(
  * \retval VAIST_INVALID_ARGUMENT for NULL kvc.
  */
 VAIST_API void vaist_kv_paged_clear_seq(VaistKVCachePaged *kvc, uint32_t seq_id);
+
+/* ---- Cross-layer KV cache sharing (YOCO: share KV views across layers) ---- */
+
+/**
+ * \brief Create a view into a subset of KV cache blocks (for cross-layer sharing).
+ *        Upper layers derive their KV from lower-layer views (YOCO pattern).
+ *
+ * \note USAGE: This creates a metadata view only — it does NOT automatically
+ *       redirect GPU reads. The model's attention implementation must check
+ *       for view attachments and sample from the parent layer's KV blocks
+ *       instead of allocating new KV for the child layer.
+ *
+ * \param kvc       Parent paged KV cache.
+ * \param layer     Layer index to share.
+ * \param block_ids Array of block IDs in the view (may be NULL for empty view).
+ * \param count     Number of block IDs.
+ * \param out       Receives the opaque view handle.
+ */
+VAIST_API VaistStatus vaist_kv_cache_view_create(
+    VaistKVCachePaged *kvc, uint32_t layer,
+    const uint32_t *block_ids, size_t count,
+    VaistKVCacheView **out);
+
+/**
+ * \brief Destroy a KV cache view (does not free parent data).
+ */
+VAIST_API void vaist_kv_cache_view_destroy(VaistKVCacheView *view);
+
+/* ---- Bounded replay markers (SWA Bounded Replay pattern) ---- */
+
+/**
+ * \brief Mark a token position as a replay boundary.
+ *        Blocks at or before this position can be replayed without recomputation.
+ *
+ * \note USAGE: This is a host-side bookkeeping API only — it does NOT
+ *       automatically insert markers into GPU command buffers or trigger
+ *       kernel re-dispatch. The model layer must call this after writing
+ *       KV tokens at the boundary position, and check vaist_kv_get_replay_marker
+ *       before deciding whether to recompute or reuse cached activations.
+ */
+VAIST_API VaistStatus vaist_kv_set_replay_marker(VaistKVCachePaged *kvc, uint32_t token_pos);
+
+/**
+ * \brief Get the nearest replay marker before or at the given position.
+ */
+VAIST_API VaistStatus vaist_kv_get_replay_marker(VaistKVCachePaged *kvc, uint32_t token_pos, uint32_t *out_pos);
 
 #ifdef __cplusplus
 }

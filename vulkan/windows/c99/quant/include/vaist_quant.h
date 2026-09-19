@@ -87,6 +87,18 @@ VAIST_API size_t vaist_quant_block_size(VaistQuantType q);  /* #elements per blo
  * matvec shaders directly. */
 VAIST_API VaistStatus vaist_pack_ternary(const float*src,size_t n,int8_t*signs,float*scale); /* out: n signs, 1 scale */
 VAIST_API VaistStatus vaist_pack_binary(const float*src,size_t n,uint8_t*bits,float*scale); /* out: ceil(n/8) bits, 1 scale */
+
+/* --- FP8 support (E4M3 / E5M2) --- */
+/**
+ * \brief Encode float32 to FP8 E4M3.
+ * \note USAGE: Scalar utility for weight conversion and KV cache quantization.
+ */
+VAIST_API int vaist_fp8_e4m3_encode(float f32);
+VAIST_API float vaist_fp8_e4m3_decode(int v);
+VAIST_API int vaist_fp8_e5m2_encode(float f32);
+VAIST_API float vaist_fp8_e5m2_decode(int v);
+/* dt: 8=VAIST_F8_E4M3, 9=VAIST_F8_E5M2 (matches VaistDType values) */
+VAIST_API VaistStatus vaist_quantize_fp8(const float*src,size_t n,void*dst,int dt);
 #ifdef __cplusplus
 }
 #endif

@@ -23,8 +23,11 @@ typedef enum VaistDType {
     VAIST_I32  = 2,  /**< 32-bit signed integer */
     VAIST_I8   = 3,  /**< 8-bit signed integer */
     VAIST_U8   = 4,  /**< 8-bit unsigned integer (also used for fp16/uint16 storage) */
-    VAIST_F16 = 5,   /**< 16-bit float (stored as uint16) — non-ABI-compatible extension */
-     VAIST_DTYPE_Q8_0 = 6,  /**< GGML Q8_0 quantized type for storage — non-ABI-compatible extension */
+    VAIST_F16 = 5,   /**< 16-bit float (stored as uint16) */
+    VAIST_BF16 = 7,  /**< Brain float16 (stored as uint16) — non-ABI-compatible extension */
+    VAIST_F8_E4M3 = 8,  /**< FP8 E4M3 (1 byte per element) */
+    VAIST_F8_E5M2 = 9,  /**< FP8 E5M2 (1 byte per element) */
+    VAIST_DTYPE_Q8_0 = 6,  /**< GGML Q8_0 quantized type for storage */
 } VaistDType;
 
 typedef struct VaistTensor VaistTensor;

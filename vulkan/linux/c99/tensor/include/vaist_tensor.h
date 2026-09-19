@@ -18,7 +18,10 @@ typedef enum VaistDType {
     VAIST_I8   = 3,
     VAIST_U8   = 4,
     VAIST_F16 = 5,
-     VAIST_DTYPE_Q8_0 = 6,
+    VAIST_BF16 = 7,
+    VAIST_F8_E4M3 = 8,
+    VAIST_F8_E5M2 = 9,
+    VAIST_DTYPE_Q8_0 = 6,
 } VaistDType;
 
 typedef struct VaistTensor VaistTensor;

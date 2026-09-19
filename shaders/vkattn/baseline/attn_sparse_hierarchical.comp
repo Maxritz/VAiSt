@@ -1,0 +1,217 @@
+// vaist_attn: hierarchical sparse attention (DeepSeek-V4.1-Flash CSA2 pattern).
+// HISA: hierarchical indexing — block-level scoring then token-level top-K.
+// Workgroup layout: each invocation handles one query head's output element.
+// Phase 1: coarse scoring of all blocks (shared mem reduction)
+// Phase 2: select top-K blocks per head
+// Phase 3: fine scoring within selected blocks only
+// Phase 4: softmax + weighted sum over top-K blocks' tokens
+//
+// USAGE: This shader is NOT auto-dispatched. The model layer calls
+//        vaist_attn_sparse_hierarchical() which binds this shader.
+//        Requires cfg.sparse_ratio > 0 in vaist_attn_cfg.
+// Limitations: seqlen ≤ 2048 per block table segment, head_dim ≤ 64,
+// top_k_blocks × block_stride ≤ 2048 for fine phase.
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer QB  { float q[]; };
+layout(std430, set = 0, binding = 1) readonly buffer KB  { uvec2 k_cache[]; };
+layout(std430, set = 0, binding = 2) readonly buffer VB  { uvec2 v_cache[]; };
+layout(std430, set = 0, binding = 3) readonly buffer BT  { uint block_table[]; };
+layout(std430, set = 0, binding = 4) writeonly buffer OB { float outbuf[]; };
+layout(std430, set = 0, binding = 5) buffer SB  { uint selected_blocks[]; };  // output: [num_heads * top_k_blocks]
+layout(std430, set = 0, binding = 6) readonly buffer CB  { uint block_coords[]; };  // block start positions per token (pre-built)
+
+layout(push_constant) uniform PC {
+    float scale;        // 1/sqrt(head_dim)
+    uint  head_dim;     // e.g. 64
+    uint  seqlen;       // actual context tokens
+    uint  kv_head;      // index into block_table for this KV group
+    uint  q_head;       // query head index
+    uint  max_blocks;   // blocks per row in block_table
+    uint  block_size;   // tokens per page (1, 16, 64...)
+    uint  top_k_blocks; // number of blocks to retrieve per head
+    uint  block_stride; // tokens per block for hierarchical scoring (e.g. 16)
+    uint  num_block_groups; // total block groups to score (ceiling(seqlen / block_stride))
+};
+
+float f16_to_f32(uint hf) {
+    uint s = (hf >> 15) & 1u;
+    uint e = (hf >> 10) & 0x1Fu;
+    uint m = hf & 0x3FFu;
+    if (e == 0u) return (s != 0u ? -1.0 : 1.0) * pow(2.0, -14.0) * (m / 1024.0);
+    if (e == 31u) return (m != 0u) ? uintBitsToFloat(0x7f800000u | (s << 31)) : uintBitsToFloat((s << 31) | 0x7f800000u);
+    return (s != 0u ? -1.0 : 1.0) * pow(2.0, float(e) - 15.0) * (1.0 + float(m) / 1024.0);
+}
+
+// Shared memory for coarse block scores: one entry per block group
+shared float smem_block_scores[256];  // max 256 block groups
+
+// Shared memory for fine-grained scoring within selected blocks
+shared float smem_fine_scores[2048];  // max 2048 tokens across top-K blocks
+shared float smem_fine_weights[2048]; // softmax outputs
+
+void main() {
+    uint tid = gl_LocalInvocationIndex;
+    uint head_off = q_head * head_dim;
+
+    // ── Phase 1: Coarse block-level scoring ──
+    // Each invocation computes the max |QK| score for one block group,
+    // then tid=0 selects top-K via simple insertion sort.
+    uint ng = num_block_groups;
+    if (tid < ng) {
+        uint group_start = tid * block_stride;
+        uint group_end = min(group_start + block_stride, seqlen);
+        // Sample first token in group as representative (cheap proxy)
+        uint tok = group_start;
+        uint blk_idx = block_table[kv_head * max_blocks + (tok / block_size)];
+        uint tok_in_blk = tok % block_size;
+        uint per_block_stride = block_size * (head_dim / 4u);
+        uint blk_off = blk_idx * per_block_stride + tok_in_blk * (head_dim / 4u);
+
+        float qk = 0.0;
+        for (uint d = 0u; d < head_dim; d += 4u) {
+            uvec2 kv = k_cache[blk_off + d / 4u];
+            float kf0 = f16_to_f32((kv.x >> 16) & 0xFFFFu);
+            float kf1 = f16_to_f32(kv.x & 0xFFFFu);
+            float kf2 = f16_to_f32((kv.y >> 16) & 0xFFFFu);
+            qk += q[head_off + d + 0u] * kf0 + q[head_off + d + 1u] * kf1 + q[head_off + d + 2u] * kf2;
+        }
+        smem_block_scores[tid] = qk * scale;
+    }
+    barrier();
+
+    // tid=0 selects top-K blocks via simple selection
+    if (tid == 0u) {
+        uint k = min(top_k_blocks, ng);
+        for (uint i = 0u; i < k; i++) {
+            float best_score = -1e30;
+            uint best_idx = 0;
+            for (uint j = 0u; j < ng; j++) {
+                if (smem_block_scores[j] > best_score) {
+                    best_score = smem_block_scores[j];
+                    best_idx = j;
+                }
+            }
+            selected_blocks[q_head * top_k_blocks + i] = best_idx;
+            smem_block_scores[best_idx] = -1e30;  // mark as used
+        }
+    }
+    barrier();
+
+    // ── Phase 2: Fine-grained token scoring within selected blocks ──
+    // Compute full QK scores for tokens in the top-K blocks only.
+    uint total_fine_tokens = 0u;
+    if (tid == 0u) {
+        for (uint k = 0u; k < min(top_k_blocks, ng); k++) {
+            uint block_idx = selected_blocks[q_head * top_k_blocks + k];
+            total_fine_tokens += min(block_stride, seqlen - block_idx * block_stride);
+        }
+    }
+    barrier();
+
+    // Each invocation handles multiple tokens in the fine set
+    if (tid < total_fine_tokens) {
+        // Find which block and offset this token corresponds to
+        uint remaining = tid;
+        uint fine_score = 0u; // placeholder
+        uint global_tok = 0u;
+
+        // Walk through selected blocks to find our token
+        for (uint k = 0u; k < top_k_blocks; k++) {
+            uint block_idx = selected_blocks[q_head * top_k_blocks + k];
+            uint block_start = block_idx * block_stride;
+            uint block_len = min(block_stride, seqlen - block_start);
+            if (remaining < block_len) {
+                global_tok = block_start + remaining;
+                break;
+            }
+            remaining -= block_len;
+        }
+
+        // Compute QK^T for this token
+        uint blk_idx = block_table[kv_head * max_blocks + (global_tok / block_size)];
+        uint tok_in_blk = global_tok % block_size;
+        uint per_block_stride_v = block_size * (head_dim / 4u);
+        uint blk_off = blk_idx * per_block_stride_v + tok_in_blk * (head_dim / 4u);
+
+        float qk = 0.0;
+        for (uint d = 0u; d < head_dim; d += 4u) {
+            uvec2 kv = k_cache[blk_off + d / 4u];
+            float kf0 = f16_to_f32((kv.x >> 16) & 0xFFFFu);
+            float kf1 = f16_to_f32(kv.x & 0xFFFFu);
+            float kf2 = f16_to_f32((kv.y >> 16) & 0xFFFFu);
+            float kf3 = f16_to_f32(kv.y & 0xFFFFu);
+            qk += q[head_off + d + 0u] * kf0 + q[head_off + d + 1u] * kf1 +
+                  q[head_off + d + 2u] * kf2 + q[head_off + d + 3u] * kf3;
+        }
+        smem_fine_scores[tid] = qk * scale;
+    }
+    barrier();
+
+    // ── Phase 3: Softmax over fine tokens ──
+    // Max reduction
+    if (tid == 0u) {
+        float mx = -1e30;
+        for (uint i = 0u; i < total_fine_tokens; i++) mx = max(mx, smem_fine_scores[i]);
+        smem_fine_scores[0] = mx;
+    }
+    barrier();
+    float mx = (tid == 0u) ? smem_fine_scores[0] : 0.0;
+
+    // Exp
+    if (tid < total_fine_tokens) {
+        smem_fine_weights[tid] = exp(smem_fine_scores[tid] - mx);
+    }
+    barrier();
+
+    // Sum (tid=0)
+    if (tid == 0u) {
+        float sm = 0.0;
+        for (uint i = 0u; i < total_fine_tokens; i++) sm += smem_fine_weights[i];
+        float inv_sum = (sm > 0.0) ? (1.0 / sm) : 0.0;
+        smem_fine_scores[0] = inv_sum;  // reuse scores[0] for inv_sum
+    }
+    barrier();
+    float inv_sum = smem_fine_scores[0];
+
+    // ── Phase 4: Weighted sum over V ──
+    if (tid < head_dim) {
+        float acc = 0.0;
+        for (uint k = 0u; k < min(top_k_blocks, ng); k++) {
+            uint block_idx = selected_blocks[q_head * top_k_blocks + k];
+            uint block_start = block_idx * block_stride;
+            uint block_len = min(block_stride, seqlen - block_start);
+
+            for (uint t = 0u; t < block_len; t++) {
+                uint global_tok = block_start + t;
+                uint blk_idx = block_table[kv_head * max_blocks + (global_tok / block_size)];
+                uint tok_in_blk = global_tok % block_size;
+                uint per_block_stride_v = block_size * (head_dim / 4u);
+                uint blk_off = blk_idx * per_block_stride_v + tok_in_blk * (head_dim / 4u);
+
+                uint d4 = tid / 4u;
+                uvec2 ve = v_cache[blk_off + d4];
+                uint lane = tid % 4u;
+                float vf;
+                if      (lane == 0u) vf = f16_to_f32((ve.x >> 16) & 0xFFFFu);
+                else if (lane == 1u) vf = f16_to_f32(ve.x & 0xFFFFu);
+                else if (lane == 2u) vf = f16_to_f32((ve.y >> 16) & 0xFFFFu);
+                else                 vf = f16_to_f32(ve.y & 0xFFFFu);
+
+                // Compute weight for this token
+                // Re-index into fine_scores: need the token's position in the fine set
+                uint fine_idx = 0u;
+                for (uint k2 = 0u; k2 < k; k2++) {
+                    uint bi2 = selected_blocks[q_head * top_k_blocks + k2];
+                    uint bs2 = bi2 * block_stride;
+                    fine_idx += min(block_stride, seqlen - bs2);
+                }
+                fine_idx += t;
+                acc += smem_fine_weights[fine_idx] * inv_sum * vf;
+            }
+        }
+        outbuf[head_off + tid] = acc;
+    }
+}

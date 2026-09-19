@@ -386,6 +386,10 @@ struct VaistKVCachePaged {
     PagedSeqEntry *seq_table;
     size_t  seq_capacity;
     size_t  seq_count;
+    /* --- Replay markers --- */
+    uint32_t *replay_markers;
+    size_t    replay_count;
+    size_t    replay_capacity;
 };
 
 /** \internal Bitmap bit-scan: find index of lowest set bit in a uint32. */
@@ -535,6 +539,22 @@ VAIST_API VaistStatus vaist_kv_paged_create(
         return VAIST_OUT_OF_MEMORY;
     }
 
+    /* Init replay markers */
+    kvc->replay_capacity = VAIST_PAGED_SEQ_CAP_INIT;
+    kvc->replay_count = 0;
+    kvc->replay_markers = (uint32_t *)calloc(kvc->replay_capacity, sizeof(uint32_t));
+    if (!kvc->replay_markers) {
+        free(kvc->seq_table);
+        free(kvc->bitmap);
+        if (kvc->is_vulkan) {
+            vaist_buffer_destroy(kvc->vk_buf_obj);
+        } else {
+            free(kvc->gpu_buf);
+        }
+        free(kvc);
+        return VAIST_OUT_OF_MEMORY;
+    }
+
     *out = kvc;
     DBG_TRACE("kv_paged_create layers=%u heads=%u dim=%u block=%u dtype=%u max_blocks=%u -> OK",
               cfg->num_layers, cfg->num_kv_heads, cfg->head_dim, cfg->block_size,
@@ -555,6 +575,7 @@ VAIST_API void vaist_kv_paged_destroy(VaistKVCachePaged *kvc) {
         free(kvc->seq_table);
     }
     free(kvc->bitmap);
+    free(kvc->replay_markers);
     if (kvc->is_vulkan && kvc->vk_buf_obj) {
         vaist_buffer_destroy(kvc->vk_buf_obj);
         kvc->vk_buf_obj = NULL;
@@ -778,4 +799,99 @@ VAIST_API void vaist_kv_paged_clear_seq(VaistKVCachePaged *kvc, uint32_t seq_id)
     /* Remove from hash (mark as empty by clearing) */
     kvc->seq_count--;
     DBG_TRACE("kv_paged_clear_seq seq=%u", seq_id);
+}
+
+/* ======================================================================== */
+/* Cross-layer KV cache sharing (YOCO pattern)                              */
+/* ======================================================================== */
+
+struct VaistKVCacheView {
+    VaistKVCachePaged *parent;
+    uint32_t layer;
+    uint32_t *block_ids;
+    size_t count;
+    size_t capacity;
+};
+
+VAIST_API VaistStatus vaist_kv_cache_view_create(
+    VaistKVCachePaged *kvc, uint32_t layer,
+    const uint32_t *block_ids, size_t count,
+    VaistKVCacheView **out) {
+    if (!kvc || !out || layer >= kvc->cfg.num_layers) return VAIST_INVALID_ARGUMENT;
+    if (count > 0 && !block_ids) return VAIST_INVALID_ARGUMENT;
+
+    VaistKVCacheView *view = (VaistKVCacheView *)calloc(1, sizeof(*view));
+    if (!view) return VAIST_OUT_OF_MEMORY;
+
+    view->parent = kvc;
+    view->layer = layer;
+    view->count = count;
+    view->capacity = count;
+
+    if (count > 0) {
+        view->block_ids = (uint32_t *)malloc(count * sizeof(uint32_t));
+        if (!view->block_ids) {
+            free(view);
+            return VAIST_OUT_OF_MEMORY;
+        }
+        memcpy(view->block_ids, block_ids, count * sizeof(uint32_t));
+    }
+
+    *out = view;
+    return VAIST_OK;
+}
+
+VAIST_API void vaist_kv_cache_view_destroy(VaistKVCacheView *view) {
+    if (!view) return;
+    free(view->block_ids);
+    free(view);
+}
+
+/* ======================================================================== */
+/* Bounded replay markers (SWA Bounded Replay pattern)                      */
+/* ======================================================================== */
+
+VAIST_API VaistStatus vaist_kv_set_replay_marker(VaistKVCachePaged *kvc, uint32_t token_pos) {
+    if (!kvc) return VAIST_INVALID_ARGUMENT;
+    if (kvc->replay_count >= kvc->replay_capacity) {
+        size_t new_cap = kvc->replay_capacity * 2;
+        uint32_t *new_markers = (uint32_t *)realloc(kvc->replay_markers,
+                                                      new_cap * sizeof(uint32_t));
+        if (!new_markers) return VAIST_OUT_OF_MEMORY;
+        kvc->replay_markers = new_markers;
+        kvc->replay_capacity = new_cap;
+    }
+    /* Insert marker sorted by token position for binary-search lookup */
+    size_t i;
+    for (i = 0; i < kvc->replay_count; i++) {
+        if (kvc->replay_markers[i] == token_pos) return VAIST_OK;
+        if (kvc->replay_markers[i] > token_pos) break;
+    }
+    for (size_t j = kvc->replay_count; j > i; j--) {
+        kvc->replay_markers[j] = kvc->replay_markers[j - 1];
+    }
+    kvc->replay_markers[i] = token_pos;
+    kvc->replay_count++;
+    return VAIST_OK;
+}
+
+VAIST_API VaistStatus vaist_kv_get_replay_marker(VaistKVCachePaged *kvc, uint32_t token_pos, uint32_t *out_pos) {
+    if (!kvc || !out_pos) return VAIST_INVALID_ARGUMENT;
+    if (kvc->replay_count == 0) {
+        *out_pos = 0;
+        return VAIST_OK;
+    }
+    /* Binary search for nearest marker <= token_pos */
+    size_t lo = 0, hi = kvc->replay_count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (kvc->replay_markers[mid] <= token_pos) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo == 0) {
+        *out_pos = 0;
+        return VAIST_OK;
+    }
+    *out_pos = kvc->replay_markers[lo - 1];
+    return VAIST_OK;
 }

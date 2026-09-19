@@ -541,8 +541,197 @@ VAIST_API VaistStatus vaist_dequantize_f32(VaistQuantType q,const void*src,size_
              /* iq2_s / iq3_s / iq4_nl / iq4_xs dequant require additional scale
               * decode beyond the shipped grids; deferred to next pass. */
              return VAIST_UNSUPPORTED;
-        default:
-            return VAIST_INVALID_ARGUMENT;
+         default:
+             return VAIST_INVALID_ARGUMENT;
+         }
+     }
+     return VAIST_OK;
+ }
+
+/* ---- FP8 encode/decode (E4M3 / E5M2) ---- */
+
+/**
+ * \brief Encode float32 to FP8 E4M3 (4-bit exponent, 3-bit mantissa).
+ *        IEEE 754 half-precision conversion path; max e4m3 value = 448,000.
+ */
+VAIST_API int vaist_fp8_e4m3_encode(float f32){
+    if (!isfinite(f32)) {
+        /* Inf or NaN: sign bit + all exponent bits set, mantissa preserves NaN */
+        uint32_t sign = signbit(f32) ? 0x80 : 0;
+        return (int)(sign | 0x7F);
+    }
+    if (f32 == 0.0f) {
+        /* Preserve sign of zero (including negative zero) */
+        return signbit(f32) ? (int)0x80 : 0;
+    }
+    float fv = fabsf(f32);
+    int exp;
+    float mant = frexpf(fv, &exp); /* mant in [0.5, 1.0), exp = floor(log2)+1
+                                    * IEEE unbiased exponent = exp - 1.
+                                    * E4M3: bias = 7. Biased = (exp-1) + 7 = exp + 6. */
+    int e4m3_exp = exp + 6;
+    if (e4m3_exp <= 0) {
+        /* Subnormal or underflow to zero */
+        return signbit(f32) ? (int)0x80 : 0;
+    }
+    if (e4m3_exp > 15) {
+        /* Overflow → max finite or Inf */
+        uint32_t sign = signbit(f32) ? 0x80 : 0;
+        return (int)(sign | 0x7E);
+    }
+    /* mant in [0.5, 1.0); IEEE normal form has mantissa in [1.0, 2.0).
+     * mantissa fraction = (mant - 0.5) / 0.5 = mant*2 - 1, scaled to 3 bits. */
+    uint32_t m3 = (uint32_t)((mant * 2.0f - 1.0f) * 8.0f + 0.5f) & 0x7;
+    uint32_t sign = signbit(f32) ? 0x80 : 0;
+    return (int)(sign | ((uint32_t)e4m3_exp << 3) | m3);
+}
+
+/**
+ * \brief Decode FP8 E4M3 to float32.
+ */
+VAIST_API float vaist_fp8_e4m3_decode(int v){
+    uint32_t bits = (uint32_t)v & 0xFF;
+    uint32_t sign = (bits >> 7) & 1;
+    uint32_t exp = (bits >> 3) & 0xF;
+    uint32_t mant = bits & 0x7;
+    if (exp == 0) {
+        /* Zero or subnormal */
+        if (mant == 0) {
+            return sign ? -0.0f : 0.0f;
+        }
+        /* Subnormal: 2^(-6) × mant */
+        float result = (float)mant * powf(2.0f, -6.0f);
+        return sign ? -result : result;
+    }
+    if (exp == 0xF && mant == 0) {
+        /* Inf */
+        return sign ? -INFINITY : INFINITY;
+    }
+    if (exp == 0xF && mant != 0) {
+        /* NaN - return 0 */
+        return 0.0f;
+    }
+    /* Normal: value = (-1)^sign × 2^(exp-7) × (1 + mant/8) */
+    float result = powf(2.0f, (float)exp - 7.0f) * (1.0f + (float)mant / 8.0f);
+    return sign ? -result : result;
+}
+
+/**
+ * \brief Encode float32 to FP8 E5M2 (5-bit exponent, 2-bit mantissa).
+ *        IEEE 754 half-precision variant; max e5m2 value = 57,344.
+ */
+VAIST_API int vaist_fp8_e5m2_encode(float f32){
+    if (!isfinite(f32)) {
+        uint32_t sign = signbit(f32) ? 0x80 : 0;
+        return (int)(sign | 0x7C);
+    }
+    if (f32 == 0.0f) {
+        return signbit(f32) ? (int)0x80 : 0;
+    }
+    float fv = fabsf(f32);
+    int exp;
+    float mant = frexpf(fv, &exp);
+    /* IEEE unbiased exponent = exp - 1.
+     * E5M2: bias = 15. Biased = (exp-1) + 15 = exp + 14. */
+    int e5m2_exp = exp + 14;
+    if (e5m2_exp <= 0) {
+        /* Subnormal or underflow to zero */
+        return signbit(f32) ? (int)0x80 : 0;
+    }
+    if (e5m2_exp > 31) {
+        /* Overflow → max finite or Inf */
+        uint32_t sign = signbit(f32) ? 0x80 : 0;
+        return (int)(sign | 0x78);
+    }
+    uint32_t m2 = (uint32_t)((mant * 2.0f - 1.0f) * 4.0f + 0.5f) & 0x3;
+    uint32_t sign = signbit(f32) ? 0x80 : 0;
+    return (int)(sign | ((uint32_t)e5m2_exp << 2) | m2);
+}
+
+/**
+ * \brief Decode FP8 E5M2 to float32.
+ */
+VAIST_API float vaist_fp8_e5m2_decode(int v){
+    uint32_t bits = (uint32_t)v & 0xFF;
+    uint32_t sign = (bits >> 7) & 1;
+    uint32_t exp = (bits >> 2) & 0x1F;
+    uint32_t mant = bits & 0x3;
+    if (exp == 0) {
+        if (mant == 0) {
+            return sign ? -0.0f : 0.0f;
+        }
+        /* Subnormal: 2^(-14) × mant */
+        float result = (float)mant * powf(2.0f, -14.0f);
+        return sign ? -result : result;
+    }
+    if (exp == 0x1F && mant == 0) {
+        return sign ? -INFINITY : INFINITY;
+    }
+    if (exp == 0x1F && mant != 0) {
+        return 0.0f;
+    }
+    /* Normal: value = (-1)^sign × 2^(exp-15) × (1 + mant/4) */
+    float result = powf(2.0f, (float)exp - 15.0f) * (1.0f + (float)mant / 4.0f);
+    return sign ? -result : result;
+}
+
+/**
+ * \brief Quantize an array of float32 to packed FP8 (one byte per element).
+ *        Supports VAIST_F8_E4M3 and VAIST_F8_E5M2 dtypes.
+ */
+VAIST_API VaistStatus vaist_quantize_fp8(const float*src,size_t n,void*dst,int dt){
+    if (!src || !dst || !n) return VAIST_INVALID_ARGUMENT;
+    uint8_t* out = (uint8_t*)dst;
+    if (dt == 8) { /* VAIST_F8_E4M3 */
+        for (size_t i = 0; i < n; i++) {
+            out[i] = (uint8_t)vaist_fp8_e4m3_encode(src[i]);
+        }
+    } else if (dt == 9) { /* VAIST_F8_E5M2 */
+        for (size_t i = 0; i < n; i++) {
+            out[i] = (uint8_t)vaist_fp8_e5m2_encode(src[i]);
+        }
+    } else {
+        return VAIST_INVALID_ARGUMENT;
+    }
+    return VAIST_OK;
+}
+
+/* ---- Pack ternary/binary (MatMul-free) ---- */
+
+VAIST_API VaistStatus vaist_pack_ternary(const float*src,size_t n,int8_t*signs,float*scale){
+    if (!src || !signs || !scale || !n) return VAIST_INVALID_ARGUMENT;
+    float max_abs = 0.0f;
+    for (size_t i = 0; i < n; i++) {
+        float av = fabsf(src[i]);
+        if (av > max_abs) max_abs = av;
+    }
+    if (max_abs == 0.0f) max_abs = 1.0f;
+    *scale = max_abs / 127.0f;
+    if (*scale == 0.0f) *scale = 1.0f;
+    for (size_t i = 0; i < n; i++) {
+        float q = src[i] / (*scale);
+        if (q > 0.5f)      signs[i] = 1;
+        else if (q < -0.5f) signs[i] = -1;
+        else               signs[i] = 0;
+    }
+    return VAIST_OK;
+}
+
+VAIST_API VaistStatus vaist_pack_binary(const float*src,size_t n,uint8_t*bits,float*scale){
+    if (!src || !bits || !scale || !n) return VAIST_INVALID_ARGUMENT;
+    float max_abs = 0.0f;
+    for (size_t i = 0; i < n; i++) {
+        float av = fabsf(src[i]);
+        if (av > max_abs) max_abs = av;
+    }
+    if (max_abs == 0.0f) max_abs = 1.0f;
+    *scale = max_abs / 127.0f;
+    if (*scale == 0.0f) *scale = 1.0f;
+    size_t nbytes = (n + 7) / 8;
+    memset(bits, 0, nbytes);
+    for (size_t i = 0; i < n; i++) {
+        if (src[i] > 0.0f) {
+            bits[i / 8] |= (uint8_t)(1u << (i % 8));
         }
     }
     return VAIST_OK;

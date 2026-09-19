@@ -20,6 +20,9 @@ typedef struct {
     uint32_t    block_size;       // tokens per page (1, 16, 64...)
     uint32_t    max_blocks;       // max pages per sequence
     uint32_t    total_blocks;     // total cache pages in device memory
+    /* --- Hierarchical sparse attention (CSA2) --- */
+    uint32_t    sparse_ratio;     // 0-100: fraction of tokens to attend to (0 = dense)
+    uint32_t    block_stride;     // block size for hierarchical scoring (default: 16)
 } vaist_attn_cfg;
 
 VAIST_API vaist_attn_ctx* vaist_attn_create(const VaistRuntime* rt, const vaist_attn_cfg* cfg);
@@ -73,6 +76,67 @@ VAIST_API VaistStatus vaist_attn_spec_verify(vaist_attn_ctx* ctx,
     void* out,
     uint32_t verify_mask,
     uint32_t spec_depth);
+
+/* ---- Hierarchical Sparse Attention (DeepSeek-V4.1-Flash CSA2 pattern) ---- */
+
+/**
+ * \brief Hierarchical sparse attention: block-level scoring then token-level
+ *       top-K within selected blocks.
+ *
+ * Uses the HISA pattern (hierarchical indexing) to reduce long-context scoring:
+ *   1. Score all blocks (coarse), select top-K blocks
+ *   2. Score tokens only within selected blocks (fine)
+ *   3. Apply softmax + weighted sum
+ *
+ * \note USAGE: GPU compute primitive — does NOT dispatch from model forward
+ *       pass automatically. Requires cfg.sparse_ratio > 0.
+ */
+ *
+ * Uses the HISA pattern (hierarchical indexing) to reduce long-context scoring:
+ *   1. Score all blocks (coarse), select top-K blocks
+ *   2. Score tokens only within selected blocks (fine)
+ *   3. Apply softmax + weighted sum
+ *
+ * This replaces full O(N^2) attention with O(N * block_size + K_blocks * block_size)
+ * for the scoring phase.
+ *
+ * q:              [num_q_heads * head_dim] f32 queries
+ * k_cache/v_cache: paged KV cache
+ * block_tables:   page indices
+ * top_k_blocks:   output [num_heads] number of blocks to retrieve per head
+ * selected_blocks: output [num_heads * top_k_blocks] block indices
+ * seqlen:         context length
+ * out:            [num_q_heads * head_dim] f32 output
+ */
+VAIST_API VaistStatus vaist_attn_sparse_hierarchical(vaist_attn_ctx* ctx,
+    const void* q,
+    void* k_cache_gpu_buf,
+    void* v_cache_gpu_buf,
+    const uint32_t* block_tables,
+    uint32_t seqlen,
+    uint32_t top_k_blocks,
+    uint32_t* selected_blocks,
+    float* out);
+
+/**
+ * \brief Causal Encoder-Decoder attention (DeepSeek-V4.1-Flash CED prefill).
+ *
+ * Lower layers act as causal encoder, producing compact global KV.
+ * Upper layers derive from encoder output (reduces O(N*L) to O(N*L/2)).
+ *
+ * Same interface as vaist_attn_flashDecode but with encoder-side optimizations:
+ * - encoder_output: [num_kv_heads * head_dim] global representation
+ * - is_encoder_layer: if true, computes full encoder KV; if false, derives from encoder output
+ */
+VAIST_API VaistStatus vaist_attn_ced(vaist_attn_ctx* ctx,
+    const void* q,
+    void* k_cache_gpu_buf,
+    void* v_cache_gpu_buf,
+    const uint32_t* block_tables,
+    uint32_t seqlen,
+    const void* encoder_output,
+    uint32_t is_encoder_layer,
+    float* out);
 
 #ifdef __cplusplus
 }
