@@ -1,0 +1,90 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : require
+#extension GL_EXT_scalar_block_layout : require
+
+/**
+ * Fused Add + RMSNorm: residual_out = x + residual_in; out = residual * weight * rsqrt(mean(residual^2) + eps)
+ *
+ * Replaces: atom/model_ops/norm_ops.py:rms_norm, atom/model_ops/fused_ops.py:fused_add_rms_norm
+ *
+ * Bindings:
+ *   set=0, binding=0: input X       (f32, [num_rows * num_cols])
+ *   set=0, binding=1: residual_in   (f32, [num_rows * num_cols])
+ *   set=0, binding=2: weight        (f32, [num_cols])
+ *   set=0, binding=3: output        (f32, [num_rows * num_cols])
+ *   set=0, binding=4: residual_out  (f32, [num_rows * num_cols])
+ *
+ * Push constants:
+ *   num_rows    — number of rows
+ *   num_cols    — hidden dimension per row
+ *   eps         — RMSNorm epsilon (typically 1e-6)
+ *   ld_in_bytes — byte stride between rows in X (0 => num_cols*4)
+ *   ld_res_bytes— byte stride between rows in residual (0 => num_cols*4)
+ *   ld_out_bytes— byte stride between rows in output (0 => num_cols*4)
+ */
+
+layout(push_constant) uniform PC {
+    uint  num_rows;
+    uint  num_cols;
+    float eps;
+    uint  ld_in_bytes;
+    uint  ld_res_bytes;
+    uint  ld_out_bytes;
+    uint  _pad0;
+    uint  _pad1;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly  buffer BufX    { float data_x[]; };
+layout(scalar, set = 0, binding = 1) restrict readonly  buffer BufRes  { float data_res[]; };
+layout(scalar, set = 0, binding = 2) restrict readonly  buffer BufWt   { float data_wt[]; };
+layout(scalar, set = 0, binding = 3) writeonly           buffer BufOut       { float data_out[]; };
+layout(scalar, set = 0, binding = 4)                     buffer BufResOut     { float data_res_out[]; };
+
+shared float sdata[256];
+
+uint get_ld(uint ld_bytes) { return (ld_bytes > 0u) ? (ld_bytes / 4u) : pc.num_cols; }
+
+layout(local_size_x = 256) in;
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    if (row >= pc.num_rows) return;
+    uint tid = gl_LocalInvocationID.x;
+
+    uint stride_in = get_ld(pc.ld_in_bytes);
+    uint stride_res = get_ld(pc.ld_res_bytes);
+    uint stride_out = get_ld(pc.ld_out_bytes);
+    uint base_in = row * stride_in;
+    uint base_res = row * stride_res;
+    uint base_out = row * stride_out;
+
+    // Phase 1: compute residual = x + residual_in, and sum of squares
+    float ss = 0.0;
+    for (uint i = tid; i < pc.num_cols; i += 256u) {
+        float r = data_x[base_in + i] + data_res[base_res + i];
+        data_res_out[base_out + i] = r;
+        ss += r * r;
+    }
+    sdata[tid] = ss;
+    barrier();
+
+    // Reduce sum of squares
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        barrier();
+    }
+
+    // tid==0 computes and broadcasts the scale
+    if (tid == 0u) {
+        sdata[0] = inversesqrt(sdata[0] / float(pc.num_cols) + pc.eps);
+    }
+    barrier();
+
+    float rms_scale = sdata[0];
+
+    // Phase 2: write normalized output = residual * weight * rms_scale
+    for (uint i = tid; i < pc.num_cols; i += 256u) {
+        float r = data_res_out[base_out + i];
+        data_out[base_out + i] = r * data_wt[i] * rms_scale;
+    }
+}

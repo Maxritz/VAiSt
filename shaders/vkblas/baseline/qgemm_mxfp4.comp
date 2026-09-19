@@ -1,0 +1,164 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+/**
+ * Blockscale MXFP4 GEMM: y = alpha * (dequant_mxfp4(W) * x) + beta * y.
+ *
+ * Replaces: atom/model_ops/quant_ops.py:mxfp4_quantized_matmul,
+ *           atom/model_ops/fused_moe.py:quantized_expert_matmul (MXFP4 path)
+ *
+ * Weight layout: MXFP4 blockscale format.
+ *   - 32 weight elements per block (2 rows × 16 cols)
+ *   - Each block: 1 byte e8m0 scale + 16 bytes packed f4 (2 values per byte)
+ *   - Block layout: [scale_byte][f4_byte_0..f4_byte_15] (17 bytes per block)
+ *   - Row r's elements for column c: block_idx = (r * k + c) / 32
+ *
+ * Activation: f32 row-major (k rows, n cols of X), strided: x[kk + c*ldb]
+ * Output:    f32 column-major (m rows, n cols of Y), strided: y[r + c*ldd]
+ *
+ * E8M0 scale: value = 2^(bits - 127), bits=0 => value=1.0
+ * F4 (E2M1): values {0, ±0.5, ±1, ±1.5, ±2, ±3, ±4, ±6}
+ *
+ * Push constants (same layout as qgemm_q8_0.comp):
+ *   m, n, k — dimensions
+ *   alpha, beta — scaling
+ *   lda — byte stride between weight rows
+ *   ldb, ldc, ldd — leading dimensions for X, Y, Z
+ *   transA, transB — transposition flags
+ *   beta_is_zero — if 1, skip reading Y
+ *
+ * Bindings:
+ *   set=0, binding=0: weight buffer (uint8) — MXFP4 blocks
+ *   set=0, binding=1: activation X (f32, [k * n])
+ *   set=0, binding=2: input Y (f32, [m * n]) — read if beta != 0
+ *   set=0, binding=3: output Z (f32, [m * n]) — written
+ */
+layout(constant_id = 0) const uint TILE_M = 16;
+layout(constant_id = 1) const uint TILE_N = 16;
+layout(constant_id = 2) const uint TILE_K = 16;
+
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    float alpha;
+    float beta;
+    uint  lda;
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  _pad2;
+    uint  _pad3;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufW { uint8_t w_data[]; };
+layout(scalar, set = 0, binding = 1) restrict readonly buffer BufX { float x_data[]; };
+layout(scalar, set = 0, binding = 2) restrict readonly buffer BufY { float y_data[]; };
+layout(scalar, set = 0, binding = 3) writeonly  buffer BufZ { float z_data[]; };
+
+shared float As[TILE_M * TILE_K];
+shared float Bs[TILE_K * TILE_N];
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    uint row = gl_LocalInvocationID.x;
+    uint col = gl_LocalInvocationID.y;
+    uint grRow = gl_WorkGroupID.x;
+    uint grCol = gl_WorkGroupID.y;
+
+    uint globalRow = grRow * TILE_M + row;
+    uint globalCol = grCol * TILE_N + col;
+
+    // MXFP4: each 32-element block is 17 bytes (1 scale + 16 packed f4 bytes)
+    // Element (r, kk) is in block (r * k + kk) / 32
+    // Within block: scale at byte base+0, f4 byte at base + 4 + (elem_in_block / 2)
+    //   nibble: if elem_in_block is even => low nibble, else high nibble
+
+    float acc = 0.0;
+    uint numTiles = (pc.k + TILE_K - 1u) / TILE_K;
+
+    for (uint t = 0u; t < numTiles; ++t) {
+        // Load W tile with MXFP4 dequantization
+        for (uint a_col = col; a_col < TILE_K; a_col += TILE_N) {
+            uint aRow = globalRow;
+            uint kk = t * TILE_K + a_col;
+            uint block = kk / 32u;
+            uint lane_in_blk = kk & 31u;
+            uint base = aRow * pc.lda + block * 17u;
+
+            float val = 0.0;
+            if (aRow < pc.m && kk < pc.k) {
+                // E8M0 scale
+                uint scale_bits = uint(w_data[base]);
+                float scale = (scale_bits == 0u) ? 1.0 : ldexp(1.0, int(scale_bits) - 127);
+
+                // F4 value: 2 per byte starting at offset 4 within block
+                uint byte_idx = base + 4u + (lane_in_blk >> 1u);
+                uint byte_val = uint(w_data[byte_idx]);
+                uint nibble;
+                if ((lane_in_blk & 1u) == 0u) {
+                    nibble = byte_val & 0xFu;
+                } else {
+                    nibble = byte_val >> 4u;
+                }
+
+                // E2M1 decode
+                uint sign = nibble & 8u;
+                uint code = nibble & 7u;
+                float f4_val;
+                if      (code == 0u) f4_val = 0.0;
+                else if (code == 1u) f4_val = 0.5;
+                else if (code == 2u) f4_val = 1.0;
+                else if (code == 3u) f4_val = 1.5;
+                else if (code == 4u) f4_val = 2.0;
+                else if (code == 5u) f4_val = 3.0;
+                else if (code == 6u) f4_val = 4.0;
+                else                 f4_val = 6.0;  // code 7
+
+                if (sign != 0u) f4_val = -f4_val;
+                val = scale * f4_val;
+            }
+            As[row * TILE_K + a_col] = val;
+        }
+
+        // Load X tile
+        for (uint b_row = row; b_row < TILE_K; b_row += TILE_M) {
+            uint bRow = t * TILE_K + b_row;
+            uint bCol = globalCol;
+            bool in_bounds = (bRow < pc.k) && (bCol < pc.n);
+            uint idx = bRow + bCol * pc.ldb;
+            Bs[b_row * TILE_N + col] = in_bounds ? x_data[idx] : 0.0;
+        }
+
+        barrier();
+
+        // Accumulate
+        for (uint kk = 0u; kk < TILE_K; ++kk) {
+            acc += As[row * TILE_K + kk] * Bs[kk * TILE_N + col];
+        }
+        barrier();
+    }
+
+    // Write output
+    if (globalRow >= pc.m || globalCol >= pc.n) return;
+
+    float result = pc.alpha * acc;
+    if (pc.beta_is_zero == 0) {
+        uint cIdx = globalRow + globalCol * pc.ldc;
+        result += pc.beta * y_data[cIdx];
+    }
+    uint dIdx = globalRow + globalCol * pc.ldd;
+    z_data[dIdx] = result;
+}

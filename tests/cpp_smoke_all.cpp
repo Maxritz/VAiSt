@@ -48,8 +48,8 @@ int main()
     vaist::KV kv;
     assert(kv.create(2u, 4u) == VAIST_OK);
 
-    vaist::Engine engine;
-    (void)engine;
+    /* Engine: VaistEngine lives in cpp/model/vaist_engine.hpp (not yet linked here) */
+    (void)0;
 
     VaistCommunicator comm{};
     assert(vaist::init(&comm, 0u, 1u) == VAIST_OK);

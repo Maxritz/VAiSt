@@ -1,6 +1,7 @@
 # Build directories
 build-*/
-build/
+build*/
+build_vs/
 bi2/
 bi3/
 
@@ -28,3 +29,8 @@ VAiSt.sln
 *.log
 run.log
 run_out.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo

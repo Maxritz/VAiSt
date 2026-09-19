@@ -1,0 +1,147 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_scalar_block_layout : require
+
+/**
+ * Blockscale MXFP8 GEMM: y = alpha * (dequant_mxfp8(W) * x) + beta * y.
+ *
+ * Replaces: atom/model_ops/quant_ops.py:mxfp8_quantized_matmul,
+ *           atom/model_ops/fused_moe.py:quantized_expert_matmul (MXFP8 path)
+ *
+ * Weight layout: MXFP8 blockscale format (per-tensor scale per 32-element block).
+ *   - Each block: 4 bytes f32 scale + 32 bytes f8 values = 36 bytes per block
+ *   - Element (row, kk): block = kk / 32, byte offset = row * lda + block * 36
+ *   - f8 value at byte offset base + 4 + (kk & 31)
+ *   - scale at bytes [base, base+4) as f32
+ *
+ * FP8 (E4M3): {sign, e4, m3}, bias=7, max representable ≈ 448.0
+ *   Dequant: val = scale * f8_to_float(f8_bits)
+ *
+ * Push constants: same layout as qgemm_q8_0.comp (m, n, k, alpha, beta, lda, ldb, ldc, ldd, ...).
+ * Bindings: same as qgemm_q8_0.comp (set=0 binding=0..3).
+ */
+layout(constant_id = 0) const uint TILE_M = 16;
+layout(constant_id = 1) const uint TILE_N = 16;
+layout(constant_id = 2) const uint TILE_K = 16;
+
+layout(push_constant) uniform PC {
+    uint  m;
+    uint  n;
+    uint  k;
+    float alpha;
+    float beta;
+    uint  lda;
+    uint  ldb;
+    uint  ldc;
+    uint  ldd;
+    int   transA;
+    int   transB;
+    int   beta_is_zero;
+    int   _pad0;
+    uint  strideA;
+    uint  strideB;
+    uint  strideC;
+    uint  strideD;
+    uint  batchCount;
+    uint  _pad1;
+    uint  _pad2;
+    uint  _pad3;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly buffer BufW { uint8_t w_data[]; };
+layout(scalar, set = 0, binding = 1) restrict readonly buffer BufX { float x_data[]; };
+layout(scalar, set = 0, binding = 2) restrict readonly buffer BufY { float y_data[]; };
+layout(scalar, set = 0, binding = 3) writeonly  buffer BufZ { float z_data[]; };
+
+shared float As[TILE_M * TILE_K];
+shared float Bs[TILE_K * TILE_N];
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+float decode_e4m3(uint8_t bits) {
+    uint b = uint(bits);
+    uint sign = b & 0x80u;
+    uint exp = (b >> 3u) & 0x1Fu;
+    uint mant = b & 0x07u;
+
+    if (exp == 0u && mant == 0u) return 0.0;
+    float val = mant / 8.0;       // 3 mantissa bits => /8
+    if (exp == 0u) {
+        // Subnormal: 2^(-6) * mant
+        val = uintBitsToFloat(uint(exp) << 23) * (mant / 8.0);
+        // Actually: subnormal E4M3 has value = 2^-6 * mant
+        val = ldexp(float(mant), -6);
+    } else {
+        val = ldexp(1.0 + mant / 8.0, int(exp) - 7);
+    }
+    return (sign != 0u) ? -val : val;
+}
+
+void main() {
+    uint row = gl_LocalInvocationID.x;
+    uint col = gl_LocalInvocationID.y;
+    uint grRow = gl_WorkGroupID.x;
+    uint grCol = gl_WorkGroupID.y;
+
+    uint globalRow = grRow * TILE_M + row;
+    uint globalCol = grCol * TILE_N + col;
+
+    float acc = 0.0;
+    uint numTiles = (pc.k + TILE_K - 1u) / TILE_K;
+
+    for (uint t = 0u; t < numTiles; ++t) {
+        // Load W tile with MXFP8 dequantization
+        for (uint a_col = col; a_col < TILE_K; a_col += TILE_N) {
+            uint aRow = globalRow;
+            uint kk = t * TILE_K + a_col;
+            uint block = kk / 32u;
+            uint lane_in_blk = kk & 31u;
+            uint base = aRow * pc.lda + block * 36u; // 36 bytes per block: 4 scale + 32 f8
+
+            float val = 0.0;
+            if (aRow < pc.m && kk < pc.k) {
+                // Read f32 scale
+                uint scale_bits = uint(w_data[base])
+                                | (uint(w_data[base + 1u]) << 8u)
+                                | (uint(w_data[base + 2u]) << 16u)
+                                | (uint(w_data[base + 3u]) << 24u);
+                float scale = uintBitsToFloat(scale_bits);
+
+                // Read f8 value
+                uint8_t f8 = w_data[base + 4u + lane_in_blk];
+                float f8_val = decode_e4m3(f8);
+
+                val = scale * f8_val;
+            }
+            As[row * TILE_K + a_col] = val;
+        }
+
+        // Load X tile
+        for (uint b_row = row; b_row < TILE_K; b_row += TILE_M) {
+            uint bRow = t * TILE_K + b_row;
+            uint bCol = globalCol;
+            bool in_bounds = (bRow < pc.k) && (bCol < pc.n);
+            uint idx = bRow + bCol * pc.ldb;
+            Bs[b_row * TILE_N + col] = in_bounds ? x_data[idx] : 0.0;
+        }
+
+        barrier();
+
+        // Accumulate
+        for (uint kk = 0u; kk < TILE_K; ++kk) {
+            acc += As[row * TILE_K + kk] * Bs[kk * TILE_N + col];
+        }
+        barrier();
+    }
+
+    // Write output
+    if (globalRow >= pc.m || globalCol >= pc.n) return;
+
+    float result = pc.alpha * acc;
+    if (pc.beta_is_zero == 0) {
+        uint cIdx = globalRow + globalCol * pc.ldc;
+        result += pc.beta * y_data[cIdx];
+    }
+    uint dIdx = globalRow + globalCol * pc.ldd;
+    z_data[dIdx] = result;
+}

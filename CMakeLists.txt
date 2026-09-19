@@ -19,7 +19,7 @@ set(VAIST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/vulkan/${VAIST_PLATFORM}")
 set(VAIST_C99 "${VAIST_ROOT}/c99")
 set(VAIST_CPP "${VAIST_ROOT}/c++")
 set(VAIST_PYTHON "${VAIST_ROOT}/python")
-set(VAIST_MODULES core runtime tensor compute quant graph model nn llm engine ai distributed blas linalg attn npu xpu)
+set(VAIST_MODULES core runtime tensor compute quant graph model nn llm engine ai distributed blas linalg attn npu xpu tokens)
 
 option(VAIST_ENABLE_VULKAN "Pull in the Vulkan SDK headers for the Vulkan compute backend" OFF)
 if(VAIST_ENABLE_VULKAN)
@@ -95,7 +95,7 @@ function(vaist_cpp_warning_flags target)
   target_compile_options(${target} PRIVATE
     $<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wall;-Wextra;-Werror>
     $<$<COMPILE_LANG_AND_ID:CXX,Clang>:-Wall;-Wextra;-Werror>
-    $<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/W4;/WX>)
+    $<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/W4;/WX;/EHsc>)
 endfunction()
 
 # -----------------------------------------------------------------------------
@@ -125,6 +125,12 @@ foreach(D IN LISTS VAIST_MODULES)
   target_link_libraries(${M} PRIVATE vaist_core)
   if(D STREQUAL "blas")
     target_link_libraries(${M} PRIVATE vaist_runtime vaist_compute vaist_quant)
+  endif()
+  if(D STREQUAL "model")
+    target_link_libraries(${M} PRIVATE vaist_quant)
+  endif()
+  if(D STREQUAL "llm")
+    target_link_libraries(${M} PRIVATE vaist_runtime)
   endif()
   if(D STREQUAL "compute")
     target_link_libraries(${M} PRIVATE vaist_runtime)
@@ -201,6 +207,9 @@ foreach(D IN LISTS VAIST_MODULES)
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/vaist>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/vaist>)
   target_link_libraries(${CPP_TARGET} PUBLIC ${M})
+  if(D STREQUAL "model")
+    target_link_libraries(${CPP_TARGET} PUBLIC vaist_blas vaist_llm vaist_tokens vaist_attn)
+  endif()
   if(D STREQUAL "linalg")
     target_link_libraries(${CPP_TARGET} PUBLIC vaist_blas)
   endif()
@@ -209,7 +218,12 @@ endforeach()
 
 foreach(D IN LISTS VAIST_MODULES)
   set(TEST_TARGET "vaist_cpp_${D}_test")
-  add_executable(${TEST_TARGET} "${VAIST_CPP}/${D}/test_${D}.cpp")
+  if(D STREQUAL "model")
+    set(TEST_FILE "${VAIST_CPP}/model/test_model_arch.cpp")
+  else()
+    set(TEST_FILE "${VAIST_CPP}/${D}/test_${D}.cpp")
+  endif()
+  add_executable(${TEST_TARGET} "${TEST_FILE}")
   target_include_directories(${TEST_TARGET} PRIVATE
     "${VAIST_CPP}/${D}"
     "${CMAKE_CURRENT_SOURCE_DIR}/include/vaist")
@@ -217,6 +231,48 @@ foreach(D IN LISTS VAIST_MODULES)
   vaist_cpp_warning_flags(${TEST_TARGET})
   add_test(NAME ${TEST_TARGET} COMMAND ${TEST_TARGET})
 endforeach()
+
+# -----------------------------------------------------------------------------
+# Windows-only: VAiSt HTTP server (OpenAI-compatible API on Winsock2).
+# -----------------------------------------------------------------------------
+if(WIN32)
+  add_executable(vaist_serve
+    "${VAIST_CPP}/serve/vaist_serve.cpp"
+    "${VAIST_CPP}/serve/vaist_http_server.cpp"
+    "${VAIST_CPP}/serve/vaist_json.cpp")
+  set_target_properties(vaist_serve PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+  target_include_directories(vaist_serve PRIVATE
+    "${VAIST_CPP}/serve"
+    "${VAIST_CPP}/model"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/vaist"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/vaist/cpp")
+  target_link_libraries(vaist_serve PRIVATE
+    vaist_cpp_model
+    vaist_cpp_tokens
+    vaist_runtime
+    vaist_tokens
+    vaist_core
+    ws2_32)
+  vaist_cpp_warning_flags(vaist_serve)
+
+  add_executable(vaist_serve_test
+    "${VAIST_CPP}/serve/test_serve.cpp"
+    "${VAIST_CPP}/serve/vaist_http_server.cpp"
+    "${VAIST_CPP}/serve/vaist_json.cpp")
+  set_target_properties(vaist_serve_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+  target_include_directories(vaist_serve_test PRIVATE
+    "${VAIST_CPP}/serve"
+    "${VAIST_CPP}/model"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/vaist"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/vaist/cpp")
+  target_link_libraries(vaist_serve_test PRIVATE
+    vaist_cpp_model
+    vaist_runtime
+    vaist_core
+    ws2_32)
+  vaist_cpp_warning_flags(vaist_serve_test)
+  add_test(NAME serve_test COMMAND vaist_serve_test)
+endif()
 
 # Optional aggregate convenience target. It does not replace individual targets.
 add_library(vaist_cpp_wrappers INTERFACE)
@@ -231,6 +287,13 @@ endforeach()
 # -----------------------------------------------------------------------------
 set(VAIST_SHADERS
   vkattn/baseline/attn_flash_decode.comp
+  vkattn/baseline/attn_prefill.comp
+  vkmath/baseline/rmsnorm_quant.comp
+  vkmath/baseline/silu_mul_f32.comp
+  vkmath/baseline/add_rmsnorm_f32.comp
+  vkmath/baseline/rope_cache_fused.comp
+  vkblas/baseline/qgemm_mxfp4.comp
+  vkblas/baseline/qgemm_mxfp8.comp
   vkblas/baseline/qgemm_q8_0.comp
   vkblas/baseline/qgemm_q4_0.comp
   vkblas/baseline/qgemm_q4_1.comp
@@ -432,7 +495,7 @@ endif()
 # Install/export contract.
 # -----------------------------------------------------------------------------
 include(GNUInstallDirs)
-install(TARGETS vaist_core vaist_runtime vaist_tensor vaist_compute vaist_quant vaist_graph vaist_model vaist_nn vaist_llm vaist_engine vaist_ai vaist_distributed vaist_blas vaist_linalg vaist_attn vaist_npu vaist_xpu
+install(TARGETS vaist_core vaist_runtime vaist_tensor vaist_compute vaist_quant vaist_graph vaist_model vaist_nn vaist_llm vaist_engine vaist_ai vaist_distributed vaist_blas vaist_linalg vaist_attn vaist_npu vaist_xpu vaist_tokens
   EXPORT VAiStTargets
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -452,6 +515,15 @@ foreach(D IN LISTS VAIST_MODULES)
   install(DIRECTORY "${VAIST_CPP}/${D}/" DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/vaist/cpp/${D}
     FILES_MATCHING PATTERN "*.hpp")
 endforeach()
+# Architecture C++ headers live under include/vaist/cpp/.
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/vaist/cpp/"
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/vaist/cpp
+  FILES_MATCHING PATTERN "*.hpp")
+
+if(WIN32)
+  install(TARGETS vaist_serve vaist_serve_test
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
 
 foreach(D IN LISTS VAIST_MODULES)
   install(DIRECTORY "${VAIST_PYTHON}/${D}/" DESTINATION "${CMAKE_INSTALL_DATADIR}/vaist/python/${D}")

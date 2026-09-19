@@ -1,0 +1,171 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : require
+#extension GL_EXT_scalar_block_layout : require
+
+/**
+ * Fused RoPE + paged KV cache write.
+ *
+ * Applies rotary positional embedding to query and key vectors, then writes
+ * K and V into a paged KV cache using block tables.
+ *
+ * Two-pass design:
+ *   Pass 1 (q_pass=1): Apply RoPE to Q, write to q_out. Each invocation handles
+ *      one (q_head, dim) element. gl_WorkGroupID.x = q_head.
+ *   Pass 2 (q_pass=0): Apply RoPE to K, write K to paged cache, write V to paged
+ *      cache. Each invocation handles one (kv_head, dim) element.
+ *      gl_WorkGroupID.x = kv_head.
+ *
+ * Replaces: atom/model_ops/rope.py:apply_rotary_pos_emb, atom/kv_cache.py:PagedKVCache.append
+ *
+ * Bindings:
+ *   set=0, binding=0:  Q  (f32, [num_heads * head_dim])
+ *   set=0, binding=1:  K  (f32, [num_kv_heads * head_dim])
+ *   set=0, binding=2:  V  (f32, [num_kv_heads * head_dim])
+ *   set=0, binding=3:  position (u32, [num_kv_heads]) — one token position per KV head
+ *   set=0, binding=4:  cos/sin cache (f32, [max_rotary_dim * 2]) — interleaved [cos0,sin0,cos1,sin1,...]
+ *   set=0, binding=5:  Q_out (f32, [num_heads * head_dim]) — write-on-pass-1 only
+ *   set=0, binding=6:  K_cache (f32, paged)
+ *   set=0, binding=7:  V_cache (f32, paged)
+ *   set=0, binding=8:  block_table (u32, [num_kv_heads * max_blocks])
+ *
+ * Push constants:
+ *   head_dim        — dimension per attention head (e.g., 128)
+ *   rotary_dim      — number of dimensions to apply RoPE (even, <= head_dim)
+ *   num_heads       — number of query heads
+ *   num_kv_heads    — number of key/value heads
+ *   block_size      — tokens per cache block (e.g., 16)
+ *   max_blocks      — maximum blocks per kv head in block_table
+ *   cache_head_dim  — padded head_dim in cache (may differ from head_dim for alignment)
+ *   q_pass          — 1 = process queries, 0 = process KV
+ *   is_neox         — 1 = Neurion RoPE (interleaved pairs), 0 = GPT-NeoX style
+ *   _pad0, _pad1, _pad2 — padding for 16-byte alignment
+ */
+
+layout(push_constant) uniform PC {
+    uint head_dim;
+    uint rotary_dim;
+    uint num_heads;
+    uint num_kv_heads;
+    uint block_size;
+    uint max_blocks;
+    uint cache_head_dim;
+    uint q_pass;
+    uint is_neox;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0)  restrict readonly  buffer BufQ     { float q_in[]; };
+layout(scalar, set = 0, binding = 1)  restrict readonly  buffer BufK     { float k_in[]; };
+layout(scalar, set = 0, binding = 2)  restrict readonly  buffer BufV     { float v_in[]; };
+layout(scalar, set = 0, binding = 3)  restrict readonly  buffer BufPos    { uint positions[]; };
+layout(scalar, set = 0, binding = 4)  restrict readonly  buffer BufCosSin  { float cos_sin[]; };
+layout(scalar, set = 0, binding = 5)  writeonly           buffer BufQOut   { float q_out[]; };
+layout(scalar, set = 0, binding = 6)  writeonly           buffer BufKCache { float k_cache[]; };
+layout(scalar, set = 0, binding = 7)  writeonly           buffer BufVCache { float v_cache[]; };
+layout(scalar, set = 0, binding = 8)  restrict readonly  buffer BufBlkTbl  { uint block_table[]; };
+
+layout(local_size_x = 128) in;
+
+float get_cos(uint dim_idx) {
+    return cos_sin[2u * dim_idx];
+}
+float get_sin(uint dim_idx) {
+    return cos_sin[2u * dim_idx + 1u];
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint head = gl_WorkGroupID.x;
+    if (tid >= pc.head_dim) return;
+
+    if (pc.q_pass == 1u) {
+        // --- Pass 1: Apply RoPE to Q ---
+        if (head >= pc.num_heads) return;
+        uint q_off = head * pc.head_dim;
+        float val = q_in[q_off + tid];
+
+        if (tid < pc.rotary_dim && pc.is_neox != 0u) {
+            // Neurion-style: swap and rotate pairs
+            if ((tid & 1u) == 0u) {
+                uint partner = tid + 1u;
+                float v_even = q_in[q_off + tid];
+                float v_odd  = q_in[q_off + partner];
+                float c = get_cos(tid);
+                float s = get_sin(tid);
+                q_out[q_off + tid] = v_even * c - v_odd * s;
+            } else {
+                uint partner = tid - 1u;
+                float v_even = q_in[q_off + partner];
+                float v_odd  = val;
+                float c = get_cos(partner);
+                float s = get_sin(partner);
+                q_out[q_off + tid] = v_even * s + v_odd * c;
+            }
+        } else if (tid < pc.rotary_dim && pc.is_neox == 0u) {
+            // GPT-J NeoX style: first half = dims 0..half-1, second half = dims half..rotary_dim-1
+            uint half_dim = pc.rotary_dim / 2u;
+            if (tid < half_dim) {
+                float v_first = val;
+                float v_second = q_in[q_off + half_dim + tid];
+                float c = get_cos(tid);
+                float s = get_sin(tid);
+                q_out[q_off + tid]          = v_first * c - v_second * s;
+                q_out[q_off + half_dim + tid]   = v_first * s + v_second * c;
+            }
+        } else {
+            // Beyond rotary_dim: copy as-is
+            q_out[q_off + tid] = val;
+        }
+
+    } else {
+        // --- Pass 0: Apply RoPE to K, write K and V to paged cache ---
+        if (head >= pc.num_kv_heads) return;
+        uint k_off = head * pc.head_dim;
+        float k_val = k_in[k_off + tid];
+        float v_val = v_in[k_off + tid];
+
+        // Get the position and block info for this KV head
+        uint pos = positions[head];
+        uint block_idx = pos / pc.block_size;
+        uint tok_in_blk = pos % pc.block_size;
+        uint physical_block = block_table[head * pc.max_blocks + block_idx];
+        uint cache_stride = pc.cache_head_dim;
+        uint cache_off = physical_block * pc.block_size * cache_stride + tok_in_blk * cache_stride;
+
+        // Apply RoPE to K (same logic as Q)
+        float k_rot = k_val;
+        if (tid < pc.rotary_dim && pc.is_neox != 0u) {
+            if ((tid & 1u) == 0u) {
+                uint partner = tid + 1u;
+                float v_even = k_in[k_off + tid];
+                float v_odd  = k_in[k_off + partner];
+                float c = get_cos(tid);
+                float s = get_sin(tid);
+                k_rot = v_even * c - v_odd * s;
+            } else {
+                uint partner = tid - 1u;
+                float v_even = k_in[k_off + partner];
+                float v_odd  = k_val;
+                float c = get_cos(partner);
+                float s = get_sin(partner);
+                k_rot = v_even * s + v_odd * c;
+            }
+        } else if (tid < pc.rotary_dim && pc.is_neox == 0u) {
+            uint half_dim = pc.rotary_dim / 2u;
+            if (tid < half_dim) {
+                float v_first = k_val;
+                float v_second = k_in[k_off + half_dim + tid];
+                float c = get_cos(tid);
+                float s = get_sin(tid);
+                k_rot = v_first * c - v_second * s;
+            }
+        }
+        // else: k_rot = k_val (no rotation, copy as-is)
+
+        // Write K and V to paged cache
+        k_cache[cache_off + tid] = k_rot;
+        v_cache[cache_off + tid] = v_val;
+    }
+}

@@ -9,6 +9,8 @@ static size_t dtype_size(VaistDType t) {
         case VAIST_F32: case VAIST_I32: return 4u;
         case VAIST_F64: return 8u;
         case VAIST_I8: case VAIST_U8: return 1u;
+        case VAIST_F16: return 2u;
+         case VAIST_DTYPE_Q8_0: return 0u;
         default: return 0u;
     }
 }

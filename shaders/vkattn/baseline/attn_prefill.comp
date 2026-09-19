@@ -1,0 +1,163 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : require
+#extension GL_EXT_scalar_block_layout : require
+
+/**
+ * Prefill (non-causal/causal) multi-head grouped-query attention.
+ *
+ * Computes: Attention(Q, K, V) = softmax(QK^T / sqrt(d)) * V
+ *
+ * Replaces: atom/model_ops/attention_ops.py:xformer_attention, atom/models/llama.py:LlamaAttention.forward_pre
+ *
+ * Bindings:
+ *   set=0, binding=0: Q  (f32, [sum_q * num_q_heads * head_dim])
+ *   set=0, binding=1: K  (f32, [sum_k * num_kv_heads * head_dim])
+ *   set=0, binding=2: V  (f32, [sum_k * num_kv_heads * head_dim])
+ *   set=0, binding=3: cu_seqlens_q (u32, [num_seqs+1]) — prefix sum of query token counts
+ *   set=0, binding=4: cu_seqlens_k (u32, [num_seqs+1]) — prefix sum of key token counts
+ *   set=0, binding=5: output (f32, [sum_q * num_q_heads * head_dim])
+ *   set=0, binding=6: scratch (f32, [max_local_seqlen_k]) — per-workgroup scratch buffer
+ *
+ * Push constants:
+ *   num_q_heads     — number of query heads
+ *   num_kv_heads    — number of KV heads
+ *   head_dim        — per-head dimension
+ *   scale           — attention scale (1/sqrt(head_dim))
+ *   num_seqs        — number of sequences in the batch
+ *   max_seqlen_k    — padded max key sequence length (sized scratch buffer)
+ *   causal          — if != 0, apply causal mask (k_pos <= q_pos only)
+ *   q_head          — which query head this invocation handles (0..num_q_heads-1)
+ *
+ * Dispatch: 1 workgroup per (sequence, q_head) pair.
+ *   gl_WorkGroupID.x = seq_idx * num_q_heads + q_head
+ *   gl_WorkGroupID.y = unused
+ * Threads: 32 per group (one per K element for small seqlens, grid-stride for large)
+ */
+
+layout(push_constant) uniform PC {
+    uint num_q_heads;
+    uint num_kv_heads;
+    uint head_dim;
+    float scale;
+    uint num_seqs;
+    uint max_seqlen_k;
+    uint causal;
+    uint q_head;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} pc;
+
+layout(scalar, set = 0, binding = 0) restrict readonly  buffer BufQ   { float q_data[]; };
+layout(scalar, set = 0, binding = 1) restrict readonly  buffer BufK   { float k_data[]; };
+layout(scalar, set = 0, binding = 2) restrict readonly  buffer BufV   { float v_data[]; };
+layout(scalar, set = 0, binding = 3) restrict readonly  buffer BufCSq  { uint cu_seqlens_q[]; };
+layout(scalar, set = 0, binding = 4) restrict readonly  buffer BufCSk  { uint cu_seqlens_k[]; };
+layout(scalar, set = 0, binding = 5) writeonly           buffer BufOut  { float out_data[]; };
+layout(scalar, set = 0, binding = 6)                     buffer BufScratch { float scratch[]; };
+
+layout(local_size_x = 32) in;
+
+shared float smem_scores[64];
+shared float smem_probs[64];
+shared float smem_max;
+shared float smem_sum;
+shared float sdata[32];
+
+uint get_kv_head(uint qh) {
+    uint q_per_kv = pc.num_q_heads / pc.num_kv_heads;
+    return qh / q_per_kv;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;
+    uint seq_idx = wg_id / pc.num_q_heads;
+    uint local_q_head = wg_id % pc.num_q_heads;
+
+    if (seq_idx >= pc.num_seqs) return;
+    if (local_q_head != pc.q_head) return;
+
+    uint q_start = cu_seqlens_q[seq_idx];
+    uint q_end   = cu_seqlens_q[seq_idx + 1u];
+    uint k_start = cu_seqlens_k[seq_idx];
+    uint k_end   = cu_seqlens_k[seq_idx + 1u];
+    uint seqlen_q = q_end - q_start;
+    uint seqlen_k = k_end - k_start;
+    uint kv_head  = get_kv_head(local_q_head);
+
+    // Process each query position in this (seq, head) group
+    for (uint qi = q_start; qi < q_end; qi++) {
+        uint q_global_idx = qi - q_start;  // local q index within this sequence
+        uint q_off = qi * pc.num_q_heads * pc.head_dim + local_q_head * pc.head_dim;
+
+        // Phase 1: Compute QK scores for all key positions
+        // Each thread handles its own K position(s) with grid-stride
+        for (uint ki = tid; ki < seqlen_k; ki += 32u) {
+            uint k_global = k_start + ki;
+            uint k_off = k_global * pc.num_kv_heads * pc.head_dim + kv_head * pc.head_dim;
+
+            float dot = 0.0;
+            for (uint d = 0u; d < pc.head_dim; d++) {
+                dot += q_data[q_off + d] * k_data[k_off + d];
+            }
+            float score = dot * pc.scale;
+
+            // Causal mask: only attend to keys at or before current query position
+            if (pc.causal != 0u && ki > q_global_idx) score = -1e30;
+
+            smem_scores[ki] = score;
+        }
+        barrier();
+
+        // Phase 2: Softmax — find row max
+        if (tid == 0u) {
+            smem_max = -1e30;
+            for (uint i = 0u; i < seqlen_k; i++) {
+                smem_max = max(smem_max, smem_scores[i]);
+            }
+        }
+        barrier();
+
+        // Phase 3: exp + accumulate sum (parallel with grid-stride)
+        float row_max = smem_max;
+        float local_sum = 0.0;
+        for (uint ki = tid; ki < seqlen_k; ki += 32u) {
+            float e = exp(smem_scores[ki] - row_max);
+            smem_probs[ki] = e;
+            local_sum += e;
+        }
+        sdata[tid] = local_sum;
+        barrier();
+
+        // Parallel reduction for sum
+        if (tid < 16u) sdata[tid] += sdata[tid + 16u];
+        barrier();
+        if (tid < 8u)  sdata[tid] += sdata[tid + 8u];
+        barrier();
+        if (tid < 4u)  sdata[tid] += sdata[tid + 4u];
+        barrier();
+        if (tid < 2u)  sdata[tid] += sdata[tid + 2u];
+        barrier();
+        if (tid < 1u)  sdata[tid] += sdata[tid + 1u];
+        barrier();
+
+        float inv_sum = (tid == 0u) ? (1.0 / sdata[0]) : 0.0;
+        // Broadcast inv_sum
+        if (tid == 0u) smem_sum = inv_sum;
+        barrier();
+        inv_sum = smem_sum;
+
+        // Phase 4: Weighted sum with V
+        for (uint d = tid; d < pc.head_dim; d += 32u) {
+            float acc = 0.0;
+            for (uint ki = 0u; ki < seqlen_k; ki++) {
+                uint k_global = k_start + ki;
+                uint k_off = k_global * pc.num_kv_heads * pc.head_dim + kv_head * pc.head_dim;
+                acc += smem_probs[ki] * inv_sum * v_data[k_off + d];
+            }
+            out_data[q_off + d] = acc;
+        }
+        barrier();
+    }
+}

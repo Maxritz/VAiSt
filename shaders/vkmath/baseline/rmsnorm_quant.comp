@@ -1,0 +1,230 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+
+/**
+ * Fused RMSNorm + quantization shader.
+ *
+ * Computes per-row RMS norm: normed = in * weight * rsqrt(mean(in^2) + eps)
+ * then quantizes to the specified format.
+ *
+ * Replaces: atom/model_ops/quant_ops.py:quantize_fp4, quantize_fp8, quantize_q8_0,
+ *           atom/model_ops/norm_ops.py:rms_norm
+ *
+ * Bindings:
+ *   set=0, binding=0: input tensor  (f32, [num_rows * num_cols])
+ *   set=0, binding=1: weight tensor (f32, [num_cols])
+ *   set=0, binding=2: scale buffer  (u32, [num_scale_blocks]) — written by this shader
+ *   set=0, binding=3: quantized output (uint8, layout depends on quant_type)
+ *   set=0, binding=4: f32 reference output (f32, [num_rows * num_cols]) — always written
+ *
+ * Push constants:
+ *   num_rows       — rows to process
+ *   num_cols       — columns per row (hidden dim)
+ *   eps            — RMSNorm epsilon (typically 1e-6)
+ *   quant_type     — 0=MXFP4, 1=FP8_E4M3, 2=Q8_0, 3=f32(none)
+ *   ld_in_bytes    — byte stride between rows in input (0 => num_cols*4)
+ *   ld_out_bytes   — byte stride between rows in quantized output (0 => computed)
+ *   ld_ref_bytes   — byte stride between rows in f32 ref (0 => num_cols*4)
+ */
+
+layout(push_constant) uniform PC {
+    uint  num_rows;
+    uint  num_cols;
+    float eps;
+    uint  quant_type;
+    uint  ld_in_bytes;
+    uint  ld_out_bytes;
+    uint  ld_ref_bytes;
+    uint  _pad;
+} pc;
+
+layout(scalar, set = 0, binding = 0)  restrict readonly  buffer BufIn  { float  data_in[]; };
+layout(scalar, set = 0, binding = 1)  restrict readonly  buffer BufWt  { float  data_wt[]; };
+layout(scalar, set = 0, binding = 2) buffer BufScale { uint scale_out[]; };
+layout(scalar, set = 0, binding = 3)  writeonly          buffer BufQuant  { uint8_t data_q[]; };
+layout(scalar, set = 0, binding = 4)                     buffer BufRef    { float  data_ref[]; };
+
+shared float sdata[256];
+
+uint get_ld_in() { return (pc.ld_in_bytes > 0u) ? pc.ld_in_bytes : pc.num_cols * 4u; }
+uint get_ld_out() {
+    if (pc.ld_out_bytes > 0u) return pc.ld_out_bytes;
+    if (pc.quant_type == 0u) return ((pc.num_cols + 1u) / 2u + 7u) & ~7u;
+    return pc.num_cols;
+}
+
+uint float_to_e8m0(float v) {
+    if (v <= 0.0) return 1u;
+    int exp;
+    frexp(v, exp);
+    int stored = exp + 127;
+    if (stored < 1) stored = 1;
+    if (stored > 255) stored = 255;
+    return uint(stored);
+}
+
+float e8m0_to_float(uint bits) {
+    if (bits == 0u) return 1.0;
+    int exp = int(bits) - 127;
+    return ldexp(1.0, exp);
+}
+
+uint float_to_f4(float v) {
+    // E2M1: {sign, e2, m1} => values 0, 0.5, 1, 1.5, 2, 3, 4, 6 (and negatives)
+    if (v == 0.0) return 0u;
+    uint sign_bit = 0u;
+    if (v < 0.0) { sign_bit = 8u; v = -v; }
+    v = min(v, 6.0);
+    float cand0=0.0, cand1=0.5, cand2=1.0, cand3=1.5, cand4=2.0, cand5=3.0, cand6=4.0, cand7=6.0;
+    float err0=abs(v-cand0), err1=abs(v-cand1), err2=abs(v-cand2), err3=abs(v-cand3);
+    float err4=abs(v-cand4), err5=abs(v-cand5), err6=abs(v-cand6), err7=abs(v-cand7);
+    uint best = 0u; float best_err = err0;
+    if(err1<best_err){best=1u;best_err=err1;}
+    if(err2<best_err){best=2u;best_err=err2;}
+    if(err3<best_err){best=3u;best_err=err3;}
+    if(err4<best_err){best=4u;best_err=err4;}
+    if(err5<best_err){best=5u;best_err=err5;}
+    if(err6<best_err){best=6u;best_err=err6;}
+    if(err7<best_err){best=7u;best_err=err7;}
+    return sign_bit | best;
+}
+
+uint float_to_e4m3(float v) {
+    if (v == 0.0) return 0u;
+    uint sign_bit = 0u;
+    if (v < 0.0) { sign_bit = 128u; v = -v; }
+    v = min(v, 448.0);
+    int exp;
+    float m = frexp(v, exp);
+    int e = exp + 7;
+    if (e < 0) e = 0;
+    if (e > 15) e = 15;
+    uint mant = uint(round(m * 8.0)) & 7u;
+    if (mant == 8u) { mant = 0u; e++; if (e > 15) return sign_bit | 255u; }
+    return sign_bit | (uint(e) << 3) | mant;
+}
+
+layout(local_size_x = 256) in;
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    if (row >= pc.num_rows) return;
+    uint tid = gl_LocalInvocationID.x;
+
+    uint in_stride_el = get_ld_in() / 4u;
+    uint ref_stride_el = (pc.ld_ref_bytes > 0u) ? (pc.ld_ref_bytes / 4u) : pc.num_cols;
+    uint base_in = row * in_stride_el;
+    uint base_ref = row * ref_stride_el;
+
+    // Phase 1: RMSNorm mean-square reduction
+    float ss = 0.0;
+    for (uint i = tid; i < pc.num_cols; i += 256u) {
+        float v = data_in[base_in + i];
+        ss += v * v;
+    }
+    sdata[tid] = ss;
+    barrier();
+
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        barrier();
+    }
+    float rms_scale = (tid == 0u) ? inversesqrt(sdata[0] / float(pc.num_cols) + pc.eps) : 0.0;
+    barrier();
+
+    // Phase 2: normalize + write f32 reference
+    for (uint i = tid; i < pc.num_cols; i += 256u) {
+        float v = data_in[base_in + i] * rms_scale * (i < pc.num_cols ? data_wt[i] : 1.0);
+        data_ref[base_ref + i] = v;
+    }
+    barrier();
+
+    uint out_stride_bytes = get_ld_out();
+    uint base_q = row * out_stride_bytes;
+
+    if (pc.quant_type == 0u) {
+        // --- MXFP4: per-32-element block ---
+        uint num_blocks = (pc.num_cols + 31u) / 32u;
+        for (uint blk = 0u; blk < num_blocks; blk++) {
+            uint blk_start = blk * 32u;
+            uint blk_end = min(blk_start + 32u, pc.num_cols);
+            // Compute max abs for this block
+            float blk_max = 0.0;
+            for (uint j = blk_start + tid; j < blk_end; j += 256u) {
+                blk_max = max(blk_max, abs(data_ref[base_ref + j]));
+            }
+            sdata[tid] = blk_max;
+            barrier();
+            for (uint s = 128u; s > 0u; s >>= 1u) {
+                if (tid < s) sdata[tid] = max(sdata[tid], sdata[tid + s]);
+                barrier();
+            }
+            if (tid == 0u) {
+                scale_out[blk * pc.num_rows + row] = float_to_e8m0(sdata[0]);
+            }
+            barrier();
+            float fscale = e8m0_to_float(scale_out[blk * pc.num_rows + row]);
+            for (uint j = blk_start + tid; j < blk_end; j += 256u) {
+                if (j < pc.num_cols) {
+                    float qval = (fscale > 0.0) ? (data_ref[base_ref + j] / fscale) : 0.0;
+                    uint f4 = float_to_f4(qval);
+                    uint byte_idx = j / 2u;
+                    uint lane = j % 2u;
+                    if (lane == 0u) {
+                        data_q[base_q + byte_idx] = uint8_t(f4);
+                    } else {
+                        data_q[base_q + byte_idx] |= uint8_t(f4 << 4u);
+                    }
+                }
+            }
+        }
+    } else if (pc.quant_type == 1u) {
+        // --- FP8 (E4M3): per-row scale ---
+        if (tid == 0u) {
+            float row_max = 0.0;
+            for (uint i = 0u; i < pc.num_cols; i++) {
+                row_max = max(row_max, abs(data_ref[base_ref + i]));
+            }
+            scale_out[row] = floatBitsToUint(row_max / 448.0f);
+        }
+        barrier();
+        float fp8_scale = uintBitsToFloat(scale_out[row]);
+        for (uint i = tid; i < pc.num_cols; i += 256u) {
+            float qval = (fp8_scale > 0.0) ? (data_ref[base_ref + i] / fp8_scale) : 0.0;
+            data_q[base_q + i] = uint8_t(float_to_e4m3(qval));
+        }
+    } else if (pc.quant_type == 2u) {
+        // --- Q8_0: per-32-element block ---
+        uint num_blocks = (pc.num_cols + 31u) / 32u;
+        for (uint blk = 0u; blk < num_blocks; blk++) {
+            uint blk_start = blk * 32u;
+            uint blk_end = min(blk_start + 32u, pc.num_cols);
+            float blk_max = 0.0;
+            for (uint j = tid; j < 32u; j += 256u) {
+                uint gi = blk_start + j;
+                if (gi < pc.num_cols) blk_max = max(blk_max, abs(data_ref[base_ref + gi]));
+            }
+            sdata[tid] = blk_max;
+            barrier();
+            for (uint s = 128u; s > 0u; s >>= 1u) {
+                if (tid < s) sdata[tid] = max(sdata[tid], sdata[tid + s]);
+                barrier();
+            }
+            if (tid == 0u) {
+                scale_out[row * num_blocks + blk] = floatBitsToUint(sdata[0] > 0.0 ? sdata[0] / 127.0f : 1.0f);
+            }
+            barrier();
+            float q8_scale = uintBitsToFloat(scale_out[row * num_blocks + blk]);
+            for (uint j = blk_start + tid; j < blk_end; j += 256u) {
+                if (j < pc.num_cols) {
+                    int q = int(round(data_ref[base_ref + j] / q8_scale));
+                    q = clamp(q, -128, 127);
+                    data_q[base_q + blk * 36u + 4u + (j - blk_start)] = uint8_t(uint(q) & 0xFFu);
+                }
+            }
+        }
+    }
+    // quant_type 3 (f32 passthrough): data_ref already has normalized values
+}

@@ -40,7 +40,7 @@ int main(int argc, char **argv){
  {unsigned char q[256];ok&=check(vaist_quantize_f32(VAIST_Q8_0,a,4,q,sizeof(q),&used)==VAIST_OK,"quant");ok&=check(vaist_dequantize_f32(VAIST_Q8_0,q,used,o,4)==VAIST_OK&&fabsf(o[2]-3)<0.05f,"dequant");}
  {VaistGraph*g=NULL;ok&=check(vaist_graph_create(&g)==VAIST_OK,"graph_create");ok&=check(vaist_graph_add_binary(g,addop,&id)==VAIST_OK,"graph_add");ok&=check(vaist_graph_compile(g)==VAIST_OK,"graph_compile");ok&=check(vaist_graph_execute(g,a,b,o,4)==VAIST_OK&&o[0]==5,"graph_execute");vaist_graph_destroy(g);}
  {VaistKVCache*k=NULL;ok&=check(vaist_kv_create(4,2,&k)==VAIST_OK,"kv_create");ok&=check(vaist_kv_write(k,0,a)==VAIST_OK&&vaist_kv_length(k)==1,"kv_write");ok&=check(vaist_kv_read(k,0,o)==VAIST_OK&&o[1]==2,"kv_read");vaist_kv_destroy(k);}
- {VaistTokenizer*t=NULL;ok&=check(vaist_tokenizer_create(&t)==VAIST_OK,"tok_create");ok&=check(vaist_tokenize_bytes("abc",tok,8,&count)==VAIST_OK&&count==3&&tok[0]==97,"tokenize");vaist_tokenizer_destroy(t);}
+  {VaistTokenizer*t=NULL;ok&=check(vaist_tokenizer_create(VAIST_TOKENIZER_BYTES,NULL,&t)==VAIST_OK,"tok_create");ok&=check(vaist_tokenize_bytes("abc",tok,8,&count)==VAIST_OK&&count==3&&tok[0]==97,"tokenize");vaist_tokenizer_destroy(t);}
  {VaistEngine*e=NULL;VaistSession*s=NULL;ok&=check(vaist_engine_create(&e)==VAIST_OK,"engine");ok&=check(vaist_session_create(e,&s)==VAIST_OK,"session");ok&=check(vaist_generate(s,"x",3,text,sizeof(text))==VAIST_OK&&text[0]=='x',"generate");vaist_session_destroy(s);vaist_engine_destroy(e);}
  {float c;ok&=check(vaist_vector_cosine(a,a,4,&c)==VAIST_OK&&fabsf(c-1)<1e-5f,"cosine");}
  {VaistCommunicator c;ok&=check(vaist_comm_init(&c,0,1)==VAIST_OK&&vaist_allreduce_sum_f32(&c,a,4)==VAIST_OK,"distributed");}

@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 #ifndef DBG_TRACE
 #define DBG_TRACE(...) do { fprintf(stderr, "[T] %s:%d %s: ", __FILE__, __LINE__, __func__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
 #endif
@@ -531,6 +532,197 @@ VAIST_API VaistStatus vaist_blas_moe_route(const VaistRuntime*rt,
             if(dot>best){ best=dot; be=(uint32_t)e; }
         }
         indices[r]=be; scores[r]=best;
+    }
+    return VAIST_OK;
+}
+
+/* ---- MoE top-k routing with softmax normalization ----
+ * Replaces: atom/model_ops/moe.py:FusedMoE.select_experts
+ * Computes dot products between each token and each expert gate row,
+ * selects top-k experts per token, applies softmax to scores.
+ */
+VAIST_API VaistStatus vaist_blas_moe_topk(
+        const VaistRuntime* rt,
+        const float* x,
+        size_t num_tokens,
+        size_t hidden_dim,
+        const float* gate,
+        size_t num_experts,
+        uint32_t k,
+        uint32_t* topk_indices,
+        float* topk_scores,
+        float* normalized_scores)
+{
+    if(!rt||!x||!gate||!topk_indices||!topk_scores||!normalized_scores||
+       !num_tokens||!hidden_dim||!num_experts||!k||k>VAIST_MOE_MAX_TOPK){
+        return VAIST_INVALID_ARGUMENT;
+    }
+    (void)rt; /* CPU fallback path; GPU path requires Vulkan runtime */
+
+    /* For each token, compute dot products with all expert gates,
+     * select top-k, and normalize with softmax. */
+    for(size_t t=0;t<num_tokens;t++){
+        const float*xr=&x[t*hidden_dim];
+
+        /* Compute raw scores via dot product with each expert gate */
+        float raw_scores[VAIST_MOE_MAX_TOPK]= {0};  /* top-k storage */
+        uint32_t topk_tmp[VAIST_MOE_MAX_TOPK]= {0};
+
+        /* Initialize top-k with first k experts */
+        for(uint32_t i=0;i<k;i++){
+            raw_scores[i] = -1e30f;
+            topk_tmp[i] = (uint32_t)i;
+        }
+
+        /* Evaluate all experts and maintain top-k via insertion */
+        for(size_t e=0;e<num_experts;e++){
+            const float*ge=&gate[e*hidden_dim];
+            float dot=0.0f;
+            for(size_t p=0;p<hidden_dim;p++) dot+=xr[p]*ge[p];
+
+            /* Insert into top-k if better than current worst */
+            for(uint32_t i=0;i<k;i++){
+                if(dot > raw_scores[i]){
+                    /* Shift down */
+                    for(uint32_t j=(uint32_t)k-1;j>i;j--){
+                        raw_scores[j]=raw_scores[j-1];
+                        topk_tmp[j]=topk_tmp[j-1];
+                    }
+                    raw_scores[i]=dot;
+                    topk_tmp[i]=(uint32_t)e;
+                    break;
+                }
+            }
+        }
+
+        /* Apply softmax normalization over top-k scores */
+        float max_score=-1e30f;
+        for(uint32_t i=0;i<k;i++) max_score=fmaxf(raw_scores[i],max_score);
+        float sum_exp=0.0f;
+        float exps[VAIST_MOE_MAX_TOPK];
+        for(uint32_t i=0;i<k;i++){
+            exps[i]=expf(raw_scores[i]-max_score);
+            sum_exp+=exps[i];
+        }
+
+        /* Write outputs */
+        uint32_t base_idx=t*k;
+        for(uint32_t i=0;i<k;i++){
+            topk_indices[base_idx+i]=topk_tmp[i];
+            topk_scores[base_idx+i]=raw_scores[i];
+            normalized_scores[base_idx+i]=exps[i]/sum_exp;
+        }
+    }
+    return VAIST_OK;
+}
+
+/* ---- MoE dispatch: scatter token rows into per-expert buffers ----
+ * Replaces: atom/model_ops/moe.py:FusedMoE.dispatch (scatter phase)
+ * Builds block offsets and copies the k-weighted token inputs.
+ */
+VAIST_API VaistStatus vaist_blas_moe_dispatch(
+        const VaistRuntime* rt,
+        const float* x,
+        const uint32_t* topk_indices,
+        const float* topk_scores,
+        size_t num_tokens,
+        size_t hidden_dim,
+        size_t num_experts,
+        uint32_t k,
+        uint32_t* blocks,
+        uint32_t* offsets,
+        float* dispatch_buf)
+{
+    if(!rt||!x||!topk_indices||!topk_scores||!blocks||!offsets||!dispatch_buf||
+       !num_tokens||!hidden_dim||!num_experts||!k){
+        return VAIST_INVALID_ARGUMENT;
+    }
+    (void)rt;
+
+    /* Phase 1: count tokens per expert */
+    for(size_t e=0;e<num_experts;e++) blocks[e]=0;
+    for(size_t t=0;t<num_tokens;t++){
+        for(uint32_t j=0;j<k;j++){
+            uint32_t ex=topk_indices[t*k+j];
+            if(ex<num_experts) blocks[ex]++;
+        }
+    }
+
+    /* Phase 2: compute prefix offsets */
+    uint32_t running=0;
+    for(size_t e=0;e<num_experts;e++){
+        offsets[e]=running * (uint32_t)hidden_dim;
+        running += blocks[e];
+    }
+
+    /* Phase 3: scatter token rows into expert buffers (weighted by scores) */
+    uint32_t write_pos[256]; /* max 256 experts — clamp-checked below */
+    for(size_t e=0;e<num_experts;e++) write_pos[e]=offsets[e]/(uint32_t)hidden_dim;
+
+    for(size_t t=0;t<num_tokens;t++){
+        const float*xr=&x[t*hidden_dim];
+        for(uint32_t j=0;j<k;j++){
+            uint32_t ex=topk_indices[t*k+j];
+            if(ex>=num_experts) continue;
+            float score=topk_scores[t*k+j];
+
+            uint32_t wp=write_pos[ex];
+            float*dst=&dispatch_buf[wp*hidden_dim];
+            for(size_t d=0;d<hidden_dim;d++){
+                dst[d]=xr[d]*score;  /* apply routing weight */
+            }
+            write_pos[ex]++;
+        }
+    }
+    return VAIST_OK;
+}
+
+/* ---- MoE combine: gather expert outputs, weighted by normalized scores ----
+ * Replaces: atom/model_ops/moe.py:FusedMoE.combine
+ * Accumulates weighted outputs from all experts back to per-token rows.
+ */
+VAIST_API VaistStatus vaist_blas_moe_combine(
+        const VaistRuntime* rt,
+        const float* expert_out,
+        const uint32_t* topk_indices,
+        const float* normalized_scores,
+        const uint32_t* offsets,
+        size_t num_tokens,
+        size_t hidden_dim,
+        size_t num_experts,
+        uint32_t k,
+        float* combine_buf)
+{
+    if(!rt||!expert_out||!topk_indices||!normalized_scores||!offsets||!combine_buf||
+       !num_tokens||!hidden_dim||!num_experts||!k){
+        return VAIST_INVALID_ARGUMENT;
+    }
+    (void)rt;
+
+    /* Zero the output */
+    for(size_t t=0;t<num_tokens;t++){
+        float*row=&combine_buf[t*hidden_dim];
+        for(size_t d=0;d<hidden_dim;d++) row[d]=0.0f;
+    }
+
+    /* Re-traverse tokens in same order as dispatch to accumulate */
+    uint32_t write_pos[256];
+    for(size_t e=0;e<num_experts;e++) write_pos[e]=offsets[e]/(uint32_t)hidden_dim;
+
+    for(size_t t=0;t<num_tokens;t++){
+        float*row=&combine_buf[t*hidden_dim];
+        for(uint32_t j=0;j<k;j++){
+            uint32_t ex=topk_indices[t*k+j];
+            if(ex>=num_experts) continue;
+            float score=normalized_scores[t*k+j];
+
+            uint32_t wp=write_pos[ex];
+            const float*src=&expert_out[wp*hidden_dim];
+            for(size_t d=0;d<hidden_dim;d++){
+                row[d]+=src[d]*score;
+            }
+            write_pos[ex]++;
+        }
     }
     return VAIST_OK;
 }

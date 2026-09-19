@@ -72,6 +72,72 @@ VAIST_API VaistStatus vaist_blas_moe_route(const VaistRuntime*rt,
         const float*gate,size_t num_experts,
         uint32_t*indices,float*scores);
 
+/*
+ * MoE (Mixture of Experts) dispatch — full top-k pipeline.
+ *
+ * Replaces: atom/model_ops/moe.py:FusedMoE (top-k routing + expert dispatch),
+ *           atom/models/deepseek_v4.py:MoEBlock (routed experts + shared expert)
+ *
+ * Three-stage API:
+ *   1. vaist_blas_moe_topk   — compute top-k indices+scores (softmax-normalized)
+ *   2. vaist_blas_moe_dispatch — scatter token rows into expert buffers
+ *   3. (caller runs per-expert GEMMs)
+ *   4. vaist_blas_moe_combine  — gather weighted outputs back to per-token rows
+ *
+ * Data layouts:
+ *   x:              (num_tokens, hidden_dim) row-major f32
+ *   gate:           (num_experts, hidden_dim) row-major f32
+ *   topk_indices:   (num_tokens, k) uint32 expert IDs
+ *   topk_scores:    (num_tokens, k) raw f32 scores
+ *   normalized_scores: (num_tokens, k) softmax-normalized f32
+ *   blocks:         (num_experts) token count per expert
+ *   offsets:        (num_experts) byte offset into dispatch_buf per expert
+ *   dispatch_buf:   (sum_blocks * hidden_dim) scattered+weighted token inputs
+ *   expert_out:     (sum_blocks * hidden_dim) per-expert GEMM outputs
+ *   combine_buf:    (num_tokens * hidden_dim) final combined output
+ */
+#define VAIST_MOE_MAX_TOPK 8u
+
+VAIST_API VaistStatus vaist_blas_moe_topk(
+        const VaistRuntime* rt,
+        const float* x,
+        size_t num_tokens,
+        size_t hidden_dim,
+        const float* gate,
+        size_t num_experts,
+        uint32_t k,
+        uint32_t* topk_indices,
+        float* topk_scores,
+        float* normalized_scores
+);
+
+VAIST_API VaistStatus vaist_blas_moe_dispatch(
+        const VaistRuntime* rt,
+        const float* x,
+        const uint32_t* topk_indices,
+        const float* topk_scores,
+        size_t num_tokens,
+        size_t hidden_dim,
+        size_t num_experts,
+        uint32_t k,
+        uint32_t* blocks,
+        uint32_t* offsets,
+        float* dispatch_buf
+);
+
+VAIST_API VaistStatus vaist_blas_moe_combine(
+        const VaistRuntime* rt,
+        const float* expert_out,
+        const uint32_t* topk_indices,
+        const float* normalized_scores,
+        const uint32_t* offsets,
+        size_t num_tokens,
+        size_t hidden_dim,
+        size_t num_experts,
+        uint32_t k,
+        float* combine_buf
+);
+
 /* Pick the best path now that device caps are available. */
 VAIST_API VaistComputePath vaist_blas_best_path(const VaistRuntime*rt,
         size_t m,size_t k,size_t n,VaistWeightFormat wfmt);
