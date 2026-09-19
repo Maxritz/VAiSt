@@ -292,6 +292,7 @@ set(VAIST_SHADERS
   vkmath/baseline/silu_mul_f32.comp
   vkmath/baseline/add_rmsnorm_f32.comp
    vkmath/baseline/rope_cache_fused.comp
+   vkmath/baseline/rope_cache_fp8.comp
    vkmath/baseline/fused_kv_rmsnorm_f32.comp
    vkblas/baseline/qgemm_mxfp4.comp
   vkblas/baseline/qgemm_mxfp8.comp

@@ -1,0 +1,162 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+
+/**
+ * Fused RoPE + paged KV cache write with FP8 quantization (per-token dynamic).
+ *
+ * PV2 KV path: applies rotary positional embedding to K, writes both RoPE'd K
+ * and raw V into a paged cache in FP8 (E4M3) format. Per-token dynamic quantization:
+ * each KV head workgroup computes the row max-abs for both K and V, derives a
+ * single FP8 scale factor, then quantizes all elements.
+ *
+ * This is the per-token quantization path from AITER's
+ * reshape_and_cache_with_pertoken_quant (base_attention.py:263).
+ *
+ * Replaces: aiter.reshape_and_cache_with_pertoken_quant
+ *
+ * Bindings:
+ *   set=0, binding=0:  K  (f32, [num_kv_heads * head_dim]) — input K
+ *   set=0, binding=1:  V  (f32, [num_kv_heads * head_dim]) — input V
+ *   set=0, binding=2:  position (u32, [num_kv_heads])
+ *   set=0, binding=3:  cos/sin cache (f32, [max_rotary_dim * 2])
+ *   set=0, binding=4:  K_cache (uint8, paged) — fp8 data
+ *   set=0, binding=5:  V_cache (uint8, paged) — fp8 data
+ *   set=0, binding=6:  K_scale (fp32, paged) — per-token dequant scale
+ *   set=0, binding=7:  V_scale (fp32, paged)
+ *   set=0, binding=8:  block_table (u32, [num_kv_heads * max_blocks])
+ *
+ * Push constants:
+ *   head_dim     — elements per head (e.g. 128 or 256)
+ *   rotary_dim   — RoPE dimensions (even, <= head_dim)
+ *   num_kv_heads — number of KV heads
+ *   block_size   — tokens per cache block
+ *   max_blocks   — max blocks per KV head in block_table
+ *   cache_head_dim— padded head_dim in cache (may differ for alignment)
+ *   is_neox      — 1 = Neurion-style interleaved RoPE, 0 = GPT-NeoX
+ */
+
+layout(push_constant) uniform PC {
+    uint head_dim;
+    uint rotary_dim;
+    uint num_kv_heads;
+    uint block_size;
+    uint max_blocks;
+    uint cache_head_dim;
+    uint is_neox;
+    uint _pad;
+} pc;
+
+layout(scalar, set = 0, binding = 0)  restrict readonly  buffer BufK     { float k_in[]; };
+layout(scalar, set = 0, binding = 1)  restrict readonly  buffer BufV     { float v_in[]; };
+layout(scalar, set = 0, binding = 2)  restrict readonly  buffer BufPos   { uint positions[]; };
+layout(scalar, set = 0, binding = 3)  restrict readonly  buffer BufCosSin { float cos_sin[]; };
+layout(scalar, set = 0, binding = 4)  writeonly          buffer BufKCache { uint8_t k_cache[]; };
+layout(scalar, set = 0, binding = 5)  writeonly          buffer BufVCache { uint8_t v_cache[]; };
+layout(scalar, set = 0, binding = 6)  writeonly          buffer BufKScale { float k_scale[]; };
+layout(scalar, set = 0, binding = 7)  writeonly          buffer BufVScale { float v_scale[]; };
+layout(scalar, set = 0, binding = 8)  restrict readonly  buffer BufBlkTbl { uint block_table[]; };
+
+layout(local_size_x = 256) in;
+
+shared float s_max_k;
+shared float s_max_v;
+
+float get_cos(uint i) { return cos_sin[2u * i]; }
+float get_sin(uint i) { return cos_sin[2u * i + 1u]; }
+
+uint float_to_e4m3(float v) {
+    if (v == 0.0) return 0u;
+    uint sign_bit = 0u;
+    if (v < 0.0) { sign_bit = 128u; v = -v; }
+    v = min(v, 448.0);
+    int exp;
+    float m = frexp(v, exp);
+    int e = exp + 7;
+    if (e < 0) e = 0;
+    if (e > 15) e = 15;
+    uint mant = uint(round(m * 8.0)) & 7u;
+    if (mant == 8u) { mant = 0u; e++; if (e > 15) return sign_bit | 255u; }
+    return sign_bit | (uint(e) << 3) | mant;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint head = gl_WorkGroupID.x;
+    if (head >= pc.num_kv_heads) return;
+
+    uint k_off = head * pc.head_dim;
+
+    // Phase 1: Thread 0 computes max-abs and writes scale
+    if (tid == 0u) {
+        float max_k = 0.0, max_v = 0.0;
+        for (uint i = 0u; i < pc.head_dim; i++) {
+            float kv = k_in[k_off + i];
+            float k_rot = kv;
+            if (i < pc.rotary_dim && pc.is_neox != 0u) {
+                if ((i & 1u) == 0u) {
+                    float c = get_cos(i), s = get_sin(i);
+                    k_rot = k_in[k_off + i] * c - k_in[k_off + (i + 1u)] * s;
+                } else {
+                    float c = get_cos(i - 1u), s = get_sin(i - 1u);
+                    k_rot = k_in[k_off + (i - 1u)] * s + k_in[k_off + i] * c;
+                }
+            } else if (i < pc.rotary_dim && pc.is_neox == 0u) {
+                uint half_dim = pc.rotary_dim / 2u;
+                if (i < half_dim) {
+                    float c = get_cos(i), s = get_sin(i);
+                    k_rot = k_in[k_off + i] * c - k_in[k_off + half_dim + i] * s;
+                }
+            }
+            if (abs(k_rot) > max_k) max_k = abs(k_rot);
+            if (abs(k_in[k_off + i]) > max_v) max_v = abs(k_in[k_off + i]);
+        }
+        s_max_k = (max_k > 0.0f) ? max_k / 448.0f : 1.0f;
+        s_max_v = (max_v > 0.0f) ? max_v / 448.0f : 1.0f;
+
+        // Write scales
+        uint pos = positions[head];
+        uint block_idx = pos / pc.block_size;
+        uint tok_in_blk = pos % pc.block_size;
+        uint phys = block_table[head * pc.max_blocks + block_idx];
+        uint cache_off = phys * pc.block_size * pc.cache_head_dim + tok_in_blk * pc.cache_head_dim;
+
+        k_scale[cache_off] = s_max_k;
+        v_scale[cache_off] = s_max_v;
+    }
+    barrier();
+
+    // Phase 2: All threads apply RoPE to K, quantize, and write
+    if (tid < pc.head_dim) {
+        float kv = k_in[k_off + tid];
+        float k_rot = kv;
+
+        if (tid < pc.rotary_dim && pc.is_neox != 0u) {
+            if ((tid & 1u) == 0u) {
+                float c = get_cos(tid), s = get_sin(tid);
+                k_rot = k_in[k_off + tid] * c - k_in[k_off + tid + 1u] * s;
+            } else {
+                float c = get_cos(tid - 1u), s = get_sin(tid - 1u);
+                k_rot = k_in[k_off + tid - 1u] * s + k_in[k_off + tid] * c;
+            }
+        } else if (tid < pc.rotary_dim && pc.is_neox == 0u) {
+            uint half_dim = pc.rotary_dim / 2u;
+            if (tid < half_dim) {
+                float c = get_cos(tid), s = get_sin(tid);
+                k_rot = k_in[k_off + tid] * c - k_in[k_off + half_dim + tid] * s;
+            }
+        }
+
+        float v_val = v_in[k_off + tid];
+
+        uint pos = positions[head];
+        uint block_idx = pos / pc.block_size;
+        uint tok_in_blk = pos % pc.block_size;
+        uint phys = block_table[head * pc.max_blocks + block_idx];
+        uint cache_off = phys * pc.block_size * pc.cache_head_dim + tok_in_blk * pc.cache_head_dim;
+
+        k_cache[cache_off + tid] = uint8_t(float_to_e4m3(k_rot / s_max_k));
+        v_cache[cache_off + tid] = uint8_t(float_to_e4m3(v_val / s_max_v));
+    }
+}
