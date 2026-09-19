@@ -177,21 +177,22 @@ vaist_attn_ctx* vaist_attn_create(const VaistRuntime* rt, const vaist_attn_cfg* 
     return NULL;
 #endif
 
-    /* 2. Descriptor set layout (5 bindings: q, k_cache, v_cache, block_table, out) */
-    VkDescriptorSetLayoutBinding binds[5] = {0};
-    for (int i = 0; i < 5; i++){
+    /* 2. Descriptor set layout (7 bindings: q, k_cache, v_cache, block_table, out,
+     *    draft_tokens, active_tokens — last 2 only used by spec_verify, harmless for flash_decode) */
+    VkDescriptorSetLayoutBinding binds[7];
+    for (int i = 0; i < 7; i++){
         binds[i].binding = (uint32_t)i;
         binds[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         binds[i].descriptorCount = 1;
         binds[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo dslci = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    dslci.bindingCount = 5;
+    dslci.bindingCount = 7;
     dslci.pBindings = binds;
     ATT_CHECK(ctx->vk.CreateDescriptorSetLayout(ctx->device, &dslci, NULL, &ctx->desc_set_layout));
 
-    /* 3. Pipeline layout + 32-byte push constant (8 x uint32) */
-    VkPushConstantRange pcr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, 32 };
+    /* 3. Pipeline layout + 48-byte push constant (10 x uint32 or 1 float + 9 uint32) */
+    VkPushConstantRange pcr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, 48 };
     VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
     plci.setLayoutCount = 1;
     plci.pSetLayouts = &ctx->desc_set_layout;
@@ -226,7 +227,7 @@ vaist_attn_ctx* vaist_attn_create(const VaistRuntime* rt, const vaist_attn_cfg* 
 #endif
 
     /* 6. Descriptor pool + set */
-    VkDescriptorPoolSize dps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 };
+    VkDescriptorPoolSize dps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7 };
     VkDescriptorPoolCreateInfo dpci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     dpci.maxSets = 1;
     dpci.poolSizeCount = 1;

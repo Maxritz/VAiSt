@@ -20,6 +20,7 @@ typedef struct {
     uint32_t    block_size;       // tokens per page (1, 16, 64...)
     uint32_t    max_blocks;       // max pages per sequence
     uint32_t    total_blocks;     // total cache pages in device memory
+    uint32_t    batch;            // batch size (for spec_verify dispatch)
     /* --- Hierarchical sparse attention (CSA2) --- */
     uint32_t    sparse_ratio;     // 0-100: fraction of tokens to attend to (0 = dense)
     uint32_t    block_stride;     // block size for hierarchical scoring (default: 16)
@@ -88,20 +89,22 @@ VAIST_API VaistStatus vaist_attn_spec_verify(vaist_attn_ctx* ctx,
  *   2. Score tokens only within selected blocks (fine)
  *   3. Apply softmax + weighted sum
  *
+ * \note USAGE: GPU compute primitive — does NOT dispatch from model forward
+ *       pass automatically. Requires cfg.sparse_ratio > 0.
+ */
+/**
+ * Uses the HISA pattern (hierarchical indexing) to reduce long-context scoring:
+ *   1. Score all blocks (coarse), select top-K blocks
+ *   2. Score tokens only within selected blocks (fine)
+ *   3. Apply softmax + weighted sum
+ *
  * This replaces full O(N^2) attention with O(N * block_size + K_blocks * block_size)
  * for the scoring phase.
- *
- * \note USAGE: This is a GPU compute primitive — it does NOT dispatch automatically
- *       from any model's forward pass. The caller (model layer) must invoke this
- *       from its attention implementation. Requires Vulkan device; returns
- *       VAIST_DEVICE_ERROR if unavailable (fall back to dense attn or CPU).
- *       The shader requires cfg.sparse_ratio > 0; if 0, call vaist_attn_flashDecode
- *       instead for dense attention.
  *
  * q:              [num_q_heads * head_dim] f32 queries
  * k_cache/v_cache: paged KV cache
  * block_tables:   page indices
- * top_k_blocks:   number of blocks to retrieve per head
+ * top_k_blocks:   output [num_heads] number of blocks to retrieve per head
  * selected_blocks: output [num_heads * top_k_blocks] block indices
  * seqlen:         context length
  * out:            [num_q_heads * head_dim] f32 output

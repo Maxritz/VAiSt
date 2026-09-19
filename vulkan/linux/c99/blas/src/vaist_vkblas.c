@@ -21,6 +21,12 @@ typedef struct VkBLASContext VkBLASContext;
 
 #define VKBLAS_MAGIC 0x564B424C
 
+typedef enum {
+    VKBLAS_QGEMM_Q8_0  = 0,
+    VKBLAS_QGEMM_NVFP4 = 1,
+    VKBLAS_QGEMM_T2_0  = 2,
+} VkBlasQgemmFlags;
+
 #ifdef VAIST_HAVE_VK_HDR
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_core.h>
@@ -38,35 +44,9 @@ typedef struct {
     VkDescriptorSet dset;
     VkPipelineLayout pipe_layout;
     VkPipeline pipeline;
+    VkShaderModule shader;
     VkCommandPool cmdpool;
     VkCommandBuffer cb;
-    PFN_vkCmdBindPipeline           CmdBindPipeline;
-    PFN_vkCmdBindDescriptorSets     CmdBindDescriptorSets;
-    PFN_vkCmdPushConstants           CmdPushConstants;
-    PFN_vkCmdDispatch                CmdDispatch;
-    PFN_vkCmdPipelineBarrier         CmdPipelineBarrier;
-    PFN_vkResetCommandBuffer        ResetCommandBuffer;
-    PFN_vkBeginCommandBuffer        BeginCommandBuffer;
-    PFN_vkEndCommandBuffer          EndCommandBuffer;
-    PFN_vkCreateCommandPool          CreateCommandPool;
-    PFN_vkDestroyCommandPool         DestroyCommandPool;
-    PFN_vkAllocateCommandBuffers     AllocateCommandBuffers;
-    PFN_vkCreateDescriptorPool       CreateDescriptorPool;
-    PFN_vkAllocateDescriptorSets     AllocateDescriptorSets;
-    PFN_vkUpdateDescriptorSets       UpdateDescriptorSets;
-    PFN_vkCreateDescriptorSetLayout  CreateDescriptorSetLayout;
-    PFN_vkDestroyDescriptorSetLayout DestroyDescriptorSetLayout;
-    PFN_vkCreateShaderModule         CreateShaderModule;
-    PFN_vkDestroyShaderModule        DestroyShaderModule;
-    PFN_vkCreatePipelineLayout       CreatePipelineLayout;
-    PFN_vkDestroyPipelineLayout      DestroyPipelineLayout;
-    PFN_vkCreateComputePipelines     CreateComputePipelines;
-    PFN_vkDestroyPipeline            DestroyPipeline;
-    PFN_vkCreateFence                CreateFence;
-    PFN_vkDestroyFence               DestroyFence;
-    PFN_vkWaitForFences              WaitForFences;
-    PFN_vkQueueSubmit                QueueSubmit;
-    PFN_vkDestroyDescriptorPool      DestroyDescriptorPool;
 } qgemm_slot;
 
 typedef qgemm_slot spec_slot;
@@ -88,17 +68,54 @@ typedef struct {
 #undef VkBLASContext
 struct VkBLASContext {
     uint32_t magic;
-    VkInstance instance;
     VkPhysicalDevice physical_device;
     VkDevice device;
     VkQueue queue;
     uint32_t qfamily;
     PFN_vkGetInstanceProcAddr gipa;
     PFN_vkGetDeviceProcAddr    gpda;
+    /* Context-level Vulkan procs (for pipeline/buffer lifecycle) */
+    PFN_vkCreateCommandPool            CreateCommandPool;
+    PFN_vkDestroyCommandPool           DestroyCommandPool;
+    PFN_vkAllocateCommandBuffers       AllocateCommandBuffers;
+    PFN_vkFreeCommandBuffers           FreeCommandBuffers;
+    PFN_vkResetCommandBuffer           ResetCommandBuffer;
+    PFN_vkBeginCommandBuffer           BeginCommandBuffer;
+    PFN_vkEndCommandBuffer             EndCommandBuffer;
+    PFN_vkCreateDescriptorPool         CreateDescriptorPool;
+    PFN_vkDestroyDescriptorPool        DestroyDescriptorPool;
+    PFN_vkAllocateDescriptorSets       AllocateDescriptorSets;
+    PFN_vkFreeDescriptorSets           FreeDescriptorSets;
+    PFN_vkUpdateDescriptorSets         UpdateDescriptorSets;
+    PFN_vkCreateDescriptorSetLayout    CreateDescriptorSetLayout;
+    PFN_vkDestroyDescriptorSetLayout   DestroyDescriptorSetLayout;
+    PFN_vkCreateShaderModule           CreateShaderModule;
+    PFN_vkDestroyShaderModule          DestroyShaderModule;
+    PFN_vkCreatePipelineLayout         CreatePipelineLayout;
+    PFN_vkDestroyPipelineLayout        DestroyPipelineLayout;
+    PFN_vkCreateComputePipelines       CreateComputePipelines;
+    PFN_vkDestroyPipeline              DestroyPipeline;
+    PFN_vkCreateFence                  CreateFence;
+    PFN_vkDestroyFence                 DestroyFence;
+    PFN_vkWaitForFences                WaitForFences;
+    PFN_vkQueueSubmit                  QueueSubmit;
+    PFN_vkQueueWaitIdle                QueueWaitIdle;
+    PFN_vkDestroyBuffer                DestroyBuffer;
+    PFN_vkFreeMemory                   FreeMemory;
+    PFN_vkDestroyDevice                DestroyDevice;
+    PFN_vkGetDeviceQueue               GetDeviceQueue;
+    /* Command functions (device procs via gdga) */
+    PFN_vkCmdBindPipeline              CmdBindPipeline;
+    PFN_vkCmdBindDescriptorSets        CmdBindDescriptorSets;
+    PFN_vkCmdPushConstants             CmdPushConstants;
+    PFN_vkCmdDispatch                  CmdDispatch;
+    PFN_vkCmdPipelineBarrier           CmdPipelineBarrier;
     qgemm_slot q8_0;
     qgemm_slot nvfp4;
     qgemm_slot t2_0;
     spec_slot spec_verify;
+    uint32_t shader_module_count;
+    VkShaderModule shader_modules[8];
 };
 
 /* ---- Set up qgemm pipeline (3 SSBO bindings) ---- */
@@ -123,12 +140,12 @@ static VkResult _init_qgemm_slot(VkBLASContext *ctx, qgemm_slot *s,
 
     VkShaderModuleCreateInfo smci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     smci.codeSize = spv_len * 4; smci.pCode = spv;
-    VK_CHECK(ctx->CreateShaderModule(ctx->device, &smci, NULL, &s->pipeline));
+    VK_CHECK(ctx->CreateShaderModule(ctx->device, &smci, NULL, &s->shader));
 
     VkComputePipelineCreateInfo cpci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     cpci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    cpci.stage.module = s->pipeline;
+    cpci.stage.module = s->shader;
     cpci.stage.pName = "main";
     cpci.layout = s->pipe_layout;
     r = ctx->CreateComputePipelines(ctx->device, VK_NULL_HANDLE, 1, &cpci, NULL, &s->pipeline);
@@ -177,12 +194,12 @@ static VkResult _init_spec_slot(VkBLASContext *ctx, spec_slot *s,
 
     VkShaderModuleCreateInfo smci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     smci.codeSize = spv_len * 4; smci.pCode = spv;
-    VK_CHECK(ctx->CreateShaderModule(ctx->device, &smci, NULL, &s->pipeline));
+    VK_CHECK(ctx->CreateShaderModule(ctx->device, &smci, NULL, &s->shader));
 
     VkComputePipelineCreateInfo cpci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     cpci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    cpci.stage.module = s->pipeline;
+    cpci.stage.module = s->shader;
     cpci.stage.pName = "main";
     cpci.layout = s->pipe_layout;
     VK_CHECK(ctx->CreateComputePipelines(ctx->device, VK_NULL_HANDLE, 1, &cpci, NULL, &s->pipeline));
@@ -220,24 +237,24 @@ static VkResult _dispatch(VkBLASContext *ctx, void *slot_v, int n_bindings,
     }
     ctx->UpdateDescriptorSets(ctx->device, (uint32_t)n_bindings, wds, 0, NULL);
 
-    s->ResetCommandBuffer(s->cb, 0);
+    ctx->ResetCommandBuffer(s->cb, 0);
     VkCommandBufferBeginInfo cbbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    VK_CHECK(s->BeginCommandBuffer(s->cb, &cbbi));
+    VK_CHECK(ctx->BeginCommandBuffer(s->cb, &cbbi));
 
-    s->CmdBindPipeline(s->cb, VK_PIPELINE_BIND_POINT_COMPUTE, s->pipeline);
-    s->CmdBindDescriptorSets(s->cb, VK_PIPELINE_BIND_POINT_COMPUTE, s->pipe_layout,
+    ctx->CmdBindPipeline(s->cb, VK_PIPELINE_BIND_POINT_COMPUTE, s->pipeline);
+    ctx->CmdBindDescriptorSets(s->cb, VK_PIPELINE_BIND_POINT_COMPUTE, s->pipe_layout,
         0, 1, &s->dset, 0, NULL);
-    s->CmdPushConstants(s->cb, s->pipe_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+    ctx->CmdPushConstants(s->cb, s->pipe_layout, VK_SHADER_STAGE_COMPUTE_BIT,
         0, (size_t)pc_size, pc);
-    s->CmdDispatch(s->cb, gx, gy, 1);
+    ctx->CmdDispatch(s->cb, gx, gy, 1);
 
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-    s->CmdPipelineBarrier(s->cb,
+    ctx->CmdPipelineBarrier(s->cb,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
         0, 1, &mb, 0, NULL, 0, NULL);
-    VK_CHECK(s->EndCommandBuffer(s->cb));
+    VK_CHECK(ctx->EndCommandBuffer(s->cb));
 
     VkFence f = VK_NULL_HANDLE;
     VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
@@ -253,55 +270,63 @@ static VkResult _dispatch(VkBLASContext *ctx, void *slot_v, int n_bindings,
 
 /* ---- Public API ---- */
 
-VkResult vkblas_create_context(VkInstance instance,
+VkResult vkblas_create_context(const VaistRuntime* rt,
     VkPhysicalDevice physicalDevice, VkDevice device, VkBLASContext** pContext)
 {
     if (!pContext) return VK_ERROR_INITIALIZATION_FAILED;
     *pContext = NULL;
+    if (!rt || !device) return VK_ERROR_INITIALIZATION_FAILED;
     VkBLASContext *ctx = (VkBLASContext *)calloc(1, sizeof(VkBLASContext));
     if (!ctx) return VK_ERROR_OUT_OF_HOST_MEMORY;
     ctx->magic = VKBLAS_MAGIC;
-    ctx->instance = instance;
     ctx->physical_device = physicalDevice;
     ctx->device = device;
 
-    /* Resolve device procs */
-    PFN_vkGetDeviceProcAddr gpda = (PFN_vkGetDeviceProcAddr)
-        ((PFN_vkGetInstanceProcAddr)vkGetInstanceProcAddr ? 
-         vkGetInstanceProcAddr(instance, "vkGetDeviceProcAddr") : NULL);
-    if (gpda) {
-        ctx->gpda = gpda;
-        ctx->CmdBindPipeline           = (PFN_vkCmdBindPipeline)gpda(device, "vkCmdBindPipeline");
-        ctx->CmdBindDescriptorSets     = (PFN_vkCmdBindDescriptorSets)gpda(device, "vkCmdBindDescriptorSets");
-        ctx->CmdPushConstants          = (PFN_vkCmdPushConstants)gpda(device, "vkCmdPushConstants");
-        ctx->CmdDispatch               = (PFN_vkCmdDispatch)gpda(device, "vkCmdDispatch");
-        ctx->CmdPipelineBarrier        = (PFN_vkCmdPipelineBarrier)gpda(device, "vkCmdPipelineBarrier");
-    }
-    if (vkGetInstanceProcAddr) {
-        ctx->gipa = vkGetInstanceProcAddr;
-        ctx->CreateCommandPool          = (PFN_vkCreateCommandPool)vkGetInstanceProcAddr(instance, "vkCreateCommandPool");
-        ctx->DestroyCommandPool         = (PFN_vkDestroyCommandPool)vkGetInstanceProcAddr(instance, "vkDestroyCommandPool");
-        ctx->AllocateCommandBuffers     = (PFN_vkAllocateCommandBuffers)vkGetInstanceProcAddr(instance, "vkAllocateCommandBuffers");
-        ctx->CreateDescriptorPool       = (PFN_vkCreateDescriptorPool)vkGetInstanceProcAddr(instance, "vkCreateDescriptorPool");
-        ctx->AllocateDescriptorSets     = (PFN_vkAllocateDescriptorSets)vkGetInstanceProcAddr(instance, "vkAllocateDescriptorSets");
-        ctx->UpdateDescriptorSets       = (PFN_vkUpdateDescriptorSets)vkGetInstanceProcAddr(instance, "vkUpdateDescriptorSets");
-        ctx->CreateDescriptorSetLayout  = (PFN_vkCreateDescriptorSetLayout)vkGetInstanceProcAddr(instance, "vkCreateDescriptorSetLayout");
-        ctx->DestroyDescriptorSetLayout = (PFN_vkDestroyDescriptorSetLayout)vkGetInstanceProcAddr(instance, "vkDestroyDescriptorSetLayout");
-        ctx->CreateShaderModule         = (PFN_vkCreateShaderModule)vkGetInstanceProcAddr(instance, "vkCreateShaderModule");
-        ctx->DestroyShaderModule        = (PFN_vkDestroyShaderModule)vkGetInstanceProcAddr(instance, "vkDestroyShaderModule");
-        ctx->CreatePipelineLayout       = (PFN_vkCreatePipelineLayout)vkGetInstanceProcAddr(instance, "vkCreatePipelineLayout");
-        ctx->DestroyPipelineLayout      = (PFN_vkDestroyPipelineLayout)vkGetInstanceProcAddr(instance, "vkDestroyPipelineLayout");
-        ctx->CreateComputePipelines     = (PFN_vkCreateComputePipelines)vkGetInstanceProcAddr(instance, "vkCreateComputePipelines");
-        ctx->DestroyPipeline            = (PFN_vkDestroyPipeline)vkGetInstanceProcAddr(instance, "vkDestroyPipeline");
-        ctx->CreateFence                = (PFN_vkCreateFence)vkGetInstanceProcAddr(instance, "vkCreateFence");
-        ctx->DestroyFence               = (PFN_vkDestroyFence)vkGetInstanceProcAddr(instance, "vkDestroyFence");
-        ctx->WaitForFences              = (PFN_vkWaitForFences)vkGetInstanceProcAddr(instance, "vkWaitForFences");
-        ctx->QueueSubmit                = (PFN_vkQueueSubmit)vkGetInstanceProcAddr(instance, "vkQueueSubmit");
+    /* Resolve all Vulkan procs through the runtime's loader (no libvulkan link needed) */
+    void* gipa_p = vaist_runtime_vk_proc(rt, "vkGetInstanceProcAddr");
+    ctx->gipa = (PFN_vkGetInstanceProcAddr)gipa_p;
+    if (!ctx->gipa) return VK_ERROR_INITIALIZATION_FAILED;
+    ctx->gpda = (PFN_vkGetDeviceProcAddr)ctx->gipa(NULL, "vkGetDeviceProcAddr");
+
+    /* Instance-level procs */
+    ctx->CreateCommandPool          = (PFN_vkCreateCommandPool)ctx->gipa(NULL, "vkCreateCommandPool");
+    ctx->DestroyCommandPool         = (PFN_vkDestroyCommandPool)ctx->gipa(NULL, "vkDestroyCommandPool");
+    ctx->AllocateCommandBuffers     = (PFN_vkAllocateCommandBuffers)ctx->gipa(NULL, "vkAllocateCommandBuffers");
+    ctx->FreeCommandBuffers         = (PFN_vkFreeCommandBuffers)ctx->gipa(NULL, "vkFreeCommandBuffers");
+    ctx->ResetCommandBuffer         = (PFN_vkResetCommandBuffer)ctx->gipa(NULL, "vkResetCommandBuffer");
+    ctx->BeginCommandBuffer         = (PFN_vkBeginCommandBuffer)ctx->gipa(NULL, "vkBeginCommandBuffer");
+    ctx->EndCommandBuffer           = (PFN_vkEndCommandBuffer)ctx->gipa(NULL, "vkEndCommandBuffer");
+    ctx->CreateDescriptorPool       = (PFN_vkCreateDescriptorPool)ctx->gipa(NULL, "vkCreateDescriptorPool");
+    ctx->DestroyDescriptorPool      = (PFN_vkDestroyDescriptorPool)ctx->gipa(NULL, "vkDestroyDescriptorPool");
+    ctx->AllocateDescriptorSets     = (PFN_vkAllocateDescriptorSets)ctx->gipa(NULL, "vkAllocateDescriptorSets");
+    ctx->FreeDescriptorSets         = (PFN_vkFreeDescriptorSets)ctx->gipa(NULL, "vkFreeDescriptorSets");
+    ctx->UpdateDescriptorSets       = (PFN_vkUpdateDescriptorSets)ctx->gipa(NULL, "vkUpdateDescriptorSets");
+    ctx->CreateDescriptorSetLayout  = (PFN_vkCreateDescriptorSetLayout)ctx->gipa(NULL, "vkCreateDescriptorSetLayout");
+    ctx->DestroyDescriptorSetLayout = (PFN_vkDestroyDescriptorSetLayout)ctx->gipa(NULL, "vkDestroyDescriptorSetLayout");
+    ctx->CreateShaderModule         = (PFN_vkCreateShaderModule)ctx->gipa(NULL, "vkCreateShaderModule");
+    ctx->DestroyShaderModule        = (PFN_vkDestroyShaderModule)ctx->gipa(NULL, "vkDestroyShaderModule");
+    ctx->CreatePipelineLayout       = (PFN_vkCreatePipelineLayout)ctx->gipa(NULL, "vkCreatePipelineLayout");
+    ctx->DestroyPipelineLayout      = (PFN_vkDestroyPipelineLayout)ctx->gipa(NULL, "vkDestroyPipelineLayout");
+    ctx->CreateComputePipelines     = (PFN_vkCreateComputePipelines)ctx->gipa(NULL, "vkCreateComputePipelines");
+    ctx->DestroyPipeline            = (PFN_vkDestroyPipeline)ctx->gipa(NULL, "vkDestroyPipeline");
+    ctx->CreateFence                = (PFN_vkCreateFence)ctx->gipa(NULL, "vkCreateFence");
+    ctx->DestroyFence               = (PFN_vkDestroyFence)ctx->gipa(NULL, "vkDestroyFence");
+    ctx->WaitForFences              = (PFN_vkWaitForFences)ctx->gipa(NULL, "vkWaitForFences");
+    ctx->QueueSubmit                = (PFN_vkQueueSubmit)ctx->gipa(NULL, "vkQueueSubmit");
+    ctx->QueueWaitIdle              = (PFN_vkQueueWaitIdle)ctx->gipa(NULL, "vkQueueWaitIdle");
+
+    /* Device-level procs (via gpda) */
+    if (ctx->gpda) {
+        ctx->CmdBindPipeline           = (PFN_vkCmdBindPipeline)ctx->gpda(device, "vkCmdBindPipeline");
+        ctx->CmdBindDescriptorSets     = (PFN_vkCmdBindDescriptorSets)ctx->gpda(device, "vkCmdBindDescriptorSets");
+        ctx->CmdPushConstants          = (PFN_vkCmdPushConstants)ctx->gpda(device, "vkCmdPushConstants");
+        ctx->CmdDispatch               = (PFN_vkCmdDispatch)ctx->gpda(device, "vkCmdDispatch");
+        ctx->CmdPipelineBarrier        = (PFN_vkCmdPipelineBarrier)ctx->gpda(device, "vkCmdPipelineBarrier");
+        ctx->GetDeviceQueue            = (PFN_vkGetDeviceQueue)ctx->gipa(NULL, "vkGetDeviceQueue");
     }
 
-    PFN_vkGetDeviceQueue get_q = (PFN_vkGetDeviceQueue)vkGetDeviceQueue;
-    if (get_q && device)
-        get_q(device, 0, 0, &ctx->queue);
+    if (ctx->GetDeviceQueue && device)
+        ctx->GetDeviceQueue(device, 0, 0, &ctx->queue);
 
     *pContext = ctx;
     return VK_SUCCESS;
@@ -309,13 +334,23 @@ VkResult vkblas_create_context(VkInstance instance,
 
 void vkblas_destroy_context(VkBLASContext* context) {
     if (!context || context->magic != VKBLAS_MAGIC) return;
-    /* Cleanup pipelines, descriptor pools, command pools */
-    if (context->q8_0.pool)      context->DestroyDescriptorPool(context->device, context->q8_0.pool, NULL);
-    if (context->q8_0.dsl)       context->DestroyDescriptorSetLayout(context->device, context->q8_0.dsl, NULL);
-    if (context->q8_0.pipe_layout) context->DestroyPipelineLayout(context->device, context->q8_0.pipe_layout, NULL);
-    if (context->q8_0.pipeline)  context->DestroyPipeline(context->device, context->q8_0.pipeline, NULL);
-    if (context->q8_0.cmdpool)   context->DestroyCommandPool(context->device, context->q8_0.cmdpool, NULL);
-    if (context->q8_0.shader)    context->DestroyShaderModule(context->device, context->q8_0.shader, NULL);
+    qgemm_slot *slots[] = { &context->q8_0, &context->nvfp4, &context->t2_0 };
+    for (int i = 0; i < 3; i++){
+        qgemm_slot *s = slots[i];
+        if (s->pool)      context->DestroyDescriptorPool(context->device, s->pool, NULL);
+        if (s->dsl)       context->DestroyDescriptorSetLayout(context->device, s->dsl, NULL);
+        if (s->pipe_layout) context->DestroyPipelineLayout(context->device, s->pipe_layout, NULL);
+        if (s->pipeline)  context->DestroyPipeline(context->device, s->pipeline, NULL);
+        if (s->shader)    context->DestroyShaderModule(context->device, s->shader, NULL);
+        if (s->cmdpool)   context->DestroyCommandPool(context->device, s->cmdpool, NULL);
+    }
+    spec_slot *s2 = &context->spec_verify;
+    if (s2->pool)      context->DestroyDescriptorPool(context->device, s2->pool, NULL);
+    if (s2->dsl)       context->DestroyDescriptorSetLayout(context->device, s2->dsl, NULL);
+    if (s2->pipe_layout) context->DestroyPipelineLayout(context->device, s2->pipe_layout, NULL);
+    if (s2->pipeline)  context->DestroyPipeline(context->device, s2->pipeline, NULL);
+    if (s2->shader)    context->DestroyShaderModule(context->device, s2->shader, NULL);
+    if (s2->cmdpool)   context->DestroyCommandPool(context->device, s2->cmdpool, NULL);
 
     free(context);
 }

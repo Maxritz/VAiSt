@@ -389,8 +389,9 @@ if(VAIST_ENABLE_VULKAN AND GLSLANG_VALIDATOR AND Python3_Interpreter_FOUND)
               "vaist_spv_qgemm_nvfp4"    "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_nvfp4.comp.spv"
               "vaist_spv_qgemm_t2_0"     "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/qgemm_t2_0.comp.spv"
               "vaist_spv_moe_route"      "${VAIST_SHADER_OUT_DIR}/vkblas/baseline/moe_route.comp.spv"
-             "vaist_spv_attn_flash_decode" "${VAIST_SHADER_OUT_DIR}/vkattn/baseline/attn_flash_decode.comp.spv"
-              "vaist_spv_attn_speculative" "${VAIST_SHADER_OUT_DIR}/vkattn/baseline/attn_speculative.comp.spv"
+              "vaist_spv_attn_flash_decode" "${VAIST_SHADER_OUT_DIR}/vkattn/baseline/attn_flash_decode.comp.spv"
+              "vaist_spv_attn_speculative"  "${VAIST_SHADER_OUT_DIR}/vkattn/baseline/attn_speculative.comp.spv"
+              "vaist_spv_attn_sparse_hierarchical" "${VAIST_SHADER_OUT_DIR}/vkattn/baseline/attn_sparse_hierarchical.comp.spv"
     DEPENDS ${VAIST_SPV}
     COMMENT "embed SPIR-V -> vaist_blas_spv.h" VERBATIM)
   add_custom_target(vaist_blas_spv_hdr DEPENDS "${VAIST_BLAS_SPV_HDR}")

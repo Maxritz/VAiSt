@@ -20,6 +20,7 @@ typedef struct {
     uint32_t    block_size;       // tokens per page (1, 16, 64...)
     uint32_t    max_blocks;       // max pages per sequence
     uint32_t    total_blocks;     // total cache pages in device memory
+    uint32_t    batch;            // batch size (for spec_verify dispatch)
     /* --- Hierarchical sparse attention (CSA2) --- */
     uint32_t    sparse_ratio;     // 0-100: fraction of tokens to attend to (0 = dense)
     uint32_t    block_stride;     // block size for hierarchical scoring (default: 16)
@@ -91,7 +92,7 @@ VAIST_API VaistStatus vaist_attn_spec_verify(vaist_attn_ctx* ctx,
  * \note USAGE: GPU compute primitive — does NOT dispatch from model forward
  *       pass automatically. Requires cfg.sparse_ratio > 0.
  */
- *
+/**
  * Uses the HISA pattern (hierarchical indexing) to reduce long-context scoring:
  *   1. Score all blocks (coarse), select top-K blocks
  *   2. Score tokens only within selected blocks (fine)
