@@ -5,6 +5,7 @@
 #include "vaist_quant.h"
 #include "vaist_graph.h"
 #include "vaist_model.h"
+#include "vaist_model_streaming.h"
 #include "vaist_nn.h"
 #include "vaist_llm.h"
 #include "vaist_engine.h"

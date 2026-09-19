@@ -62,9 +62,9 @@ VAiSt fixes this by starting from first principles:
 ```
 VAiSt
 ├── include/
-│   ├── vaist/              VAiSt public headers (17 files: umbrella vaist.h
+│   ├── vaist/              VAiSt public headers (18 files: umbrella vaist.h
 │   │   │                  + 12 component headers + vaist_attn.h, vaist_blas.h,
-│   │   │                  vaist_linalg.h, vaist_quant_tables.h)
+│   │   │                  vaist_linalg.h, vaist_model_streaming.h, vaist_quant_tables.h)
 │   ├── vkblas/           BLAS API (hipBLAS-compatible naming)
 │   ├── vkfft/            FFT API (rocFFT-compatible naming)
 │   ├── vkrand/           RNG + sampling API (rocrand-compatible naming)
@@ -133,16 +133,76 @@ Vulkan entry points through `runtime_sym`/`inst_proc` (`LoadLibraryA` +
 | `vaist_attn_create(rt, &cfg)` | Create a flash-decode attention context (shader, descriptor layout, pipeline, cmdpool, staging buffers) |
 | `vaist_attn_destroy(ctx)` | Tear down |
 | `vaist_attn_flash_decode(ctx, q, k_cache, v_cache, block_tables, seqlen, out)` | Dispatch paged-attention flash decode |
+| `vaist_attn_spec_verify(ctx, q, k_cache, v_cache, block_tables, draft_tokens, seqlen, n_active, out, verify_mask, spec_depth)` | Speculative decode verify attention (SpecForge pattern) |
 
 The `attn_flash_decode.comp` compute shader:
 - Binds 5 SSBOs: `q` (input query, f32), `k_cache` + `v_cache` (GPU buffers, fp16),
   `block_tables` (uint32 page indices), `out` (f32 output).
-- Push constants (32 bytes): `scale`, `head_dim`, `num_q_heads`, `num_kv_heads`,
-  `seqlen`, `max_blocks`, `block_size`, `q_head_idx`.
-- One workgroup per query head; each thread computes one output element via fused
-  softmax + weighted sum over the key/value cache.
+
+The `attn_speculative.comp` compute shader:
+- Binds 7 SSBOs: `q`, `k_cache`, `v_cache`, `block_tables`, `out`, `draft_tokens`,
+  `active_tokens` (uint32 verified token count per sequence).
+- Push constants (40 bytes): `scale`, `head_dim`, `num_heads`, `num_q_heads`,
+  `seqlen`, `max_blocks`, `block_size`, `q_head_base`, `verify_mask`, `spec_depth`.
+- Each workgroup = one (batch, head) pair; threads compute fused softmax + weighted V sum.
+- `verify_mask` bitmask skips non-candidate positions for efficiency.
+
+### VAiSt BLAS (`vaist_blas` + `vkblas`)
+
+| Function | Description |
+|----------|-------------|
+| `vaist_blas_gemm(ctx, A, B, C, m, k, n)` | Shared-mem tiled GEMM (fp32/f16/bf16/f64) |
+| `vaist_blas_vk_gemm(ctx, A, B, C, m, k, n)` | Vulkan GEMM dispatch (when device available) |
+| `vkblas_create_context(inst, pd, dev, &ctx)` | Create a VkBLASContext with lazy pipeline init |
+| `vkblas_destroy_context(ctx)` | Tear down all pipelines + descriptors |
+| `vkblas_qgemm_q8_0_f32(ctx, cmd, m, n, k, alpha, Wq, ldw, x, ldx, beta, y, ldy)` | Fused Q8_0 dequant + GEMM (sscalars, qgemm format code 5) |
+| `vkblas_qgemm_nvfp4_f32(ctx, ...)` | Fused NVFP4 dequant + GEMM (block 36B/64 elems, format code 12) |
+| `vkblas_qgemm_t2_0_f32(ctx, ...)` | Fused TQ2_0 ternary dequant + GEMM (block 66B/256 elems, format code 13) |
+| `vkblas_qgemm_get_tier(ctx, format)` | Query execution tier: 0=baseline, 1=subgroup, 2=coopmatrix |
+| `vkblas_gemm_spec_verify_f32(ctx, batch, num_heads, head_dim, seqlen, q_gpu, k_cache, v_cache, block_table, draft_tokens, active_tokens, out, verify_mask, spec_depth, scale)` | Speculative decode verify attention dispatch |
+
+Quantized GEMM shaders (`qgemm_nvfp4.comp`, `qgemm_t2_0.comp` in `shaders/vkblas/`):
+- On-the-fly dequantization in-shader (no weight materialization)
+- 3-binding descriptor set (Wq, x, y) + push constants (alpha, beta, m, n, k, ldw, ldx, ldy, flags)
+- NVFP4: 36 bytes per block of 64 (FP4 + FP8 scaling), workgroup 64-wide
+- TQ2_0: 66 bytes per block of 256 (ternary weights + 4-bit scales), workgroup 256-wide
+- Q8_0: 36 bytes per block of 32 (fp16 scale + 16 int4 weights)
 - On no Vulkan device (sandbox CPU-only), returns `VAIST_DEVICE_ERROR` so the
   caller falls back to CPU dequant + GEMM.
+
+### Model Streaming (`vaist_model` + `vaist_model_streaming`)
+
+| Function | Description |
+|----------|-------------|
+| `vaist_gguf_streaming_open(path, &cache)` | Open a GGUF file with mmap (no full load) |
+| `vaist_gguf_tensor_prefetch(cache, name, offset, size, quant_type)` | Stage tensor to host (async via thread pool) |
+| `vaist_gguf_tensor_to_gpu(cache, name)` | Evict LRU + upload to GPU buffer |
+| `vaist_gguf_tensor_evict_gpu(cache, name)` | Evict GPU buffer, free VRAM |
+| `vaist_gguf_streaming_tensor_read(cache, name, dst, cap)` | Dequantize fp32 output using stored `quant_type` |
+| `vaist_gguf_streaming_close(cache)` | Cleanup mmap + staging |
+
+**Architecture**: mirrors Edge0's `mmap.py` + `cache.py` pattern:
+- mmap the GGUF file — no upfront weight loading
+- LRU eviction with configurable `max_bytes` budget (tracks `resident_bytes`)
+- Async prefetch via thread pool (overlaps I/O with compute)
+- `VaistCacheEntry` stores `quant_type` (f32, q4_0, nvfp4, t2_0, q8_0...) → dequant dispatch via `vaist_dequantize_f32()`
+
+### `vaist-optim` (Python Shader/Kernel Optimizer)
+
+Located at `tools/vaist_optim/`. Auto-pipped during CMake configure.
+
+| Command | Purpose |
+|---------|---------|
+| `vaist-optim analyze shader.spv` | Parse SPIR-V without spirv-tools deps (custom header parser) |
+| `vaist-optim tune-gemm shader.spv --m M --n N --k K` | HipKittens-style tile tuning |
+| `vaist-optim tune-attn shader.spv --seq N --heads H --dim D` | Attention tile tuning |
+| `vaist-optim roofline --ms T --flops F --bytes-rd R --bytes-wr W` | Roofline model analysis |
+| `vaist-optim cache-stats [--cache-dir DIR]` | Inspect LRU shader cache (256 entries / 256 MB caps) |
+
+Shader cache (`shader_cache/`) mirrors FreeToken's kernel cache:
+- Hash-based keys: `sha256(source + compile_args + tile_config)[:16]`
+- LRU eviction, perf metadata stored as `.meta` sidecar
+- Auto-discovers GPU arch for tile presets (RDNA2: gfx1031, RDNA4: gfx1201, MI300X: gfx94)
 
 ### Runtime behaviour: child-process Vulkan probe
 
