@@ -159,10 +159,10 @@ Last gate run status (authoritative, from `ctest -C Release` summary):
 3. Eliminate per-op descriptor allocation, per-op command-buffer submit,
    validation readbacks, linear staging, and missing barriers that serialize
    ML workloads (single command buffer per pass, push descriptors everywhere).
-   4. Support **FP16, Q4_K, Q6_K, Q8_0, IQ4_XS, NVFP4, T2_0** weight quantization with shared
-   shader sources via compile-time specialization (209 `.comp` source shaders
-   compiling to 212 SPIR-V blobs across Wave32/Wave64 variants; per-lib counts:
-   vkblas 71, vkmath 74, vkquant 46, vkrand 4, vkfft 2, vkblas_l1l2 15, vkkv 1).
+    4. Support **FP16, Q4_K, Q6_K, Q8_0, IQ4_XS, NVFP4, T2_0** weight quantization with shared
+    shader sources via compile-time specialization (209 `.comp` source shaders
+    compiling to 212 SPIR-V blobs across Wave32/Wave64 variants; per-lib counts:
+    vkblas 73, vkmath 68, vkquant 44, vkrand 4, vkfft 2, vkblas_l1l2 15, vkkv 1).
 5. Keep all runtime allocation **stack/static** — no heap allocation in hot
    paths; contexts own pools for buffers, descriptors, and command lists.
 
